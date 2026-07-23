@@ -344,6 +344,98 @@ public class OrderTrackerTests
         Assert.False(t.TryGetActiveSideOrder("PETR4", isBuy: true, out _));
     }
 
+    [Fact]
+    public void TryRegisterCancelAttempt_SecondCallForSameOrder_FailsWithoutOverwriting()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+
+        // Simulates the staleness guard and the book-driven reactive path
+        // racing to cancel the same order concurrently — only the first
+        // registration must win.
+        Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL));
+        Assert.False(t.TryRegisterCancelAttempt(cancelClOrdId: 91UL, origClOrdId: 1UL));
+
+        Assert.True(t.TryResolveCancelAttempt(90UL, out var linked));
+        Assert.Equal(1UL, linked);
+        Assert.False(t.TryResolveCancelAttempt(91UL, out _));
+    }
+
+    [Fact]
+    public void TryRegisterCancelAttempt_AfterPendingCancelCleared_CanRegisterAgain()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL));
+        t.ClearPendingCancel(1UL);
+
+        Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 91UL, origClOrdId: 1UL));
+    }
+
+    [Fact]
+    public void TryRegisterCancelAttempt_UnknownOrigClOrdId_ReturnsFalse()
+    {
+        var t = new OrderTracker();
+        Assert.False(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 999UL));
+    }
+
+    [Fact]
+    public void PruneClosed_RemovesOldClosedOrdersAndTheirCancelAttempts()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL);
+        t.OnTerminal(1UL); // Close() clears PendingCancelClOrdId as part of closing.
+
+        clock.Advance(TimeSpan.FromMinutes(10));
+        t.PruneClosed(TimeSpan.FromMinutes(5), t.UtcNow);
+
+        Assert.False(t.TryGet(1UL, out _));
+        Assert.False(t.TryResolveCancelAttempt(90UL, out _));
+    }
+
+    [Fact]
+    public void PruneClosed_SkipsOpenOrder()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+
+        clock.Advance(TimeSpan.FromMinutes(10));
+        t.PruneClosed(TimeSpan.FromMinutes(5), t.UtcNow);
+
+        Assert.True(t.TryGet(1UL, out _));
+    }
+
+    [Fact]
+    public void PruneClosed_SkipsClosedOrderYoungerThanRetention()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.OnTerminal(1UL);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        t.PruneClosed(TimeSpan.FromMinutes(5), t.UtcNow);
+
+        Assert.True(t.TryGet(1UL, out _));
+    }
+
+    [Fact]
+    public void RegisterCancelAttempt_SetsLastCancelAttemptAtUtc()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        t.RegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL);
+
+        Assert.True(t.TryGet(1UL, out var order));
+        Assert.Equal(clock.GetUtcNow(), order.LastCancelAttemptAtUtc);
+    }
+
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now;

@@ -197,7 +197,38 @@ public sealed class OrderTracker
     {
         _cancelAttempts[cancelClOrdId] = origClOrdId;
         if (_orders.TryGetValue(origClOrdId, out var order))
+            lock (order)
+            {
+                order.PendingCancelClOrdId = cancelClOrdId;
+                order.LastCancelAttemptAtUtc = _clock.GetUtcNow();
+            }
+    }
+
+    /// <summary>
+    /// Atomic check-and-set variant of <see cref="RegisterCancelAttempt"/>:
+    /// registers the cancel attempt only if — and only if — no cancel is
+    /// already pending for <paramref name="origClOrdId"/>. RFC #703's
+    /// book-driven reactive requote path (<c>MarketMakerWorker.ReactToBookChangeAsync</c>)
+    /// runs concurrently with the pre-existing staleness guard
+    /// (<c>CancelStaleOrdersAsync</c>) on a separate loop; without this
+    /// atomicity, both could observe <c>PendingCancelClOrdId == null</c>
+    /// for the same order and each submit a distinct CancelOrderRequest
+    /// for it — two cancels racing the venue for one order, only one of
+    /// which the correlation table (last write wins) could ever resolve.
+    /// Returns <c>false</c> (registering nothing) when a cancel is
+    /// already outstanding, so the caller skips submitting a second one.
+    /// </summary>
+    public bool TryRegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId)
+    {
+        if (!_orders.TryGetValue(origClOrdId, out var order)) return false;
+        lock (order)
+        {
+            if (order.PendingCancelClOrdId is not null) return false;
             order.PendingCancelClOrdId = cancelClOrdId;
+            order.LastCancelAttemptAtUtc = _clock.GetUtcNow();
+        }
+        _cancelAttempts[cancelClOrdId] = origClOrdId;
+        return true;
     }
 
     /// <summary>True when <paramref name="clOrdId"/> is a cancel request
@@ -244,7 +275,7 @@ public sealed class OrderTracker
     public void ClearPendingCancel(ulong origClOrdId)
     {
         if (_orders.TryGetValue(origClOrdId, out var order))
-            order.PendingCancelClOrdId = null;
+            lock (order) { order.PendingCancelClOrdId = null; }
     }
 
     /// <summary>
@@ -258,8 +289,12 @@ public sealed class OrderTracker
     /// </summary>
     public void ClearPendingCancelIfMatches(ulong origClOrdId, ulong expectedCancelClOrdId)
     {
-        if (_orders.TryGetValue(origClOrdId, out var order) && order.PendingCancelClOrdId == expectedCancelClOrdId)
-            order.PendingCancelClOrdId = null;
+        if (_orders.TryGetValue(origClOrdId, out var order))
+            lock (order)
+            {
+                if (order.PendingCancelClOrdId == expectedCancelClOrdId)
+                    order.PendingCancelClOrdId = null;
+            }
     }
 
     public void OnAccepted(ulong clOrdId, long leaves)
@@ -299,7 +334,7 @@ public sealed class OrderTracker
     private void Close(TrackedOrder o)
     {
         o.IsOpen = false;
-        o.PendingCancelClOrdId = null;
+        lock (o) { o.PendingCancelClOrdId = null; }
         if (o.OrderId is { } orderId) _ownOrderIds.TryRemove(orderId, out _);
         lock (_sideLock)
         {
@@ -307,6 +342,44 @@ public sealed class OrderTracker
             if (_activeSideOwners.TryGetValue(side, out var owner) && owner == o.ClOrdId)
                 _activeSideOwners.Remove(side);
         }
+    }
+
+    /// <summary>
+    /// Periodic housekeeping: evicts fully-resolved closed orders (and any
+    /// <see cref="_cancelAttempts"/> entries pointing at them) once
+    /// they're older than <paramref name="retention"/>. RFC #703's
+    /// book-driven reactive requote path makes cancel/resubmit cycles
+    /// common rather than rare (unlike the occasional staleness-guard
+    /// cancel #705 accepted leaving <see cref="_orders"/>/<see
+    /// cref="_cancelAttempts"/> unbounded for), so a long-running process
+    /// quoting a volatile book needs this to avoid unbounded growth and
+    /// the resulting O(n) slowdown in <see cref="OpenCount"/>/<see
+    /// cref="FindStale"/>. Skips any order with a still-outstanding
+    /// pending cancel, however old, since its correlation entry is still
+    /// needed to resolve the eventual ER.
+    /// </summary>
+    public void PruneClosed(TimeSpan retention, DateTimeOffset now)
+    {
+        List<ulong>? toRemove = null;
+        foreach (var kv in _orders)
+        {
+            var o = kv.Value;
+            if (!o.IsOpen && o.PendingCancelClOrdId is null && now - o.SubmittedAtUtc > retention)
+                (toRemove ??= new List<ulong>()).Add(kv.Key);
+        }
+        if (toRemove is not null)
+            foreach (var id in toRemove)
+                _orders.TryRemove(id, out _);
+
+        List<ulong>? staleAttempts = null;
+        foreach (var kv in _cancelAttempts)
+        {
+            if (!_orders.ContainsKey(kv.Value))
+                (staleAttempts ??= new List<ulong>()).Add(kv.Key);
+        }
+        if (staleAttempts is not null)
+            foreach (var id in staleAttempts)
+                _cancelAttempts.TryRemove(id, out _);
     }
 }
 
@@ -324,6 +397,13 @@ public sealed class TrackedOrder
     /// order, if any — see <see cref="OrderTracker.RegisterCancelAttempt"/>.
     /// Null means no cancel is currently in flight for this order.</summary>
     public ulong? PendingCancelClOrdId { get; set; }
+    /// <summary>UTC time of the most recent <see cref="OrderTracker.RegisterCancelAttempt"/>/
+    /// <see cref="OrderTracker.TryRegisterCancelAttempt"/> for this order,
+    /// if any. Used (rather than <see cref="SubmittedAtUtc"/>) to throttle
+    /// the book-driven reactive requote path so a synchronously-failed or
+    /// rejected cancel — which frees <see cref="PendingCancelClOrdId"/>
+    /// immediately — can't be retried on every subsequent book delta.</summary>
+    public DateTimeOffset? LastCancelAttemptAtUtc { get; set; }
     /// <summary>The venue's own order identifier, once learned from an ER
     /// — see <see cref="OrderTracker.SetOrderId"/>. Null until the first
     /// ER for this ClOrdID arrives.</summary>

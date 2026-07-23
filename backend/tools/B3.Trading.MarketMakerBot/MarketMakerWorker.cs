@@ -290,6 +290,11 @@ internal sealed class MarketMakerWorker : BackgroundService
             catch (OperationCanceledException) { return; }
 
             await CancelStaleOrdersAsync(client, ct);
+            // RFC #703 book-driven quoting makes cancel/resubmit cycles
+            // common rather than rare, so tracker housekeeping now runs
+            // every reconcile tick too — see OrderTracker.PruneClosed's
+            // doc comment for why this became necessary.
+            _tracker.PruneClosed(_options.MaxOrderAge, _tracker.UtcNow);
 
             foreach (var instr in _options.Instruments)
             {
@@ -355,7 +360,19 @@ internal sealed class MarketMakerWorker : BackgroundService
         // Self-order filter: a delta the bot's OWN resting order caused
         // (its own submit/cancel/fill landing in the book) must not
         // trigger a reactive requote of itself — see
-        // OrderTracker.IsOwnOrder's doc comment.
+        // OrderTracker.IsOwnOrder's doc comment. This is inherently
+        // best-effort, NOT a hard guarantee: FIXP (order acks) and
+        // market-data (book deltas) are two independent feeds with no
+        // shared sequencing, so a fast MD callback can observe our own
+        // OrderAdded/OrderDeleted before OrderTracker.SetOrderId has
+        // learned the OrderId (on submit) or before it's forgotten it
+        // (on Close, just after cancel/fill) — in both windows
+        // IsOwnOrder(orderId) misses and the delta is (harmlessly)
+        // treated as external. ReactToBookChangeAsync only ever cancels
+        // a side once its resting price has genuinely drifted past
+        // RequoteDeviationTicks from a fresh target, so a spuriously
+        // "external" self-delta just causes one extra no-op evaluation,
+        // never an incorrect cancel.
         if (_tracker.IsOwnOrder(orderId)) return;
         if (_pendingBookSignals.TryAdd(symbol, 0))
             _bookSignals.Writer.TryWrite(symbol);
@@ -410,7 +427,16 @@ internal sealed class MarketMakerWorker : BackgroundService
         {
             if (!_tracker.TryGetActiveSideOrder(symbol, isBuy, out var resting)) continue;
             if (resting.PendingCancelClOrdId is not null) continue;
-            if (now - resting.SubmittedAtUtc < _options.MinRequoteInterval) continue;
+            // Throttled from the last CANCEL ATTEMPT, not from the
+            // order's own submission time: a synchronously-failed or
+            // rejected cancel frees PendingCancelClOrdId immediately (see
+            // SubmitCancelAsync / HandleEventAsync's OrderRejected case),
+            // and SubmittedAtUtc would otherwise already be far in the
+            // past for a long-resting order — letting every subsequent
+            // book delta retry the cancel with no real throttle at all,
+            // the exact venue-flooding shape RFC #703 exists to prevent.
+            var lastActivity = resting.LastCancelAttemptAtUtc ?? resting.SubmittedAtUtc;
+            if (now - lastActivity < _options.MinRequoteInterval) continue;
 
             var target = QuoteCalculator.ComputeQuotePrice(instr, isBuy, refPrice);
             if (target <= 0m) continue;
@@ -430,19 +456,24 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     /// <summary>
     /// Shared cancel-submit path for both the staleness guard and the
-    /// book-driven reactive requote: registers the cancel-attempt
-    /// correlation BEFORE the SDK await (see <see cref="OrderTracker.RegisterCancelAttempt"/>'s
-    /// doc comment on why), sends the request, and on synchronous failure
-    /// clears the pending-cancel marker it just set so the order isn't
-    /// permanently hidden from future guards. Returns whether the cancel
-    /// was accepted for transmission; callers add their own
-    /// reason-specific success metric/log.
+    /// book-driven reactive requote: atomically registers the
+    /// cancel-attempt correlation BEFORE the SDK await (see <see
+    /// cref="OrderTracker.TryRegisterCancelAttempt"/>'s doc comment on
+    /// why atomicity matters here specifically — the staleness guard and
+    /// the reactive path run on separate concurrent loops and could
+    /// otherwise both target the same order), sends the request, and on
+    /// synchronous failure clears the pending-cancel marker it just set
+    /// so the order isn't permanently hidden from future guards. Returns
+    /// whether the cancel was accepted for transmission (false also when
+    /// a cancel was already outstanding for this order from the OTHER
+    /// path); callers add their own reason-specific success metric/log.
     /// </summary>
     private async Task<bool> SubmitCancelAsync(EntryPointClient client, TrackedOrder o, InstrumentConfig instr,
         System.Diagnostics.Metrics.Counter<long> submitFailedMetric, CancellationToken ct)
     {
         var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
-        _tracker.RegisterCancelAttempt(cancelClOrdId, o.ClOrdId);
+        if (!_tracker.TryRegisterCancelAttempt(cancelClOrdId, o.ClOrdId))
+            return false;
         var req = new UpModels.CancelOrderRequest
         {
             ClOrdID = new UpModels.ClOrdID(cancelClOrdId),
