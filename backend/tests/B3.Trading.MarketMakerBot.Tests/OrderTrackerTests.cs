@@ -362,6 +362,31 @@ public class OrderTrackerTests
     }
 
     [Fact]
+    public void TryResolveCancelAttempt_ReportsWhichTriggerRaisedTheCancel()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterSubmit(2UL, "PETR4", 30m, 100, isBuy: false);
+
+        // Staleness-guard cancels default to isBookDriven: false.
+        Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL));
+        // Book-driven reactive cancels are explicitly tagged true — this
+        // is how MarketMakerWorker.HandleEventAsync's OrderRejected case
+        // tells a stale-order cancel reject apart from a book-driven
+        // requote cancel reject once both share the same submit path.
+        Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 91UL, origClOrdId: 2UL,
+            minIntervalSinceLastAttempt: null, isBookDriven: true));
+
+        Assert.True(t.TryResolveCancelAttempt(90UL, out var origA, out var isBookDrivenA));
+        Assert.Equal(1UL, origA);
+        Assert.False(isBookDrivenA);
+
+        Assert.True(t.TryResolveCancelAttempt(91UL, out var origB, out var isBookDrivenB));
+        Assert.Equal(2UL, origB);
+        Assert.True(isBookDrivenB);
+    }
+
+    [Fact]
     public void TryRegisterCancelAttempt_AfterPendingCancelCleared_CanRegisterAgain()
     {
         var t = new OrderTracker();

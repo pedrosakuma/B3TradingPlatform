@@ -32,7 +32,7 @@ public sealed class OrderTracker
     // lookup table, consulted only from OrderRejected handling (see
     // MarketMakerWorker.HandleEventAsync), since OrderCancelled already
     // carries the original id directly via OrigClOrdID.
-    private readonly ConcurrentDictionary<ulong, ulong> _cancelAttempts = new();
+    private readonly ConcurrentDictionary<ulong, CancelAttempt> _cancelAttempts = new();
     // Tracks which ClOrdId currently owns each (symbol, side) reservation,
     // so a duplicate/racing terminal ER for an order that has already been
     // superseded by a newer reservation on the same side can't free a slot
@@ -193,9 +193,9 @@ public sealed class OrderTracker
     /// a duplicate order alongside it — the exact failure mode RFC #703
     /// exists to prevent).
     /// </summary>
-    public void RegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId)
+    public void RegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId, bool isBookDriven = false)
     {
-        _cancelAttempts[cancelClOrdId] = origClOrdId;
+        _cancelAttempts[cancelClOrdId] = new CancelAttempt(origClOrdId, isBookDriven);
         if (_orders.TryGetValue(origClOrdId, out var order))
             lock (order)
             {
@@ -225,11 +225,16 @@ public sealed class OrderTracker
     /// already-terminal <see cref="TrackedOrder"/> reference (e.g. from a
     /// <c>FindStale</c> snapshot) picking up a fresh cancel attempt after
     /// a concurrent fill/cancel has already closed it via <see cref="Close"/>.
+    /// <paramref name="isBookDriven"/> is stamped onto the correlation row
+    /// so a later reject can be attributed to the correct trigger (see
+    /// <see cref="TryResolveCancelAttempt"/>) instead of the staleness
+    /// guard and the reactive path being indistinguishable once both
+    /// funnel through the same shared submit helper.
     /// Returns <c>false</c> (registering nothing) when any guard fails, so
     /// the caller skips submitting a cancel altogether.
     /// </summary>
     public bool TryRegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId,
-        TimeSpan? minIntervalSinceLastAttempt = null)
+        TimeSpan? minIntervalSinceLastAttempt = null, bool isBookDriven = false)
     {
         if (!_orders.TryGetValue(origClOrdId, out var order)) return false;
         lock (order)
@@ -244,16 +249,37 @@ public sealed class OrderTracker
             order.PendingCancelClOrdId = cancelClOrdId;
             order.LastCancelAttemptAtUtc = now;
         }
-        _cancelAttempts[cancelClOrdId] = origClOrdId;
+        _cancelAttempts[cancelClOrdId] = new CancelAttempt(origClOrdId, isBookDriven);
         return true;
     }
 
     /// <summary>True when <paramref name="clOrdId"/> is a cancel request
-    /// the bot itself generated (via <see cref="RegisterCancelAttempt"/>),
-    /// with <paramref name="origClOrdId"/> set to the order it targeted.
+    /// the bot itself generated (via <see cref="RegisterCancelAttempt"/>
+    /// or <see cref="TryRegisterCancelAttempt"/>), with <paramref
+    /// name="origClOrdId"/> set to the order it targeted and <paramref
+    /// name="isBookDriven"/> set to which trigger raised it — used by
+    /// <c>MarketMakerWorker.HandleEventAsync</c>'s OrderRejected case to
+    /// attribute the reject to the right metric/log instead of always
+    /// reporting it as a stale-order cancel reject now that both
+    /// triggers share the same submit path.
     /// </summary>
+    public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId, out bool isBookDriven)
+    {
+        if (_cancelAttempts.TryGetValue(clOrdId, out var attempt))
+        {
+            origClOrdId = attempt.OrigClOrdId;
+            isBookDriven = attempt.IsBookDriven;
+            return true;
+        }
+        origClOrdId = 0;
+        isBookDriven = false;
+        return false;
+    }
+
+    /// <summary>Convenience overload for callers that don't need the
+    /// trigger tag.</summary>
     public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId) =>
-        _cancelAttempts.TryGetValue(clOrdId, out origClOrdId);
+        TryResolveCancelAttempt(clOrdId, out origClOrdId, out _);
 
     /// <summary>
     /// Records the venue's own OrderId for a tracked order, learned from
@@ -406,7 +432,7 @@ public sealed class OrderTracker
         List<ulong>? staleAttempts = null;
         foreach (var kv in _cancelAttempts)
         {
-            if (!_orders.ContainsKey(kv.Value))
+            if (!_orders.ContainsKey(kv.Value.OrigClOrdId))
                 (staleAttempts ??= new List<ulong>()).Add(kv.Key);
         }
         if (staleAttempts is not null)
@@ -414,6 +440,11 @@ public sealed class OrderTracker
                 _cancelAttempts.TryRemove(id, out _);
     }
 }
+
+/// <summary>Correlation row for a cancel REQUEST's own ClOrdId → the
+/// original order it targets, tagged with which trigger raised it (see
+/// <see cref="OrderTracker.TryResolveCancelAttempt(ulong, out ulong, out bool)"/>).</summary>
+internal readonly record struct CancelAttempt(ulong OrigClOrdId, bool IsBookDriven);
 
 public sealed class TrackedOrder
 {

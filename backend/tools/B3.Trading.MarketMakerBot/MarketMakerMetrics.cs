@@ -84,4 +84,14 @@ public static class MarketMakerMetrics
     /// <c>{symbol}</c>.</summary>
     public static readonly Counter<long> BookDrivenRequoteSubmitFailed =
         Meter.CreateCounter<long>("bot.orders.book_driven_requote_submit_failed");
+
+    /// <summary>RFC #703 book-driven quoting: the venue rejected a
+    /// reactive cancel request raised by
+    /// <c>MarketMakerWorker.ReactToBookChangeAsync</c>. Distinct from
+    /// <see cref="StaleCancelRejected"/> so a routine book-driven
+    /// requote race (e.g. the order filled or was already being
+    /// cancelled by the staleness guard) isn't misreported as the
+    /// miss-fill safety net itself failing. Tagged <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> BookDrivenRequoteCancelRejected =
+        Meter.CreateCounter<long>("bot.orders.book_driven_requote_cancel_rejected");
 }

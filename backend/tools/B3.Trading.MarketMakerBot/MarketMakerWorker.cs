@@ -214,11 +214,12 @@ internal sealed class MarketMakerWorker : BackgroundService
             case UpModels.OrderRejected r:
                 {
                     // A reject of a bot-generated cancel request (see
-                    // CancelStaleOrdersAsync) has no OrigClOrdID field to
-                    // fall back on like OrderCancelled does, so it's
-                    // otherwise indistinguishable from a rejected NEW
-                    // order submit. Resolve it via the correlation table
-                    // and deliberately do NOT free the original order's
+                    // CancelStaleOrdersAsync / ReactToBookChangeAsync) has
+                    // no OrigClOrdID field to fall back on like
+                    // OrderCancelled does, so it's otherwise
+                    // indistinguishable from a rejected NEW order submit.
+                    // Resolve it via the correlation table and
+                    // deliberately do NOT free the original order's
                     // reservation: if it's still genuinely resting,
                     // closing it here would let the next reconcile tick
                     // submit a duplicate order alongside it — the exact
@@ -230,21 +231,40 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // cancel-on-disconnect and a fresh OrderTracker clear
                     // the stuck state. A stuck side is an acceptable
                     // trade-off against a duplicated resting order.
-                    if (_tracker.TryResolveCancelAttempt(r.ClOrdID.Value, out var origClOrdId))
+                    if (_tracker.TryResolveCancelAttempt(r.ClOrdID.Value, out var origClOrdId, out var wasBookDriven))
                     {
                         // Clear the pending-cancel marker (NOT the order
                         // itself — see rationale above) so the next
-                        // reconcile tick is free to retry the cancel
-                        // instead of treating one as permanently
-                        // outstanding.
+                        // reconcile tick / book delta is free to retry
+                        // the cancel instead of treating one as
+                        // permanently outstanding.
                         _tracker.ClearPendingCancel(origClOrdId);
                         var stuckKnown = _tracker.TryGet(origClOrdId, out var stuck);
                         var stuckSymbol = stuckKnown ? stuck.Symbol : "?";
-                        MarketMakerMetrics.StaleCancelRejected.Add(1,
-                            new KeyValuePair<string, object?>("symbol", stuckSymbol));
-                        _log.LogWarning(
-                            "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
-                            origClOrdId, r.Reason);
+                        // Attributed to the trigger that actually raised
+                        // this cancel — both CancelStaleOrdersAsync and
+                        // ReactToBookChangeAsync share SubmitCancelAsync,
+                        // so without this tag a routine book-driven
+                        // requote race would otherwise always be
+                        // misreported as the miss-fill safety net itself
+                        // failing (see MarketMakerMetrics.StaleCancelRejected's
+                        // doc comment: "should normally stay at zero").
+                        if (wasBookDriven)
+                        {
+                            MarketMakerMetrics.BookDrivenRequoteCancelRejected.Add(1,
+                                new KeyValuePair<string, object?>("symbol", stuckSymbol));
+                            _log.LogInformation(
+                                "[mm] book-driven requote cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
+                                origClOrdId, r.Reason);
+                        }
+                        else
+                        {
+                            MarketMakerMetrics.StaleCancelRejected.Add(1,
+                                new KeyValuePair<string, object?>("symbol", stuckSymbol));
+                            _log.LogWarning(
+                                "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
+                                origClOrdId, r.Reason);
+                        }
                         break;
                     }
                     var known = _tracker.TryGet(r.ClOrdID.Value, out var o);
@@ -440,7 +460,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
 
             if (await SubmitCancelAsync(client, resting, instr, MarketMakerMetrics.BookDrivenRequoteSubmitFailed, ct,
-                    _options.MinRequoteInterval))
+                    _options.MinRequoteInterval, isBookDriven: true))
             {
                 MarketMakerMetrics.BookDrivenRequotes.Add(1,
                     new KeyValuePair<string, object?>("symbol", symbol),
@@ -467,18 +487,23 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// than only by a separate pre-call check in the caller, so a
     /// concurrent register/clear on another thread can't leave the
     /// caller's own throttle decision stale by the time this actually
-    /// commits. Returns whether the cancel was accepted for transmission
-    /// (false also when a cancel was already outstanding for this order
-    /// from the OTHER path, the order had already closed, or the interval
-    /// hadn't elapsed); callers add their own reason-specific success
-    /// metric/log.
+    /// commits. <paramref name="isBookDriven"/> is stamped onto the
+    /// correlation row so a later OrderRejected can be attributed to the
+    /// right trigger (see <see cref="OrderTracker.TryResolveCancelAttempt(ulong, out ulong, out bool)"/>
+    /// and <see cref="HandleEventAsync"/>'s OrderRejected case) instead of
+    /// always being reported as a stale-order cancel reject now that both
+    /// triggers share this same submit path. Returns whether the cancel
+    /// was accepted for transmission (false also when a cancel was
+    /// already outstanding for this order from the OTHER path, the order
+    /// had already closed, or the interval hadn't elapsed); callers add
+    /// their own reason-specific success metric/log.
     /// </summary>
     private async Task<bool> SubmitCancelAsync(EntryPointClient client, TrackedOrder o, InstrumentConfig instr,
         System.Diagnostics.Metrics.Counter<long> submitFailedMetric, CancellationToken ct,
-        TimeSpan? minIntervalSinceLastAttempt = null)
+        TimeSpan? minIntervalSinceLastAttempt = null, bool isBookDriven = false)
     {
         var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
-        if (!_tracker.TryRegisterCancelAttempt(cancelClOrdId, o.ClOrdId, minIntervalSinceLastAttempt))
+        if (!_tracker.TryRegisterCancelAttempt(cancelClOrdId, o.ClOrdId, minIntervalSinceLastAttempt, isBookDriven))
             return false;
         var req = new UpModels.CancelOrderRequest
         {
