@@ -1800,11 +1800,11 @@ export function setTicketSubmitting(submitting) {
 }
 
 export function clearTicket() {
-  const symbol = $("ticket-symbol");
-  symbol.value = "";
-  delete symbol.dataset.securityId;
-  delete symbol.dataset.instrumentSymbol;
-  delete symbol.dataset.metadataFetchedAt;
+  // #symbol-persist: the symbol is driven by the watchlist/chart
+  // selection above the ticket, not typed fresh per order — traders
+  // routinely submit several orders in a row on the same instrument,
+  // so a successful submit only clears qty/price/conditionals and
+  // leaves the symbol (and its resolved instrument metadata) in place.
   $("ticket-qty").value = "";
   $("ticket-price").value = "";
   // Q1.4 (#256). Reset the conditional inputs too so a subsequent
