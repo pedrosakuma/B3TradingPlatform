@@ -172,7 +172,7 @@ public class OrderTrackerTests
     }
 
     [Fact]
-    public void RegisterCancelAttempt_AliasesToOriginalOrder()
+    public void RegisterCancelAttempt_ResolvesBackToOriginalOrder()
     {
         var t = new OrderTracker();
         t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
@@ -180,24 +180,37 @@ public class OrderTrackerTests
         // Simulate the bot sending an explicit cancel with a fresh ClOrdID.
         t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
 
-        // A reject of the cancel request (which carries ITS OWN ClOrdID,
-        // not the original order's — see OrderRejected's shape) must
-        // still resolve back to the original order and free its side.
-        Assert.True(t.TryGet(99UL, out var aliased));
-        Assert.Equal("PETR4", aliased.Symbol);
-        Assert.True(aliased.IsBuy);
+        Assert.True(t.TryResolveCancelAttempt(99UL, out var origId));
+        Assert.Equal(1UL, origId);
 
-        t.OnTerminal(99UL);
-        Assert.False(t.HasOpenSide("PETR4", isBuy: true));
-        Assert.Equal(0, t.InFlightCount("PETR4"));
+        // Registering a cancel attempt must NOT create a second entry in
+        // the primary order collection — otherwise OpenCount/InFlightCount
+        // /FindStale would double-count the same resting order (it's
+        // still just ONE order, referenced by two different ClOrdIDs).
+        Assert.False(t.TryGet(99UL, out _));
+        Assert.Equal(1, t.OpenCount());
+        Assert.Equal(1, t.InFlightCount("PETR4"));
     }
 
     [Fact]
-    public void RegisterCancelAttempt_UnknownOriginalId_IsNoOp()
+    public void RegisterCancelAttempt_UnresolvedId_TryResolveReturnsFalse()
     {
         var t = new OrderTracker();
+        Assert.False(t.TryResolveCancelAttempt(99UL, out _));
+    }
+
+    [Fact]
+    public void FindStale_DoesNotDoubleCount_AfterCancelAttemptRegistered()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
         t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
-        Assert.False(t.TryGet(99UL, out _));
+        clock.Advance(TimeSpan.FromMinutes(10));
+
+        var stale = t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow);
+        Assert.Single(stale);
+        Assert.Equal(1UL, stale[0].ClOrdId);
     }
 
     private sealed class FakeClock : TimeProvider

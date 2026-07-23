@@ -191,6 +191,34 @@ internal sealed class MarketMakerWorker : BackgroundService
                 }
             case UpModels.OrderRejected r:
                 {
+                    // A reject of a bot-generated cancel request (see
+                    // CancelStaleOrdersAsync) has no OrigClOrdID field to
+                    // fall back on like OrderCancelled does, so it's
+                    // otherwise indistinguishable from a rejected NEW
+                    // order submit. Resolve it via the correlation table
+                    // and deliberately do NOT free the original order's
+                    // reservation: if it's still genuinely resting,
+                    // closing it here would let the next reconcile tick
+                    // submit a duplicate order alongside it — the exact
+                    // venue-flooding failure mode RFC #703 exists to
+                    // prevent. Worst case if this really was a miss-fill
+                    // (order already gone at the venue): that side stays
+                    // marked "open" — blocking further quoting on it —
+                    // until the bot restarts, at which point
+                    // cancel-on-disconnect and a fresh OrderTracker clear
+                    // the stuck state. A stuck side is an acceptable
+                    // trade-off against a duplicated resting order.
+                    if (_tracker.TryResolveCancelAttempt(r.ClOrdID.Value, out var origClOrdId))
+                    {
+                        var stuckKnown = _tracker.TryGet(origClOrdId, out var stuck);
+                        var stuckSymbol = stuckKnown ? stuck.Symbol : "?";
+                        MarketMakerMetrics.StaleCancelRejected.Add(1,
+                            new KeyValuePair<string, object?>("symbol", stuckSymbol));
+                        _log.LogWarning(
+                            "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
+                            origClOrdId, r.Reason);
+                        break;
+                    }
                     var known = _tracker.TryGet(r.ClOrdID.Value, out var o);
                     var symbol = known ? o.Symbol : "?";
                     MarketMakerMetrics.Rejects.Add(1, new KeyValuePair<string, object?>("symbol", symbol));

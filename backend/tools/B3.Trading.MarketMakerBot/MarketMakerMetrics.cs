@@ -45,6 +45,15 @@ public static class MarketMakerMetrics
     public static readonly Counter<long> StaleOrdersCancelled =
         Meter.CreateCounter<long>("bot.orders.stale_cancelled");
 
+    /// <summary>RFC #703 miss-fill/staleness guard: the venue rejected a
+    /// stale-order cancel request (e.g. the order was already
+    /// terminal/unknown, or a transient reject). The tracker deliberately
+    /// leaves the original order's reservation untouched in this case —
+    /// see <c>MarketMakerWorker.HandleEventAsync</c>'s OrderRejected case
+    /// for the rationale. Tagged <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> StaleCancelRejected =
+        Meter.CreateCounter<long>("bot.orders.stale_cancel_rejected");
+
     /// <summary>RFC #703 client-side safety cap: incremented every time a
     /// quote is skipped because <see cref="OrderTracker.OpenCount"/> is at
     /// or above <see cref="MarketMakerBotOptions.MaxOpenOrders"/>. Should

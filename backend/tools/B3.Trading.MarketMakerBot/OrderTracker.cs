@@ -24,6 +24,15 @@ namespace B3.Trading.MarketMakerBot;
 public sealed class OrderTracker
 {
     private readonly ConcurrentDictionary<ulong, TrackedOrder> _orders = new();
+    // Correlates a cancel REQUEST's own (freshly-generated) ClOrdID back to
+    // the original order it targets. Deliberately NOT merged into _orders
+    // (an earlier version of this fix aliased the same TrackedOrder under
+    // both keys, which double-counted it in OpenCount/InFlightCount/
+    // FindStale, all of which iterate _orders.Values) — this is a pure
+    // lookup table, consulted only from OrderRejected handling (see
+    // MarketMakerWorker.HandleEventAsync), since OrderCancelled already
+    // carries the original id directly via OrigClOrdID.
+    private readonly ConcurrentDictionary<ulong, ulong> _cancelAttempts = new();
     // Tracks which ClOrdId currently owns each (symbol, side) reservation,
     // so a duplicate/racing terminal ER for an order that has already been
     // superseded by a newer reservation on the same side can't free a slot
@@ -140,25 +149,30 @@ public sealed class OrderTracker
     }
 
     /// <summary>
-    /// Aliases <paramref name="cancelClOrdId"/> (the ClOrdID the bot
+    /// Records that <paramref name="cancelClOrdId"/> (the ClOrdID the bot
     /// generates for an explicit CancelOrderRequest — see
-    /// <c>MarketMakerWorker.CancelStaleOrdersAsync</c>) to the same
-    /// <see cref="TrackedOrder"/> instance already tracked under
-    /// <paramref name="origClOrdId"/>. The venue's ER for a rejected
-    /// cancel (<c>OrderRejected</c>) carries the CANCEL request's OWN
-    /// ClOrdID, not the original order's — without this alias, a reject
-    /// of a cancel targeting an order the venue no longer knows about
-    /// (the actual "miss-fill" case this guard exists for) would be
-    /// silently dropped by <see cref="TryGet"/>, leaving the stale
-    /// reservation in place forever and re-triggering an identical
-    /// cancel (and reject) on every reconcile tick.
-    /// No-op if <paramref name="origClOrdId"/> isn't currently tracked.
+    /// <c>MarketMakerWorker.CancelStaleOrdersAsync</c>) is a cancel attempt
+    /// targeting <paramref name="origClOrdId"/>. The venue's ER for a
+    /// rejected cancel (<c>OrderRejected</c>, which has no OrigClOrdID
+    /// field) carries the CANCEL request's OWN ClOrdID — without this,
+    /// such a reject would be indistinguishable from a rejected NEW order
+    /// submit, and <c>HandleEventAsync</c> could not safely decide whether
+    /// to free the original order's (symbol, side) reservation (freeing it
+    /// when the order is, in fact, still resting would let the bot submit
+    /// a duplicate order alongside it — the exact failure mode RFC #703
+    /// exists to prevent).
     /// </summary>
     public void RegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId)
     {
-        if (_orders.TryGetValue(origClOrdId, out var order))
-            _orders[cancelClOrdId] = order;
+        _cancelAttempts[cancelClOrdId] = origClOrdId;
     }
+
+    /// <summary>True when <paramref name="clOrdId"/> is a cancel request
+    /// the bot itself generated (via <see cref="RegisterCancelAttempt"/>),
+    /// with <paramref name="origClOrdId"/> set to the order it targeted.
+    /// </summary>
+    public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId) =>
+        _cancelAttempts.TryGetValue(clOrdId, out origClOrdId);
 
     public void OnAccepted(ulong clOrdId, long leaves)
     {
