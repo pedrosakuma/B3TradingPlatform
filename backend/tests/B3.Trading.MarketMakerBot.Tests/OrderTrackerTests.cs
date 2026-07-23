@@ -171,6 +171,35 @@ public class OrderTrackerTests
         Assert.Empty(t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow));
     }
 
+    [Fact]
+    public void RegisterCancelAttempt_AliasesToOriginalOrder()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+
+        // Simulate the bot sending an explicit cancel with a fresh ClOrdID.
+        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
+
+        // A reject of the cancel request (which carries ITS OWN ClOrdID,
+        // not the original order's — see OrderRejected's shape) must
+        // still resolve back to the original order and free its side.
+        Assert.True(t.TryGet(99UL, out var aliased));
+        Assert.Equal("PETR4", aliased.Symbol);
+        Assert.True(aliased.IsBuy);
+
+        t.OnTerminal(99UL);
+        Assert.False(t.HasOpenSide("PETR4", isBuy: true));
+        Assert.Equal(0, t.InFlightCount("PETR4"));
+    }
+
+    [Fact]
+    public void RegisterCancelAttempt_UnknownOriginalId_IsNoOp()
+    {
+        var t = new OrderTracker();
+        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
+        Assert.False(t.TryGet(99UL, out _));
+    }
+
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now;

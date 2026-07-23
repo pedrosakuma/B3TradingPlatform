@@ -173,8 +173,19 @@ internal sealed class MarketMakerWorker : BackgroundService
             case UpModels.OrderCancelled c:
                 {
                     MarketMakerMetrics.Cancelled.Add(1);
-                    var known = _tracker.TryGet(c.ClOrdID.Value, out var o);
-                    _tracker.OnTerminal(c.ClOrdID.Value);
+                    // OrigClOrdID is the original resting order's id; it's
+                    // only set when the cancel was in response to an
+                    // explicit CancelOrderRequest (ours or another
+                    // session's) — a venue-initiated spontaneous cancel
+                    // (e.g. Day expiry) reports ClOrdID as the order's own
+                    // id with no OrigClOrdID. Prefer OrigClOrdID so a
+                    // cancel WE requested (see CancelStaleOrdersAsync,
+                    // whose ClOrdID is a freshly-generated id, distinct
+                    // from the order being cancelled) resolves back to
+                    // the tracked order.
+                    var targetClOrdId = c.OrigClOrdID?.Value ?? c.ClOrdID.Value;
+                    var known = _tracker.TryGet(targetClOrdId, out var o);
+                    _tracker.OnTerminal(targetClOrdId);
                     if (known) await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
                     break;
                 }
@@ -242,21 +253,38 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// cancelled. If it genuinely was still resting, the venue's
     /// <c>OrderCancelled</c> ER closes it and <see cref="HandleEventAsync"/>
     /// re-quotes the side normally. If the bot had silently missed its
-    /// terminal event earlier (a "miss-fill"), the venue's reject for an
-    /// unknown/already-terminal order also reaches us as a terminal ER,
-    /// which still frees the tracker's stale reservation.
+    /// terminal event earlier (a "miss-fill"), the venue rejects the
+    /// cancel of an unknown/already-terminal order via <c>OrderRejected</c>
+    /// keyed on the CANCEL request's own (freshly-generated) ClOrdID —
+    /// <see cref="OrderTracker.RegisterCancelAttempt"/> aliases that id to
+    /// the original tracked order so the reject still resolves and frees
+    /// the stale reservation, instead of retrying identically forever.
     /// </summary>
     private async Task CancelStaleOrdersAsync(EntryPointClient client, CancellationToken ct)
     {
         var stale = _tracker.FindStale(_options.MaxOrderAge, _tracker.UtcNow);
         foreach (var o in stale)
         {
+            var instr = FindInstrument(o.Symbol);
+            if (instr is null)
+            {
+                // Instrument config was removed/renamed since the order was
+                // submitted; there is no valid SecurityId to cancel with.
+                _log.LogWarning(
+                    "[mm] cannot build stale-order cancel for clordid={ClOrdId}: unknown instrument {Symbol}",
+                    o.ClOrdId, o.Symbol);
+                continue;
+            }
             var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
+            // Alias BEFORE the SDK await — see TryRegisterSubmit's own
+            // comment on this pattern: a fast wire can deliver the
+            // resulting ER before this call returns.
+            _tracker.RegisterCancelAttempt(cancelClOrdId, o.ClOrdId);
             var req = new UpModels.CancelOrderRequest
             {
                 ClOrdID = new UpModels.ClOrdID(cancelClOrdId),
                 OrigClOrdID = new UpModels.ClOrdID(o.ClOrdId),
-                SecurityId = FindInstrument(o.Symbol)?.SecurityId ?? 0,
+                SecurityId = instr.SecurityId,
                 Side = o.IsBuy ? UpModels.Side.Buy : UpModels.Side.Sell,
             };
             try

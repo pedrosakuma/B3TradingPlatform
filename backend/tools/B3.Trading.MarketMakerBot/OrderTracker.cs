@@ -139,6 +139,27 @@ public sealed class OrderTracker
         return false;
     }
 
+    /// <summary>
+    /// Aliases <paramref name="cancelClOrdId"/> (the ClOrdID the bot
+    /// generates for an explicit CancelOrderRequest — see
+    /// <c>MarketMakerWorker.CancelStaleOrdersAsync</c>) to the same
+    /// <see cref="TrackedOrder"/> instance already tracked under
+    /// <paramref name="origClOrdId"/>. The venue's ER for a rejected
+    /// cancel (<c>OrderRejected</c>) carries the CANCEL request's OWN
+    /// ClOrdID, not the original order's — without this alias, a reject
+    /// of a cancel targeting an order the venue no longer knows about
+    /// (the actual "miss-fill" case this guard exists for) would be
+    /// silently dropped by <see cref="TryGet"/>, leaving the stale
+    /// reservation in place forever and re-triggering an identical
+    /// cancel (and reject) on every reconcile tick.
+    /// No-op if <paramref name="origClOrdId"/> isn't currently tracked.
+    /// </summary>
+    public void RegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId)
+    {
+        if (_orders.TryGetValue(origClOrdId, out var order))
+            _orders[cancelClOrdId] = order;
+    }
+
     public void OnAccepted(ulong clOrdId, long leaves)
     {
         if (_orders.TryGetValue(clOrdId, out var o))
