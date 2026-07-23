@@ -200,17 +200,66 @@ public class OrderTrackerTests
     }
 
     [Fact]
-    public void FindStale_DoesNotDoubleCount_AfterCancelAttemptRegistered()
+    public void RegisterCancelAttempt_DoesNotDoubleCountInOpenOrInFlightCounts()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
+
+        // Still just ONE resting order, referenced by two ClOrdIDs — must
+        // not be double-counted by anything that iterates the order set.
+        Assert.Equal(1, t.OpenCount());
+        Assert.Equal(1, t.InFlightCount("PETR4"));
+    }
+
+    [Fact]
+    public void FindStale_SkipsOrdersWithOutstandingCancelAttempt()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);
         var t = new OrderTracker(clock);
         t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
-        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
         clock.Advance(TimeSpan.FromMinutes(10));
 
-        var stale = t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow);
-        Assert.Single(stale);
-        Assert.Equal(1UL, stale[0].ClOrdId);
+        // First check: nothing pending yet, order is stale.
+        Assert.Single(t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow));
+
+        // Register the cancel the reconcile loop would send for it.
+        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
+
+        // A later reconcile tick (before the cancel resolves) must not
+        // pick the same order again — one outstanding cancel at a time.
+        Assert.Empty(t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow));
+    }
+
+    [Fact]
+    public void ClearPendingCancel_AllowsFindStaleToPickItUpAgain()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        clock.Advance(TimeSpan.FromMinutes(10));
+        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
+        Assert.Empty(t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow));
+
+        // The cancel came back rejected without proving the order is
+        // gone — the worker clears the pending marker but leaves the
+        // order itself open (see MarketMakerWorker.HandleEventAsync's
+        // OrderRejected case).
+        t.ClearPendingCancel(1UL);
+
+        Assert.Single(t.FindStale(TimeSpan.FromMinutes(5), t.UtcNow));
+    }
+
+    [Fact]
+    public void OnTerminal_ClearsPendingCancelMarker()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.RegisterCancelAttempt(cancelClOrdId: 99UL, origClOrdId: 1UL);
+        t.OnTerminal(1UL);
+
+        Assert.False(t.HasOpenSide("PETR4", isBuy: true));
+        Assert.Equal(0, t.InFlightCount("PETR4"));
     }
 
     private sealed class FakeClock : TimeProvider

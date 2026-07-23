@@ -74,14 +74,18 @@ public sealed class OrderTracker
 
     /// <summary>Snapshot of currently-open orders whose age (relative to
     /// <paramref name="now"/>) is at least <paramref name="maxAge"/> — the
-    /// candidates for the miss-fill/staleness cancel guard. See
-    /// <see cref="MarketMakerBotOptions.MaxOrderAge"/>.</summary>
+    /// candidates for the miss-fill/staleness cancel guard. Skips orders
+    /// with an already-outstanding cancel attempt (see
+    /// <see cref="RegisterCancelAttempt"/>) so a stuck order gets at most
+    /// one in-flight cancel at a time rather than a fresh one every
+    /// reconcile tick. See <see cref="MarketMakerBotOptions.MaxOrderAge"/>.
+    /// </summary>
     public IReadOnlyList<TrackedOrder> FindStale(TimeSpan maxAge, DateTimeOffset now)
     {
         List<TrackedOrder>? stale = null;
         foreach (var o in _orders.Values)
         {
-            if (o.IsOpen && now - o.SubmittedAtUtc >= maxAge)
+            if (o.IsOpen && o.PendingCancelClOrdId is null && now - o.SubmittedAtUtc >= maxAge)
                 (stale ??= new List<TrackedOrder>()).Add(o);
         }
         return stale ?? (IReadOnlyList<TrackedOrder>)Array.Empty<TrackedOrder>();
@@ -165,6 +169,8 @@ public sealed class OrderTracker
     public void RegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId)
     {
         _cancelAttempts[cancelClOrdId] = origClOrdId;
+        if (_orders.TryGetValue(origClOrdId, out var order))
+            order.PendingCancelClOrdId = cancelClOrdId;
     }
 
     /// <summary>True when <paramref name="clOrdId"/> is a cancel request
@@ -173,6 +179,21 @@ public sealed class OrderTracker
     /// </summary>
     public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId) =>
         _cancelAttempts.TryGetValue(clOrdId, out origClOrdId);
+
+    /// <summary>
+    /// Clears a previously-registered pending cancel for
+    /// <paramref name="origClOrdId"/> WITHOUT closing the order — used
+    /// when a cancel is rejected for a reason that doesn't prove the
+    /// order is actually gone (see <c>MarketMakerWorker.HandleEventAsync</c>'s
+    /// OrderRejected case), so the staleness guard is free to try again
+    /// on a later reconcile tick instead of considering one already
+    /// outstanding forever.
+    /// </summary>
+    public void ClearPendingCancel(ulong origClOrdId)
+    {
+        if (_orders.TryGetValue(origClOrdId, out var order))
+            order.PendingCancelClOrdId = null;
+    }
 
     public void OnAccepted(ulong clOrdId, long leaves)
     {
@@ -211,6 +232,7 @@ public sealed class OrderTracker
     private void Close(TrackedOrder o)
     {
         o.IsOpen = false;
+        o.PendingCancelClOrdId = null;
         lock (_sideLock)
         {
             var side = (o.Symbol, o.IsBuy);
@@ -230,5 +252,9 @@ public sealed class TrackedOrder
     public bool IsBuy { get; set; }
     public DateTimeOffset SubmittedAtUtc { get; set; }
     public bool IsOpen { get; set; }
+    /// <summary>ClOrdID of an outstanding CancelOrderRequest targeting this
+    /// order, if any — see <see cref="OrderTracker.RegisterCancelAttempt"/>.
+    /// Null means no cancel is currently in flight for this order.</summary>
+    public ulong? PendingCancelClOrdId { get; set; }
 }
 

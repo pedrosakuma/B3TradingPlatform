@@ -178,12 +178,16 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // explicit CancelOrderRequest (ours or another
                     // session's) — a venue-initiated spontaneous cancel
                     // (e.g. Day expiry) reports ClOrdID as the order's own
-                    // id with no OrigClOrdID. Prefer OrigClOrdID so a
-                    // cancel WE requested (see CancelStaleOrdersAsync,
-                    // whose ClOrdID is a freshly-generated id, distinct
-                    // from the order being cancelled) resolves back to
-                    // the tracked order.
-                    var targetClOrdId = c.OrigClOrdID?.Value ?? c.ClOrdID.Value;
+                    // id with no OrigClOrdID. Prefer OrigClOrdID, but the
+                    // upstream gateway is also known to sometimes drop it
+                    // on cancel acks entirely (see this repo's own
+                    // ExecutionReportProcessorTests.Cancel_WithMissingOrigClOrdId_ResolvesViaCancelLink
+                    // for the trading-host side of the same class of bug)
+                    // — fall back to our own cancel-attempt correlation
+                    // table before finally assuming ClOrdID IS the
+                    // original id (the spontaneous-cancel case).
+                    var targetClOrdId = c.OrigClOrdID?.Value
+                        ?? (_tracker.TryResolveCancelAttempt(c.ClOrdID.Value, out var linked) ? linked : c.ClOrdID.Value);
                     var known = _tracker.TryGet(targetClOrdId, out var o);
                     _tracker.OnTerminal(targetClOrdId);
                     if (known) await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
@@ -210,6 +214,12 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // trade-off against a duplicated resting order.
                     if (_tracker.TryResolveCancelAttempt(r.ClOrdID.Value, out var origClOrdId))
                     {
+                        // Clear the pending-cancel marker (NOT the order
+                        // itself — see rationale above) so the next
+                        // reconcile tick is free to retry the cancel
+                        // instead of treating one as permanently
+                        // outstanding.
+                        _tracker.ClearPendingCancel(origClOrdId);
                         var stuckKnown = _tracker.TryGet(origClOrdId, out var stuck);
                         var stuckSymbol = stuckKnown ? stuck.Symbol : "?";
                         MarketMakerMetrics.StaleCancelRejected.Add(1,
