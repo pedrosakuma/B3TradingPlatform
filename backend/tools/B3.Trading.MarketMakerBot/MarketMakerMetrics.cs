@@ -67,4 +67,31 @@ public static class MarketMakerMetrics
     /// normally stay at zero.</summary>
     public static readonly Counter<long> SafetyCapHits =
         Meter.CreateCounter<long>("bot.orders.safety_cap_hit");
+
+    /// <summary>RFC #703 book-driven quoting: a market-data book delta not
+    /// caused by the bot's own resting order (see
+    /// <c>OrderTracker.IsOwnOrder</c>) revealed a side's resting price had
+    /// drifted past <see cref="MarketMakerBotOptions.RequoteDeviationTicks"/>
+    /// from the freshly-computed target, triggering a reactive
+    /// cancel-and-requote instead of waiting for the resting order to
+    /// terminate on its own. Tagged <c>{symbol, side}</c>.</summary>
+    public static readonly Counter<long> BookDrivenRequotes =
+        Meter.CreateCounter<long>("bot.orders.book_driven_requote");
+
+    /// <summary>RFC #703 book-driven quoting: a reactive cancel triggered
+    /// by <c>MarketMakerWorker.ReactToBookChangeAsync</c> failed
+    /// synchronously before any ER could arrive to resolve it. Tagged
+    /// <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> BookDrivenRequoteSubmitFailed =
+        Meter.CreateCounter<long>("bot.orders.book_driven_requote_submit_failed");
+
+    /// <summary>RFC #703 book-driven quoting: the venue rejected a
+    /// reactive cancel request raised by
+    /// <c>MarketMakerWorker.ReactToBookChangeAsync</c>. Distinct from
+    /// <see cref="StaleCancelRejected"/> so a routine book-driven
+    /// requote race (e.g. the order filled or was already being
+    /// cancelled by the staleness guard) isn't misreported as the
+    /// miss-fill safety net itself failing. Tagged <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> BookDrivenRequoteCancelRejected =
+        Meter.CreateCounter<long>("bot.orders.book_driven_requote_cancel_rejected");
 }

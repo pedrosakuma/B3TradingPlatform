@@ -32,7 +32,7 @@ public sealed class OrderTracker
     // lookup table, consulted only from OrderRejected handling (see
     // MarketMakerWorker.HandleEventAsync), since OrderCancelled already
     // carries the original id directly via OrigClOrdID.
-    private readonly ConcurrentDictionary<ulong, ulong> _cancelAttempts = new();
+    private readonly ConcurrentDictionary<ulong, CancelAttempt> _cancelAttempts = new();
     // Tracks which ClOrdId currently owns each (symbol, side) reservation,
     // so a duplicate/racing terminal ER for an order that has already been
     // superseded by a newer reservation on the same side can't free a slot
@@ -40,6 +40,15 @@ public sealed class OrderTracker
     private readonly Dictionary<(string Symbol, bool IsBuy), ulong> _activeSideOwners = new();
     private readonly object _sideLock = new();
     private readonly TimeProvider _clock;
+    // RFC #703 book-driven quoting: every ER carries the venue's own
+    // OrderId (distinct from our ClOrdID namespace). Market-data's
+    // order-level book feed (Book/MBO subscribe flag) reports OrderId
+    // too, so this is the join key that lets the worker tell "my own
+    // resting order just moved the book" apart from "someone else's did"
+    // — see MarketDataFeed.BookOrderChanged / MarketMakerWorker's
+    // self-order filter. Kept as a bare id set (not merged into _orders)
+    // for the same double-counting reason _cancelAttempts is separate.
+    private readonly ConcurrentDictionary<ulong, byte> _ownOrderIds = new();
 
     public OrderTracker(TimeProvider? clock = null)
     {
@@ -104,6 +113,24 @@ public sealed class OrderTracker
         }
     }
 
+    /// <summary>Returns the currently-resting order for (symbol, side), if
+    /// any — used by the book-reaction path to compare its resting price
+    /// against a freshly-computed target without racing a separate
+    /// HasOpenSide-then-TryGet pair.</summary>
+    public bool TryGetActiveSideOrder(string symbol, bool isBuy, out TrackedOrder order)
+    {
+        ulong owner;
+        lock (_sideLock)
+        {
+            if (!_activeSideOwners.TryGetValue((symbol, isBuy), out owner))
+            {
+                order = default!;
+                return false;
+            }
+        }
+        return TryGet(owner, out order);
+    }
+
     /// <summary>
     /// Atomically reserves (symbol, side) and registers the order if — and
     /// only if — that side wasn't already spoken for. Returns <c>false</c>
@@ -166,19 +193,118 @@ public sealed class OrderTracker
     /// a duplicate order alongside it — the exact failure mode RFC #703
     /// exists to prevent).
     /// </summary>
-    public void RegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId)
+    public void RegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId, bool isBookDriven = false)
     {
-        _cancelAttempts[cancelClOrdId] = origClOrdId;
+        _cancelAttempts[cancelClOrdId] = new CancelAttempt(origClOrdId, isBookDriven);
         if (_orders.TryGetValue(origClOrdId, out var order))
+            lock (order)
+            {
+                order.PendingCancelClOrdId = cancelClOrdId;
+                order.LastCancelAttemptAtUtc = _clock.GetUtcNow();
+            }
+    }
+
+    /// <summary>
+    /// Atomic check-and-set variant of <see cref="RegisterCancelAttempt"/>:
+    /// registers the cancel attempt only if — and only if — the order is
+    /// still open, no cancel is already pending for it, and (when
+    /// <paramref name="minIntervalSinceLastAttempt"/> is given) at least
+    /// that much time has passed since its last cancel attempt. RFC #703's
+    /// book-driven reactive requote path (<c>MarketMakerWorker.ReactToBookChangeAsync</c>)
+    /// runs concurrently with the pre-existing staleness guard
+    /// (<c>CancelStaleOrdersAsync</c>) on a separate loop; without this
+    /// atomicity, both could observe <c>PendingCancelClOrdId == null</c>
+    /// for the same order and each submit a distinct CancelOrderRequest
+    /// for it — two cancels racing the venue for one order, only one of
+    /// which the correlation table (last write wins) could ever resolve.
+    /// The interval check is folded into the same lock (rather than left
+    /// to a separate, pre-lock read in the caller) so a concurrent
+    /// register/clear/register sequence on another thread can't leave the
+    /// caller's throttle decision stale by the time this actually commits.
+    /// The open-check additionally guards against a stale
+    /// already-terminal <see cref="TrackedOrder"/> reference (e.g. from a
+    /// <c>FindStale</c> snapshot) picking up a fresh cancel attempt after
+    /// a concurrent fill/cancel has already closed it via <see cref="Close"/>.
+    /// <paramref name="isBookDriven"/> is stamped onto the correlation row
+    /// so a later reject can be attributed to the correct trigger (see
+    /// <see cref="TryResolveCancelAttempt"/>) instead of the staleness
+    /// guard and the reactive path being indistinguishable once both
+    /// funnel through the same shared submit helper.
+    /// Returns <c>false</c> (registering nothing) when any guard fails, so
+    /// the caller skips submitting a cancel altogether.
+    /// </summary>
+    public bool TryRegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId,
+        TimeSpan? minIntervalSinceLastAttempt = null, bool isBookDriven = false)
+    {
+        if (!_orders.TryGetValue(origClOrdId, out var order)) return false;
+        lock (order)
+        {
+            if (!order.IsOpen || order.PendingCancelClOrdId is not null) return false;
+            var now = _clock.GetUtcNow();
+            if (minIntervalSinceLastAttempt is { } minInterval)
+            {
+                var lastActivity = order.LastCancelAttemptAtUtc ?? order.SubmittedAtUtc;
+                if (now - lastActivity < minInterval) return false;
+            }
             order.PendingCancelClOrdId = cancelClOrdId;
+            order.LastCancelAttemptAtUtc = now;
+        }
+        _cancelAttempts[cancelClOrdId] = new CancelAttempt(origClOrdId, isBookDriven);
+        return true;
     }
 
     /// <summary>True when <paramref name="clOrdId"/> is a cancel request
-    /// the bot itself generated (via <see cref="RegisterCancelAttempt"/>),
-    /// with <paramref name="origClOrdId"/> set to the order it targeted.
+    /// the bot itself generated (via <see cref="RegisterCancelAttempt"/>
+    /// or <see cref="TryRegisterCancelAttempt"/>), with <paramref
+    /// name="origClOrdId"/> set to the order it targeted and <paramref
+    /// name="isBookDriven"/> set to which trigger raised it — used by
+    /// <c>MarketMakerWorker.HandleEventAsync</c>'s OrderRejected case to
+    /// attribute the reject to the right metric/log instead of always
+    /// reporting it as a stale-order cancel reject now that both
+    /// triggers share the same submit path.
     /// </summary>
+    public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId, out bool isBookDriven)
+    {
+        if (_cancelAttempts.TryGetValue(clOrdId, out var attempt))
+        {
+            origClOrdId = attempt.OrigClOrdId;
+            isBookDriven = attempt.IsBookDriven;
+            return true;
+        }
+        origClOrdId = 0;
+        isBookDriven = false;
+        return false;
+    }
+
+    /// <summary>Convenience overload for callers that don't need the
+    /// trigger tag.</summary>
     public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId) =>
-        _cancelAttempts.TryGetValue(clOrdId, out origClOrdId);
+        TryResolveCancelAttempt(clOrdId, out origClOrdId, out _);
+
+    /// <summary>
+    /// Records the venue's own OrderId for a tracked order, learned from
+    /// any ER carrying it (OrderAccepted/OrderTrade/OrderModified all do —
+    /// see <c>MarketMakerWorker.HandleEventAsync</c>). Idempotent and
+    /// deliberately a no-op for an unknown ClOrdID or a zero/absent
+    /// OrderId (some ER shapes may not have assigned one yet). This is
+    /// the join key <see cref="IsOwnOrder"/> uses to filter book-level
+    /// market-data deltas the bot's own resting orders themselves caused
+    /// — see RFC #703's book-driven quoting self-awareness requirement.
+    /// </summary>
+    public void SetOrderId(ulong clOrdId, ulong orderId)
+    {
+        if (orderId == 0) return;
+        if (!_orders.TryGetValue(clOrdId, out var order)) return;
+        order.OrderId = orderId;
+        _ownOrderIds[orderId] = 0;
+    }
+
+    /// <summary>True when <paramref name="orderId"/> (the venue's own
+    /// order identifier, as reported on market-data's order-level book
+    /// events) belongs to one of the bot's own currently-tracked orders.
+    /// Used to filter self-caused book deltas out of the reactive
+    /// requote path — see <see cref="SetOrderId"/>.</summary>
+    public bool IsOwnOrder(ulong orderId) => _ownOrderIds.ContainsKey(orderId);
 
     /// <summary>
     /// Clears a previously-registered pending cancel for
@@ -187,12 +313,23 @@ public sealed class OrderTracker
     /// order is actually gone (see <c>MarketMakerWorker.HandleEventAsync</c>'s
     /// OrderRejected case), so the staleness guard is free to try again
     /// on a later reconcile tick instead of considering one already
-    /// outstanding forever.
+    /// outstanding forever. Also drops the now-abandoned <see
+    /// cref="_cancelAttempts"/> correlation row for the rejected cancel
+    /// request itself (it's no longer in flight, and leaving it behind
+    /// would let it accumulate indefinitely for an order that stays open
+    /// and keeps having its cancel attempts rejected — a real risk now
+    /// that RFC #703's book-driven path can trigger far more retries than
+    /// the occasional staleness-guard cancel #705 originally accepted).
     /// </summary>
     public void ClearPendingCancel(ulong origClOrdId)
     {
         if (_orders.TryGetValue(origClOrdId, out var order))
-            order.PendingCancelClOrdId = null;
+            lock (order)
+            {
+                if (order.PendingCancelClOrdId is { } pending)
+                    _cancelAttempts.TryRemove(pending, out _);
+                order.PendingCancelClOrdId = null;
+            }
     }
 
     /// <summary>
@@ -202,12 +339,20 @@ public sealed class OrderTracker
     /// SUBMIT itself fails synchronously (no ER will ever arrive to
     /// resolve it), so we don't accidentally clear a DIFFERENT, later
     /// cancel attempt that may already be outstanding for the same order
-    /// by the time the failure is handled.
+    /// by the time the failure is handled. Also drops the abandoned
+    /// correlation row for the failed cancel — see <see cref="ClearPendingCancel"/>.
     /// </summary>
     public void ClearPendingCancelIfMatches(ulong origClOrdId, ulong expectedCancelClOrdId)
     {
-        if (_orders.TryGetValue(origClOrdId, out var order) && order.PendingCancelClOrdId == expectedCancelClOrdId)
-            order.PendingCancelClOrdId = null;
+        if (_orders.TryGetValue(origClOrdId, out var order))
+            lock (order)
+            {
+                if (order.PendingCancelClOrdId == expectedCancelClOrdId)
+                {
+                    order.PendingCancelClOrdId = null;
+                    _cancelAttempts.TryRemove(expectedCancelClOrdId, out _);
+                }
+            }
     }
 
     public void OnAccepted(ulong clOrdId, long leaves)
@@ -247,7 +392,8 @@ public sealed class OrderTracker
     private void Close(TrackedOrder o)
     {
         o.IsOpen = false;
-        o.PendingCancelClOrdId = null;
+        lock (o) { o.PendingCancelClOrdId = null; }
+        if (o.OrderId is { } orderId) _ownOrderIds.TryRemove(orderId, out _);
         lock (_sideLock)
         {
             var side = (o.Symbol, o.IsBuy);
@@ -255,7 +401,50 @@ public sealed class OrderTracker
                 _activeSideOwners.Remove(side);
         }
     }
+
+    /// <summary>
+    /// Periodic housekeeping: evicts fully-resolved closed orders (and any
+    /// <see cref="_cancelAttempts"/> entries pointing at them) once
+    /// they're older than <paramref name="retention"/>. RFC #703's
+    /// book-driven reactive requote path makes cancel/resubmit cycles
+    /// common rather than rare (unlike the occasional staleness-guard
+    /// cancel #705 accepted leaving <see cref="_orders"/>/<see
+    /// cref="_cancelAttempts"/> unbounded for), so a long-running process
+    /// quoting a volatile book needs this to avoid unbounded growth and
+    /// the resulting O(n) slowdown in <see cref="OpenCount"/>/<see
+    /// cref="FindStale"/>. Skips any order with a still-outstanding
+    /// pending cancel, however old, since its correlation entry is still
+    /// needed to resolve the eventual ER.
+    /// </summary>
+    public void PruneClosed(TimeSpan retention, DateTimeOffset now)
+    {
+        List<ulong>? toRemove = null;
+        foreach (var kv in _orders)
+        {
+            var o = kv.Value;
+            if (!o.IsOpen && o.PendingCancelClOrdId is null && now - o.SubmittedAtUtc > retention)
+                (toRemove ??= new List<ulong>()).Add(kv.Key);
+        }
+        if (toRemove is not null)
+            foreach (var id in toRemove)
+                _orders.TryRemove(id, out _);
+
+        List<ulong>? staleAttempts = null;
+        foreach (var kv in _cancelAttempts)
+        {
+            if (!_orders.ContainsKey(kv.Value.OrigClOrdId))
+                (staleAttempts ??= new List<ulong>()).Add(kv.Key);
+        }
+        if (staleAttempts is not null)
+            foreach (var id in staleAttempts)
+                _cancelAttempts.TryRemove(id, out _);
+    }
 }
+
+/// <summary>Correlation row for a cancel REQUEST's own ClOrdId → the
+/// original order it targets, tagged with which trigger raised it (see
+/// <see cref="OrderTracker.TryResolveCancelAttempt(ulong, out ulong, out bool)"/>).</summary>
+internal readonly record struct CancelAttempt(ulong OrigClOrdId, bool IsBookDriven);
 
 public sealed class TrackedOrder
 {
@@ -271,5 +460,16 @@ public sealed class TrackedOrder
     /// order, if any — see <see cref="OrderTracker.RegisterCancelAttempt"/>.
     /// Null means no cancel is currently in flight for this order.</summary>
     public ulong? PendingCancelClOrdId { get; set; }
+    /// <summary>UTC time of the most recent <see cref="OrderTracker.RegisterCancelAttempt"/>/
+    /// <see cref="OrderTracker.TryRegisterCancelAttempt"/> for this order,
+    /// if any. Used (rather than <see cref="SubmittedAtUtc"/>) to throttle
+    /// the book-driven reactive requote path so a synchronously-failed or
+    /// rejected cancel — which frees <see cref="PendingCancelClOrdId"/>
+    /// immediately — can't be retried on every subsequent book delta.</summary>
+    public DateTimeOffset? LastCancelAttemptAtUtc { get; set; }
+    /// <summary>The venue's own order identifier, once learned from an ER
+    /// — see <see cref="OrderTracker.SetOrderId"/>. Null until the first
+    /// ER for this ClOrdID arrives.</summary>
+    public ulong? OrderId { get; set; }
 }
 

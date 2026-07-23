@@ -74,6 +74,28 @@ public sealed class MarketMakerBotOptions
     [Range(1, int.MaxValue)]
     public int MaxOpenOrders { get; set; } = 500;
 
+    /// <summary>
+    /// RFC #703 book-driven quoting: minimum distance (in <see
+    /// cref="InstrumentConfig.TickSize"/> multiples) a side's resting
+    /// price may drift from the freshly-computed target price before a
+    /// market-data book change (see <see cref="MarketDataFeed.BookOrderChanged"/>)
+    /// triggers a reactive cancel-and-requote. Kept nonzero so a
+    /// no-op-sized book wiggle doesn't churn a perfectly fine quote.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int RequoteDeviationTicks { get; set; } = 2;
+
+    /// <summary>
+    /// RFC #703 book-driven quoting: minimum time a side must have been
+    /// resting before a book-driven deviation can trigger a reactive
+    /// cancel-and-requote for it. Throttles the reactive path so a burst
+    /// of book updates for the same symbol can't repeatedly cancel a
+    /// quote that itself hasn't even been acknowledged yet — the exact
+    /// venue-flooding shape RFC #703 exists to prevent, just triggered
+    /// from the market-data side this time instead of the ER side.
+    /// </summary>
+    public TimeSpan MinRequoteInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
     [Required, MinLength(1)]
     public List<InstrumentConfig> Instruments { get; set; } = new();
 
