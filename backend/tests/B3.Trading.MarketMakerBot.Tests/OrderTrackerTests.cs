@@ -280,6 +280,70 @@ public class OrderTrackerTests
         Assert.Single(t.FindStale(TimeSpan.Zero, t.UtcNow));
     }
 
+    [Fact]
+    public void SetOrderId_MakesIsOwnOrderTrue()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        Assert.False(t.IsOwnOrder(555UL));
+        t.SetOrderId(1UL, 555UL);
+        Assert.True(t.IsOwnOrder(555UL));
+    }
+
+    [Fact]
+    public void SetOrderId_UnknownClOrdId_IsANoOp()
+    {
+        var t = new OrderTracker();
+        t.SetOrderId(clOrdId: 999UL, orderId: 555UL);
+        Assert.False(t.IsOwnOrder(555UL));
+    }
+
+    [Fact]
+    public void SetOrderId_ZeroOrderId_IsANoOp()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.SetOrderId(1UL, 0UL);
+        Assert.False(t.IsOwnOrder(0UL));
+    }
+
+    [Fact]
+    public void Close_RemovesOrderIdFromOwnershipSet()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.SetOrderId(1UL, 555UL);
+        Assert.True(t.IsOwnOrder(555UL));
+
+        t.OnTerminal(1UL);
+
+        Assert.False(t.IsOwnOrder(555UL));
+    }
+
+    [Fact]
+    public void TryGetActiveSideOrder_ReturnsCurrentResting()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+
+        Assert.True(t.TryGetActiveSideOrder("PETR4", isBuy: true, out var order));
+        Assert.Equal(1UL, order.ClOrdId);
+        Assert.Equal(30m, order.Price);
+
+        Assert.False(t.TryGetActiveSideOrder("PETR4", isBuy: false, out _));
+        Assert.False(t.TryGetActiveSideOrder("VALE3", isBuy: true, out _));
+    }
+
+    [Fact]
+    public void TryGetActiveSideOrder_AfterSideCloses_ReturnsFalse()
+    {
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.OnTerminal(1UL);
+
+        Assert.False(t.TryGetActiveSideOrder("PETR4", isBuy: true, out _));
+    }
+
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now;

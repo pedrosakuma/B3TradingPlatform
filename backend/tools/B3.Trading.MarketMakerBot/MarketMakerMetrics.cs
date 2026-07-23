@@ -67,4 +67,21 @@ public static class MarketMakerMetrics
     /// normally stay at zero.</summary>
     public static readonly Counter<long> SafetyCapHits =
         Meter.CreateCounter<long>("bot.orders.safety_cap_hit");
+
+    /// <summary>RFC #703 book-driven quoting: a market-data book delta not
+    /// caused by the bot's own resting order (see
+    /// <c>OrderTracker.IsOwnOrder</c>) revealed a side's resting price had
+    /// drifted past <see cref="MarketMakerBotOptions.RequoteDeviationTicks"/>
+    /// from the freshly-computed target, triggering a reactive
+    /// cancel-and-requote instead of waiting for the resting order to
+    /// terminate on its own. Tagged <c>{symbol, side}</c>.</summary>
+    public static readonly Counter<long> BookDrivenRequotes =
+        Meter.CreateCounter<long>("bot.orders.book_driven_requote");
+
+    /// <summary>RFC #703 book-driven quoting: a reactive cancel triggered
+    /// by <c>MarketMakerWorker.ReactToBookChangeAsync</c> failed
+    /// synchronously before any ER could arrive to resolve it. Tagged
+    /// <c>{symbol}</c>.</summary>
+    public static readonly Counter<long> BookDrivenRequoteSubmitFailed =
+        Meter.CreateCounter<long>("bot.orders.book_driven_requote_submit_failed");
 }

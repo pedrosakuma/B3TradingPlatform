@@ -2,6 +2,8 @@ using B3.EntryPoint.Client;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Threading.Channels;
 using UpModels = B3.EntryPoint.Client.Models;
 using UpState = B3.EntryPoint.Client.State;
 
@@ -28,6 +30,16 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly ILogger<MarketMakerWorker> _log;
     private long _nextClOrdId;
     private EntryPointClient? _client;
+    // RFC #703 book-driven quoting: OnBookOrderChanged runs synchronously
+    // on MarketDataFeed's receive callback, so it can't itself await a
+    // CancelAsync — it just signals the symbol here and returns. A
+    // per-symbol pending flag coalesces a burst of deltas for the same
+    // symbol into a single queued signal (mirrors the SDK's own
+    // BackPressurePolicy.DropOldest intent) instead of unboundedly
+    // queuing one entry per delta.
+    private readonly Channel<string> _bookSignals = Channel.CreateUnbounded<string>(
+        new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+    private readonly ConcurrentDictionary<string, byte> _pendingBookSignals = new(StringComparer.Ordinal);
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
         MarketPriceTracker priceTracker, MarketDataFeed marketData, ILoggerFactory loggerFactory,
@@ -94,6 +106,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         };
 
         _client = new EntryPointClient(clientOpts);
+        _marketData.BookOrderChanged += OnBookOrderChanged;
         try
         {
             _log.LogInformation("[mm] connecting to {Endpoint} session={Session} verId={VerId}",
@@ -117,9 +130,10 @@ internal sealed class MarketMakerWorker : BackgroundService
 
             var receive = ReceiveLoopAsync(_client, stoppingToken);
             var reconcile = ReconcileLoopAsync(_client, stoppingToken);
-            await Task.WhenAny(receive, reconcile);
+            var bookReaction = BookReactionLoopAsync(_client, stoppingToken);
+            await Task.WhenAny(receive, reconcile, bookReaction);
             // Surface the failing task's exception (if any).
-            await Task.WhenAll(receive, reconcile);
+            await Task.WhenAll(receive, reconcile, bookReaction);
         }
         catch (OperationCanceledException) { /* expected on shutdown */ }
         catch (Exception ex)
@@ -129,6 +143,8 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
         finally
         {
+            _marketData.BookOrderChanged -= OnBookOrderChanged;
+            _bookSignals.Writer.TryComplete();
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
             await _marketData.DisposeAsync();
         }
@@ -155,10 +171,12 @@ internal sealed class MarketMakerWorker : BackgroundService
         switch (ev)
         {
             case UpModels.OrderAccepted a:
+                _tracker.SetOrderId(a.ClOrdID.Value, a.OrderId);
                 _tracker.OnAccepted(a.ClOrdID.Value, (long)(a.LeavesQty ?? 0UL));
                 break;
             case UpModels.OrderTrade t:
                 {
+                    _tracker.SetOrderId(t.ClOrdID.Value, t.OrderId);
                     var known = _tracker.TryGet(t.ClOrdID.Value, out var o);
                     var symbol = known ? o.Symbol : "?";
                     MarketMakerMetrics.Fills.Add(1, new KeyValuePair<string, object?>("symbol", symbol));
@@ -243,6 +261,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                     break;
                 }
             case UpModels.OrderModified m:
+                _tracker.SetOrderId(m.ClOrdID.Value, m.OrderId);
                 _tracker.OnAccepted(m.ClOrdID.Value, (long)(m.LeavesQty ?? 0UL));
                 break;
         }
@@ -313,44 +332,142 @@ internal sealed class MarketMakerWorker : BackgroundService
                     o.ClOrdId, o.Symbol);
                 continue;
             }
-            var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
-            // Alias BEFORE the SDK await — see TryRegisterSubmit's own
-            // comment on this pattern: a fast wire can deliver the
-            // resulting ER before this call returns.
-            _tracker.RegisterCancelAttempt(cancelClOrdId, o.ClOrdId);
-            var req = new UpModels.CancelOrderRequest
+            if (await SubmitCancelAsync(client, o, instr, MarketMakerMetrics.StaleCancelSubmitFailed, ct))
             {
-                ClOrdID = new UpModels.ClOrdID(cancelClOrdId),
-                OrigClOrdID = new UpModels.ClOrdID(o.ClOrdId),
-                SecurityId = instr.SecurityId,
-                Side = o.IsBuy ? UpModels.Side.Buy : UpModels.Side.Sell,
-            };
-            try
-            {
-                await client.CancelAsync(req, ct);
                 MarketMakerMetrics.StaleOrdersCancelled.Add(1,
                     new KeyValuePair<string, object?>("symbol", o.Symbol));
                 _log.LogWarning(
                     "[mm] cancelled stale order clordid={ClOrdId} symbol={Symbol} side={Side} age={Age} (miss-fill guard)",
                     o.ClOrdId, o.Symbol, o.IsBuy ? "buy" : "sell", _tracker.UtcNow - o.SubmittedAtUtc);
             }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
+        }
+    }
+
+    /// <summary>
+    /// RFC #703 book-driven quoting: <see cref="MarketDataFeed.BookOrderChanged"/>
+    /// signals a symbol here — it can't itself await a cancel since it
+    /// runs synchronously on the market-data callback. Coalesced per
+    /// symbol by <see cref="_pendingBookSignals"/> so a burst of deltas
+    /// for the same symbol only queues one reaction.
+    /// </summary>
+    private void OnBookOrderChanged(string symbol, ulong orderId)
+    {
+        // Self-order filter: a delta the bot's OWN resting order caused
+        // (its own submit/cancel/fill landing in the book) must not
+        // trigger a reactive requote of itself — see
+        // OrderTracker.IsOwnOrder's doc comment.
+        if (_tracker.IsOwnOrder(orderId)) return;
+        if (_pendingBookSignals.TryAdd(symbol, 0))
+            _bookSignals.Writer.TryWrite(symbol);
+    }
+
+    private async Task BookReactionLoopAsync(EntryPointClient client, CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var symbol in _bookSignals.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                // The request never reached (or was never acknowledged
-                // by) the venue, so no ER will ever arrive to clear
-                // PendingCancelClOrdId via ClearPendingCancel/Close().
-                // Without this, FindStale would skip this order forever
-                // (it looks like a cancel is permanently outstanding).
-                // Guarded so we don't clear a DIFFERENT, later attempt
-                // that may have already been registered for this order
-                // by the time this catch runs.
-                _tracker.ClearPendingCancelIfMatches(o.ClOrdId, cancelClOrdId);
-                MarketMakerMetrics.StaleCancelSubmitFailed.Add(1,
-                    new KeyValuePair<string, object?>("symbol", o.Symbol));
-                _log.LogWarning(ex, "[mm] failed to cancel stale order clordid={ClOrdId} symbol={Symbol}",
-                    o.ClOrdId, o.Symbol);
+                _pendingBookSignals.TryRemove(symbol, out _);
+                try { await ReactToBookChangeAsync(client, symbol, ct); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "[mm] book-reaction failed for {Symbol}", symbol);
+                }
             }
+        }
+        catch (OperationCanceledException) { /* expected on shutdown */ }
+    }
+
+    /// <summary>
+    /// RFC #703 book-driven quoting: reacts to a market-data book delta
+    /// NOT caused by the bot's own resting order (filtered in <see
+    /// cref="OnBookOrderChanged"/>) by comparing each side's currently
+    /// resting price against a freshly-computed target and cancelling it
+    /// if it has drifted past <see cref="MarketMakerBotOptions.RequoteDeviationTicks"/>.
+    /// Deliberately does NOT resubmit here — the existing
+    /// <c>OrderCancelled</c> path in <see cref="HandleEventAsync"/>
+    /// re-quotes the side once the cancel is acked, reusing the same
+    /// submit/reservation machinery as every other requote trigger
+    /// instead of a bespoke cancel-then-immediately-resubmit race. A side
+    /// with no resting order (nothing to react with; the reconcile loop
+    /// owns filling that gap), one already being cancelled, or one still
+    /// within <see cref="MarketMakerBotOptions.MinRequoteInterval"/> of
+    /// its own submission is left alone — the last of these throttles a
+    /// burst of book updates from repeatedly cancelling a quote that
+    /// hasn't even settled yet, the same venue-flooding shape RFC #703
+    /// exists to prevent.
+    /// </summary>
+    private async Task ReactToBookChangeAsync(EntryPointClient client, string symbol, CancellationToken ct)
+    {
+        var instr = FindInstrument(symbol);
+        if (instr is null || _priceTracker.IsDelisted(symbol)) return;
+        var refPrice = _priceTracker.TryGetReferencePrice(symbol, out var live) ? live : instr.RefPrice;
+        var now = _tracker.UtcNow;
+        var maxDeviation = instr.TickSize * _options.RequoteDeviationTicks;
+
+        foreach (var isBuy in new[] { true, false })
+        {
+            if (!_tracker.TryGetActiveSideOrder(symbol, isBuy, out var resting)) continue;
+            if (resting.PendingCancelClOrdId is not null) continue;
+            if (now - resting.SubmittedAtUtc < _options.MinRequoteInterval) continue;
+
+            var target = QuoteCalculator.ComputeQuotePrice(instr, isBuy, refPrice);
+            if (target <= 0m) continue;
+            if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
+
+            if (await SubmitCancelAsync(client, resting, instr, MarketMakerMetrics.BookDrivenRequoteSubmitFailed, ct))
+            {
+                MarketMakerMetrics.BookDrivenRequotes.Add(1,
+                    new KeyValuePair<string, object?>("symbol", symbol),
+                    new KeyValuePair<string, object?>("side", isBuy ? "buy" : "sell"));
+                _log.LogInformation(
+                    "[mm] book-driven requote: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} resting={Resting} target={Target}",
+                    resting.ClOrdId, symbol, isBuy ? "buy" : "sell", resting.Price, target);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Shared cancel-submit path for both the staleness guard and the
+    /// book-driven reactive requote: registers the cancel-attempt
+    /// correlation BEFORE the SDK await (see <see cref="OrderTracker.RegisterCancelAttempt"/>'s
+    /// doc comment on why), sends the request, and on synchronous failure
+    /// clears the pending-cancel marker it just set so the order isn't
+    /// permanently hidden from future guards. Returns whether the cancel
+    /// was accepted for transmission; callers add their own
+    /// reason-specific success metric/log.
+    /// </summary>
+    private async Task<bool> SubmitCancelAsync(EntryPointClient client, TrackedOrder o, InstrumentConfig instr,
+        System.Diagnostics.Metrics.Counter<long> submitFailedMetric, CancellationToken ct)
+    {
+        var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
+        _tracker.RegisterCancelAttempt(cancelClOrdId, o.ClOrdId);
+        var req = new UpModels.CancelOrderRequest
+        {
+            ClOrdID = new UpModels.ClOrdID(cancelClOrdId),
+            OrigClOrdID = new UpModels.ClOrdID(o.ClOrdId),
+            SecurityId = instr.SecurityId,
+            Side = o.IsBuy ? UpModels.Side.Buy : UpModels.Side.Sell,
+        };
+        try
+        {
+            await client.CancelAsync(req, ct);
+            return true;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            // The request never reached (or was never acknowledged by)
+            // the venue, so no ER will ever arrive to clear
+            // PendingCancelClOrdId via ClearPendingCancel/Close(). Guarded
+            // so we don't clear a DIFFERENT, later attempt that may have
+            // already been registered for this order by the time this
+            // catch runs.
+            _tracker.ClearPendingCancelIfMatches(o.ClOrdId, cancelClOrdId);
+            submitFailedMetric.Add(1, new KeyValuePair<string, object?>("symbol", o.Symbol));
+            _log.LogWarning(ex, "[mm] failed to cancel clordid={ClOrdId} symbol={Symbol}", o.ClOrdId, o.Symbol);
+            return false;
         }
     }
 

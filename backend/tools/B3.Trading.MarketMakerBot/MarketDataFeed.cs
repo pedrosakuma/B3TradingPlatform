@@ -29,6 +29,20 @@ internal sealed class MarketDataFeed : IAsyncDisposable
     private readonly ILogger _log;
     private MarketDataClient? _client;
 
+    /// <summary>
+    /// Raised for every order-level book delta (add/update/delete) the
+    /// venue reports for a subscribed symbol, carrying the venue's own
+    /// OrderId. RFC #703 book-driven quoting: <see
+    /// cref="MarketMakerWorker"/> subscribes to react to the market
+    /// moving instead of waiting solely on its own ER stream, but must
+    /// first filter out deltas its OWN resting orders caused (via <see
+    /// cref="OrderTracker.IsOwnOrder"/>) — this feed deliberately does
+    /// NOT know about the bot's own orders (same "no instrument-identity
+    /// smarts" boundary as the rest of this class), so it forwards every
+    /// delta and leaves the self-order filter to the subscriber.
+    /// </summary>
+    public event Action<string, ulong>? BookOrderChanged;
+
     public MarketDataFeed(MarketPriceTracker tracker, ILogger log)
     {
         _tracker = tracker;
@@ -59,13 +73,20 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         client.SymbolDelisted += OnSymbolDelisted;
         client.ConnectionStateChanged += OnConnectionStateChanged;
         client.SubscribeError += OnSubscribeError;
+        client.OrderAdded += OnOrderAdded;
+        client.OrderUpdated += OnOrderUpdated;
+        client.OrderDeleted += OnOrderDeleted;
 
         try
         {
             await client.ConnectAsync(ct).ConfigureAwait(false);
             foreach (var instr in instruments)
             {
-                await client.SubscribeAsync(instr.Symbol, SubscribeFlags.Trades | SubscribeFlags.Info, ct)
+                // Book (MBO) is required alongside Trades|Info: it's the
+                // only flag that carries order-level deltas with the
+                // venue's own OrderId, which BookOrderChanged's
+                // self-order filter depends on (see RFC #703).
+                await client.SubscribeAsync(instr.Symbol, SubscribeFlags.Trades | SubscribeFlags.Info | SubscribeFlags.Book, ct)
                     .ConfigureAwait(false);
             }
             _client = client;
@@ -85,6 +106,9 @@ internal sealed class MarketDataFeed : IAsyncDisposable
             client.SymbolDelisted -= OnSymbolDelisted;
             client.ConnectionStateChanged -= OnConnectionStateChanged;
             client.SubscribeError -= OnSubscribeError;
+            client.OrderAdded -= OnOrderAdded;
+            client.OrderUpdated -= OnOrderUpdated;
+            client.OrderDeleted -= OnOrderDeleted;
             await client.DisposeAsync().ConfigureAwait(false);
             if (ex is OperationCanceledException) throw;
             _log.LogWarning(ex,
@@ -97,6 +121,13 @@ internal sealed class MarketDataFeed : IAsyncDisposable
 
     private void OnInfoSnapshot(InfoSnapshotEvent ev) =>
         _tracker.OnInfoSnapshot(ev.Symbol, ev.TradingReferencePrice, ev.LastTradePrice);
+
+    private void OnOrderAdded(OrderAddedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
+
+    private void OnOrderUpdated(OrderUpdatedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
+
+    private void OnOrderDeleted(OrderDeletedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
+
 
     private void OnSymbolDelisted(SymbolDelistedEvent ev)
     {
@@ -125,6 +156,9 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         _client.SymbolDelisted -= OnSymbolDelisted;
         _client.ConnectionStateChanged -= OnConnectionStateChanged;
         _client.SubscribeError -= OnSubscribeError;
+        _client.OrderAdded -= OnOrderAdded;
+        _client.OrderUpdated -= OnOrderUpdated;
+        _client.OrderDeleted -= OnOrderDeleted;
         try { await _client.DisposeAsync().ConfigureAwait(false); }
         catch { /* best-effort cleanup on shutdown */ }
     }

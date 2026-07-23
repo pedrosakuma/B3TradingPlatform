@@ -40,6 +40,15 @@ public sealed class OrderTracker
     private readonly Dictionary<(string Symbol, bool IsBuy), ulong> _activeSideOwners = new();
     private readonly object _sideLock = new();
     private readonly TimeProvider _clock;
+    // RFC #703 book-driven quoting: every ER carries the venue's own
+    // OrderId (distinct from our ClOrdID namespace). Market-data's
+    // order-level book feed (Book/MBO subscribe flag) reports OrderId
+    // too, so this is the join key that lets the worker tell "my own
+    // resting order just moved the book" apart from "someone else's did"
+    // — see MarketDataFeed.BookOrderChanged / MarketMakerWorker's
+    // self-order filter. Kept as a bare id set (not merged into _orders)
+    // for the same double-counting reason _cancelAttempts is separate.
+    private readonly ConcurrentDictionary<ulong, byte> _ownOrderIds = new();
 
     public OrderTracker(TimeProvider? clock = null)
     {
@@ -102,6 +111,24 @@ public sealed class OrderTracker
         {
             return _activeSideOwners.ContainsKey((symbol, isBuy));
         }
+    }
+
+    /// <summary>Returns the currently-resting order for (symbol, side), if
+    /// any — used by the book-reaction path to compare its resting price
+    /// against a freshly-computed target without racing a separate
+    /// HasOpenSide-then-TryGet pair.</summary>
+    public bool TryGetActiveSideOrder(string symbol, bool isBuy, out TrackedOrder order)
+    {
+        ulong owner;
+        lock (_sideLock)
+        {
+            if (!_activeSideOwners.TryGetValue((symbol, isBuy), out owner))
+            {
+                order = default!;
+                return false;
+            }
+        }
+        return TryGet(owner, out order);
     }
 
     /// <summary>
@@ -181,6 +208,31 @@ public sealed class OrderTracker
         _cancelAttempts.TryGetValue(clOrdId, out origClOrdId);
 
     /// <summary>
+    /// Records the venue's own OrderId for a tracked order, learned from
+    /// any ER carrying it (OrderAccepted/OrderTrade/OrderModified all do —
+    /// see <c>MarketMakerWorker.HandleEventAsync</c>). Idempotent and
+    /// deliberately a no-op for an unknown ClOrdID or a zero/absent
+    /// OrderId (some ER shapes may not have assigned one yet). This is
+    /// the join key <see cref="IsOwnOrder"/> uses to filter book-level
+    /// market-data deltas the bot's own resting orders themselves caused
+    /// — see RFC #703's book-driven quoting self-awareness requirement.
+    /// </summary>
+    public void SetOrderId(ulong clOrdId, ulong orderId)
+    {
+        if (orderId == 0) return;
+        if (!_orders.TryGetValue(clOrdId, out var order)) return;
+        order.OrderId = orderId;
+        _ownOrderIds[orderId] = 0;
+    }
+
+    /// <summary>True when <paramref name="orderId"/> (the venue's own
+    /// order identifier, as reported on market-data's order-level book
+    /// events) belongs to one of the bot's own currently-tracked orders.
+    /// Used to filter self-caused book deltas out of the reactive
+    /// requote path — see <see cref="SetOrderId"/>.</summary>
+    public bool IsOwnOrder(ulong orderId) => _ownOrderIds.ContainsKey(orderId);
+
+    /// <summary>
     /// Clears a previously-registered pending cancel for
     /// <paramref name="origClOrdId"/> WITHOUT closing the order — used
     /// when a cancel is rejected for a reason that doesn't prove the
@@ -248,6 +300,7 @@ public sealed class OrderTracker
     {
         o.IsOpen = false;
         o.PendingCancelClOrdId = null;
+        if (o.OrderId is { } orderId) _ownOrderIds.TryRemove(orderId, out _);
         lock (_sideLock)
         {
             var side = (o.Symbol, o.IsBuy);
@@ -271,5 +324,9 @@ public sealed class TrackedOrder
     /// order, if any — see <see cref="OrderTracker.RegisterCancelAttempt"/>.
     /// Null means no cancel is currently in flight for this order.</summary>
     public ulong? PendingCancelClOrdId { get; set; }
+    /// <summary>The venue's own order identifier, once learned from an ER
+    /// — see <see cref="OrderTracker.SetOrderId"/>. Null until the first
+    /// ER for this ClOrdID arrives.</summary>
+    public ulong? OrderId { get; set; }
 }
 
