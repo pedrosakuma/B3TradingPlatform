@@ -326,6 +326,16 @@ The standard OTLP meter exposes
 configured `symbol`; effective-tick changes also emit structured
 `[mm-volatility]` diagnostics.
 
+### Strategy soak evidence
+
+Use [`operations/market-maker-soak.md`](operations/market-maker-soak.md) and
+`scripts/soak/run-market-maker-soak.sh` for isolated static, inventory-skew,
+volatility-spread, and `PauseAndCancel` runs. The dedicated
+`docker-compose.market-maker-soak.yml` overlay routes the bot to the bundled
+Collector, parameterizes only the opt-in feature switches, and isolates
+container/network/volume names. Multi-hour evidence is operator-run and is not
+part of normal CI.
+
 ### Out of scope
 
 - `KeepLastAndWiden` is not a supported feed-loss policy.
@@ -458,7 +468,9 @@ docker compose \
 ```
 
 This exports `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`
-into the trading-host container automatically — no extra env required.
+into the trading-host container automatically — no extra env required. The
+market-maker bot remains opt-in; the strategy-soak overlay wires that service
+to the same Collector.
 
 Default ports:
 

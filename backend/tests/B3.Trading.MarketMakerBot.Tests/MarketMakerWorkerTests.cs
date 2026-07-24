@@ -53,7 +53,7 @@ public class MarketMakerWorkerTests : IDisposable
         pnlLedger = new MarketMakerPnlLedger();
         var volatilitySpread = new VolatilitySpreadEstimator(Options.Create(options), TimeProvider.System);
         var metrics = new MarketMakerMetrics(
-            pnlLedger, priceTracker, volatilitySpread, Options.Create(options));
+            pnlLedger, tracker, priceTracker, volatilitySpread, Options.Create(options));
         _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
         var marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance);
@@ -120,7 +120,7 @@ public class MarketMakerWorkerTests : IDisposable
         pnlLedger = new MarketMakerPnlLedger(clock);
         var volatilitySpread = new VolatilitySpreadEstimator(Options.Create(options), clock);
         var metrics = new MarketMakerMetrics(
-            pnlLedger, priceTracker, volatilitySpread, Options.Create(options));
+            pnlLedger, tracker, priceTracker, volatilitySpread, Options.Create(options));
         _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
         marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance, clock);

@@ -167,6 +167,8 @@ this repo. Highlights:
 - [Architecture](docs/ARCHITECTURE.md) — layered model, wire boundary, ER routing.
 - [FIXP listener — operations](docs/operations/fixp-listener.md) — the third inbound channel.
 - [Docker](docs/DOCKER.md) — canonical container topology + overlays.
+- [Market-maker strategy soak](docs/operations/market-maker-soak.md) —
+  reproducible baseline, feature, and feed-loss evidence procedure.
 - [WebSocket protocol](docs/WEBSOCKET-PROTOCOL.md) and [Frontend](docs/FRONTEND.md).
 
 ## Bootstrap scope (issue #1)

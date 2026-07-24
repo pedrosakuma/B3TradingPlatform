@@ -14,7 +14,7 @@ public class MarketMakerMetricsTests
         var prices = new MarketPriceTracker();
         var options = Options.Create(new MarketMakerBotOptions());
         var volatility = new VolatilitySpreadEstimator(options, TimeProvider.System);
-        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
+        using var metrics = new MarketMakerMetrics(ledger, new OrderTracker(), prices, volatility, options);
         using var listener = new MeterListener();
         var measurements = new ConcurrentBag<(string Name, long Value, string Symbol)>();
         listener.InstrumentPublished = (instrument, meterListener) =>
@@ -55,7 +55,7 @@ public class MarketMakerMetricsTests
             1, 1, "PETR4", true, 100, 30m, 100, 100, 0, true)).Status);
 
         var volatility = new VolatilitySpreadEstimator(options, clock);
-        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
+        using var metrics = new MarketMakerMetrics(ledger, new OrderTracker(), prices, volatility, options);
         using var listener = new MeterListener();
         var measurements = new ConcurrentBag<(string Name, double Value, string Symbol)>();
         var publishedNames = new ConcurrentBag<string>();
@@ -126,7 +126,7 @@ public class MarketMakerMetricsTests
             1, 1, "PETR4", true, 500, 30m, 500, 500, 0, true)).Status);
 
         var volatility = new VolatilitySpreadEstimator(options, TimeProvider.System);
-        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
+        using var metrics = new MarketMakerMetrics(ledger, new OrderTracker(), prices, volatility, options);
         using var listener = new MeterListener();
         var measurements = new ConcurrentBag<(string Name, double Value, string Symbol)>();
         listener.InstrumentPublished = (instrument, meterListener) =>
@@ -173,7 +173,9 @@ public class MarketMakerMetricsTests
         volatility.SetConnected(true);
         volatility.OnTrade("PETR4", 30m);
         volatility.OnTrade("PETR4", 30.02m);
-        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
+        var orders = new OrderTracker(clock);
+        Assert.True(orders.TryRegisterSubmit(1, "PETR4", 30m, 100, isBuy: true));
+        using var metrics = new MarketMakerMetrics(ledger, orders, prices, volatility, options);
         using var listener = new MeterListener();
         var doubles = new ConcurrentBag<(string Name, double Value, string Symbol)>();
         var longs = new ConcurrentBag<(string Name, long Value, string Symbol)>();
@@ -192,6 +194,9 @@ public class MarketMakerMetricsTests
 
         Assert.Contains(("bot.strategy.volatility_move_estimate_ticks", 2d, "PETR4"), doubles);
         Assert.Contains(("bot.strategy.volatility_additional_half_spread_ticks", 3L, "PETR4"), longs);
+        Assert.Contains(("bot.orders.open", 1L, "PETR4"), longs);
+        Assert.Contains(("bot.strategy.configured_half_spread_ticks", 5L, "PETR4"), longs);
+        Assert.Contains(("bot.strategy.effective_half_spread_ticks", 8L, "PETR4"), longs);
     }
 
     [Fact]
@@ -210,7 +215,7 @@ public class MarketMakerMetricsTests
             Instruments = [new InstrumentConfig { Symbol = "PETR4" }],
         });
         var volatility = new VolatilitySpreadEstimator(options, clock);
-        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
+        using var metrics = new MarketMakerMetrics(ledger, new OrderTracker(clock), prices, volatility, options);
         using var listener = new MeterListener();
         var counters = new ConcurrentBag<string>();
         var gauges = new ConcurrentBag<string>();

@@ -1,0 +1,79 @@
+# Market-maker strategy soak overlay (#719).
+#
+# Stack after the base, market-maker, and observability overlays. It keeps
+# strategy switches operator-controlled, routes the bot to the bundled OTLP
+# collector, and replaces fixed container/network/volume names so each run has
+# isolated state. Host ports remain configurable through the existing compose
+# variables.
+#
+# See docs/operations/market-maker-soak.md and
+# scripts/soak/run-market-maker-soak.sh. This overlay is intentionally absent
+# from normal multi-hour CI; CI only renders it.
+
+services:
+  matching-platform:
+    container_name: ${MM_SOAK_PROJECT_NAME:?Set MM_SOAK_PROJECT_NAME}-matching-platform
+
+  marketdata:
+    container_name: ${MM_SOAK_PROJECT_NAME}-marketdata
+
+  trading-host:
+    container_name: ${MM_SOAK_PROJECT_NAME}-trading-host
+    environment:
+      # The helper drives the existing local-login sandbox API directly.
+      # Make the compatibility intent explicit instead of inheriting an empty
+      # AUTH_LOCAL_LOGIN_ENABLED value from an operator shell.
+      Trading__Auth__LocalLoginEnabled: "true"
+
+  frontend:
+    container_name: ${MM_SOAK_PROJECT_NAME}-frontend
+
+  market-maker-bot:
+    container_name: ${MM_SOAK_PROJECT_NAME}-market-maker-bot
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRIC_EXPORT_INTERVAL: ${MM_SOAK_METRIC_EXPORT_INTERVAL_MS:-5000}
+      MarketMaker__Telemetry__SnapshotInterval: ${MM_SOAK_PNL_SNAPSHOT_INTERVAL:-00:00:30}
+      MarketMaker__MarketData__FeedLossPolicy: ${MM_SOAK_FEED_LOSS_POLICY:-StaticRefPrice}
+      MarketMaker__MarketData__MaxReferenceAge: ${MM_SOAK_MAX_REFERENCE_AGE:-00:00:30}
+      MarketMaker__Instruments__0__InventorySkew__Enabled: ${MM_SOAK_INVENTORY_SKEW_ENABLED:-false}
+      MarketMaker__Instruments__1__InventorySkew__Enabled: ${MM_SOAK_INVENTORY_SKEW_ENABLED:-false}
+      MarketMaker__Instruments__2__InventorySkew__Enabled: ${MM_SOAK_INVENTORY_SKEW_ENABLED:-false}
+      MarketMaker__Instruments__0__VolatilitySpread__Enabled: ${MM_SOAK_VOLATILITY_SPREAD_ENABLED:-false}
+      MarketMaker__Instruments__1__VolatilitySpread__Enabled: ${MM_SOAK_VOLATILITY_SPREAD_ENABLED:-false}
+      MarketMaker__Instruments__2__VolatilitySpread__Enabled: ${MM_SOAK_VOLATILITY_SPREAD_ENABLED:-false}
+
+  otel-collector:
+    container_name: ${MM_SOAK_PROJECT_NAME}-otel-collector
+
+  prometheus:
+    container_name: ${MM_SOAK_PROJECT_NAME}-prometheus
+
+  alertmanager:
+    container_name: ${MM_SOAK_PROJECT_NAME}-alertmanager
+
+  alert-receiver:
+    container_name: ${MM_SOAK_PROJECT_NAME}-alert-receiver
+    image: ${MM_SOAK_ALERT_RECEIVER_IMAGE:-b3-alert-receiver:dev}
+
+  grafana:
+    container_name: ${MM_SOAK_PROJECT_NAME}-grafana
+
+volumes:
+  trading-data:
+    name: ${MM_SOAK_PROJECT_NAME}-trading-data
+  matching-data:
+    name: ${MM_SOAK_PROJECT_NAME}-matching-data
+  market-maker-bot-state:
+    name: ${MM_SOAK_PROJECT_NAME}-market-maker-bot-state
+  prometheus-data:
+    name: ${MM_SOAK_PROJECT_NAME}-prometheus-data
+  grafana-data:
+    name: ${MM_SOAK_PROJECT_NAME}-grafana-data
+  alertmanager-data:
+    name: ${MM_SOAK_PROJECT_NAME}-alertmanager-data
+
+networks:
+  b3-net:
+    name: ${MM_SOAK_PROJECT_NAME}-net

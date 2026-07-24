@@ -35,6 +35,8 @@
 #       Useful for testing the no-broker fail-closed path
 #       (POST /api/orders → 502 BadGateway, /health readyForOrders=false).
 #   - docker-compose.observability.yml → Prometheus + Grafana sidecars.
+#   - docker-compose.market-maker-soak.yml → stack after market-maker +
+#       observability for isolated, operator-run strategy evidence (#719).
 #   - docker-compose.conformance.yml  → one-shot conformance suite runner
 #       (carol admin seed). Combine with real-conformance.yml when running
 #       on top of the real stack to opt into RequiresSandboxMatching specs.

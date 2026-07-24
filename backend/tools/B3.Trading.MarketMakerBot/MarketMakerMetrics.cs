@@ -14,6 +14,7 @@ public sealed class MarketMakerMetrics : IDisposable
     private const string UnknownSymbol = "unknown";
 
     private readonly MarketMakerPnlLedger _ledger;
+    private readonly OrderTracker _orders;
     private readonly MarketPriceTracker _prices;
     private readonly VolatilitySpreadEstimator _volatilitySpread;
     private readonly IReadOnlyList<InstrumentConfig> _instruments;
@@ -49,11 +50,13 @@ public sealed class MarketMakerMetrics : IDisposable
 
     public MarketMakerMetrics(
         MarketMakerPnlLedger ledger,
+        OrderTracker orders,
         MarketPriceTracker prices,
         VolatilitySpreadEstimator volatilitySpread,
         IOptions<MarketMakerBotOptions> options)
     {
         _ledger = ledger;
+        _orders = orders;
         _prices = prices;
         _volatilitySpread = volatilitySpread;
         _instruments = options.Value.Instruments;
@@ -97,6 +100,13 @@ public sealed class MarketMakerMetrics : IDisposable
 
         _meter.CreateObservableGauge("bot.position.net_quantity", ObservePositions);
         _meter.CreateObservableGauge("bot.position.average_entry_price", ObserveAverageCosts);
+        _meter.CreateObservableGauge("bot.orders.open", ObserveOpenOrders);
+        _meter.CreateObservableGauge(
+            "bot.strategy.configured_half_spread_ticks",
+            ObserveConfiguredHalfSpreadTicks);
+        _meter.CreateObservableGauge(
+            "bot.strategy.effective_half_spread_ticks",
+            ObserveEffectiveHalfSpreadTicks);
         _meter.CreateObservableGauge("bot.strategy.inventory_skew_ticks", ObserveInventorySkewTicks);
         _meter.CreateObservableGauge("bot.strategy.volatility_move_estimate_ticks",
             ObserveVolatilityMoveEstimateTicks);
@@ -188,6 +198,25 @@ public sealed class MarketMakerMetrics : IDisposable
     private IEnumerable<Measurement<double>> ObserveAverageCosts() =>
         _ledger.SnapshotAll().Select(snapshot =>
             new Measurement<double>((double)snapshot.AverageCost, SymbolTag(snapshot.Symbol)));
+
+    private IEnumerable<Measurement<long>> ObserveOpenOrders() =>
+        _instruments.Select(instrument =>
+            new Measurement<long>(_orders.InFlightCount(instrument.Symbol), SymbolTag(instrument.Symbol)));
+
+    private IEnumerable<Measurement<long>> ObserveConfiguredHalfSpreadTicks() =>
+        _instruments.Select(instrument =>
+            new Measurement<long>(instrument.SpreadTicks, SymbolTag(instrument.Symbol)));
+
+    private IEnumerable<Measurement<long>> ObserveEffectiveHalfSpreadTicks()
+    {
+        foreach (var instrument in _instruments)
+        {
+            var additionalTicks = _volatilitySpread.GetSnapshot(instrument.Symbol).AdditionalSpreadTicks;
+            yield return new Measurement<long>(
+                checked(instrument.SpreadTicks + additionalTicks),
+                SymbolTag(instrument.Symbol));
+        }
+    }
 
     private IEnumerable<Measurement<double>> ObserveInventorySkewTicks()
     {
