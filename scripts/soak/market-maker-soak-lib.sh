@@ -1,10 +1,33 @@
 #!/usr/bin/env bash
 
+soak_environment_snapshot_is_secret_free() {
+    set +x
+    local snapshot_variable="$1"
+    shift
+    local environment_snapshot="${!snapshot_variable-}"
+    local wrapped_environment variable_name secret_value
+    wrapped_environment=$'\n'"$environment_snapshot"$'\n'
+    [[ "$wrapped_environment" != *$'\nSOAK_TRADING_PASSWORD='* ]] || return 1
+    [[ "$wrapped_environment" != *$'\nSOAK_COUNTERPARTY_PASSWORD='* ]] || return 1
+    for variable_name in "$@"; do
+        secret_value="${!variable_name-}"
+        [[ -z "$secret_value" || "$environment_snapshot" != *"$secret_value"* ]] || return 1
+    done
+}
+
+soak_child_environment_is_secret_free() {
+    set +x
+    local environment_snapshot
+    environment_snapshot="$(env)"
+    soak_environment_snapshot_is_secret_free environment_snapshot "$@"
+}
+
 soak_curl_json_request() {
     local method="$1" url="$2" token_variable="$3" body_variable="$4"
     (
         set +x
         local token="${!token_variable-}" body="${!body_variable-}"
+        export -n token body
         local curl_bin="${SOAK_CURL_BIN:-curl}"
         local -a arguments=(-fsS --max-time 10 --request "$method")
         if [[ -n "$token" ]]; then
@@ -14,6 +37,10 @@ soak_curl_json_request() {
         if [[ -n "$body" ]]; then
             exec 4<<<"$body"
             arguments+=(--header 'Content-Type: application/json' --data-binary @/dev/fd/4)
+        fi
+        if ! soak_child_environment_is_secret_free "$token_variable" "$body_variable"; then
+            echo "ERROR: refusing to launch curl with credentials present in its child environment" >&2
+            return 1
         fi
         "$curl_bin" "${arguments[@]}" "$url"
     )
@@ -120,6 +147,45 @@ soak_evaluate_counter_stabilization() {
         timeoutSeconds: $timeout,
         stableWindow: $stableWindow,
         samples: $samples
+      }
+    '
+}
+
+soak_evaluate_suite_source_binding() {
+    jq -c '
+      (
+        (.manifestExists | not) or
+        (.acceptedRunCount == 0)
+      ) as $requiresSourceBuild |
+      (
+        if $requiresSourceBuild then
+          .buildImages and
+          .gitClean and
+          (
+            .manifestBuiltFromGitSha == null or
+            .manifestBuiltFromGitSha == .gitSha
+          )
+        else
+          .manifestBuiltFromGitSha == .gitSha and
+          .pinnedRuntimeImages != null and
+          .actualRuntimeImages == .pinnedRuntimeImages
+        end
+      ) as $passed |
+      {
+        passed: $passed,
+        requiresSourceBuild: $requiresSourceBuild,
+        buildMode: (
+          if .buildImages then "clean-checkout-compose-build"
+          else "pinned-runtime-images"
+          end
+        ),
+        expectedBuiltFromGitSha: .gitSha,
+        observedBuiltFromGitSha: .manifestBuiltFromGitSha,
+        runtimeImagesMatch: (
+          if $requiresSourceBuild then null
+          else .actualRuntimeImages == .pinnedRuntimeImages
+          end
+        )
       }
     '
 }

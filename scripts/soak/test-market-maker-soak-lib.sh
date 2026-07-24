@@ -120,14 +120,48 @@ eventually_stable_counter="$(jq '.samples = [
 short_cycle="$(jq '.samples[2].timestampUtc = "2026-07-24T00:00:19Z"' <<<"$stable_counter")"
 [[ "$(soak_evaluate_counter_stabilization <<<"$short_cycle" | jq -r '.passed')" == "false" ]]
 
+first_no_build='{
+  "manifestExists": false,
+  "acceptedRunCount": 0,
+  "buildImages": false,
+  "gitClean": true,
+  "gitSha": "abc123",
+  "manifestBuiltFromGitSha": null,
+  "pinnedRuntimeImages": null,
+  "actualRuntimeImages": [{"service":"trading-host","imageId":"sha256:one","repoDigests":[]}]
+}'
+[[ "$(soak_evaluate_suite_source_binding <<<"$first_no_build" | jq -r '.passed')" == "false" ]]
+first_clean_build="$(jq '.buildImages = true' <<<"$first_no_build")"
+[[ "$(soak_evaluate_suite_source_binding <<<"$first_clean_build" | jq -r '.passed')" == "true" ]]
+first_dirty_build="$(jq '.buildImages = true | .gitClean = false' <<<"$first_no_build")"
+[[ "$(soak_evaluate_suite_source_binding <<<"$first_dirty_build" | jq -r '.passed')" == "false" ]]
+empty_manifest_no_build="$(jq '
+  .manifestExists = true |
+  .manifestBuiltFromGitSha = .gitSha |
+  .pinnedRuntimeImages = .actualRuntimeImages
+' <<<"$first_no_build")"
+[[ "$(soak_evaluate_suite_source_binding <<<"$empty_manifest_no_build" | jq -r '.passed')" == "false" ]]
+later_pinned_no_build="$(jq '
+  .manifestExists = true |
+  .acceptedRunCount = 1 |
+  .manifestBuiltFromGitSha = .gitSha |
+  .pinnedRuntimeImages = .actualRuntimeImages
+' <<<"$first_no_build")"
+[[ "$(soak_evaluate_suite_source_binding <<<"$later_pinned_no_build" | jq -r '.passed')" == "true" ]]
+later_mismatched_no_build="$(jq '.actualRuntimeImages[0].imageId = "sha256:two"' \
+    <<<"$later_pinned_no_build")"
+[[ "$(soak_evaluate_suite_source_binding <<<"$later_mismatched_no_build" | jq -r '.passed')" == "false" ]]
+
 scratch="$ROOT/soak-artifacts/self-test"
 rm -rf "$scratch"
 mkdir -p "$scratch"
 curl_argv="$scratch/curl-argv"
 curl_header="$scratch/curl-header"
 curl_body="$scratch/curl-body"
+curl_environment="$scratch/curl-environment"
 mock_curl() {
     printf '%s\n' "$@" >"$curl_argv"
+    env >"$curl_environment"
     cat <&3 >"$curl_header"
     cat <&4 >"$curl_body"
     printf '{"ok":true}\n'
@@ -142,6 +176,9 @@ grep -Fq "$secret_token" "$curl_header"
 grep -Fq 'argv-test-password-must-not-appear' "$curl_body"
 grep -Fxq '@/dev/fd/3' "$curl_argv"
 grep -Fxq '@/dev/fd/4' "$curl_argv"
+! grep -Fq "$secret_token" "$curl_environment"
+! grep -Fq 'argv-test-password-must-not-appear' "$curl_environment"
+! grep -Eq '^SOAK_(TRADING|COUNTERPARTY)_PASSWORD=' "$curl_environment"
 curl_trace="$scratch/curl-trace"
 (
     set -x
@@ -150,6 +187,15 @@ curl_trace="$scratch/curl-trace"
 ) 2>"$curl_trace"
 ! grep -Fq "$secret_token" "$curl_trace"
 ! grep -Fq 'argv-test-password-must-not-appear' "$curl_trace"
+
+export SOAK_TRADING_PASSWORD='environment-test-password'
+private_password="$SOAK_TRADING_PASSWORD"
+if soak_child_environment_is_secret_free private_password; then
+    echo "ERROR: exported password variable was accepted in a child environment" >&2
+    exit 1
+fi
+unset SOAK_TRADING_PASSWORD
+soak_child_environment_is_secret_free private_password
 
 steps_seen="$scratch/steps"
 cleanup_errors="$scratch/cleanup-errors.json"

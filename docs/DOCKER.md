@@ -348,8 +348,11 @@ aggregated cleanup evidence. The strict profile stabilizes submitted-order
 telemetry before outage, then proves a connected feed remains ineligible with
 zero quotes for a full export-plus-scrape cycle before generating a fresh
 recovery trade. Sensitive HTTP bodies and bearer headers use anonymous file
-descriptors rather than process arguments. Multi-hour evidence is operator-run
-and is not part of normal CI.
+descriptors rather than process arguments; exported password inputs are unset
+before the first child process and the live Docker-event environment is checked.
+The first acceptance run must build from the recorded clean git SHA, while
+later no-build profiles must exactly match the manifest's image IDs/digests.
+Multi-hour evidence is operator-run and is not part of normal CI.
 
 ### Out of scope
 

@@ -173,7 +173,8 @@ export SOAK_TRADING_IMAGE="b3tp-719-trading-host:${image_tag}"
 export SOAK_MARKET_MAKER_BOT_IMAGE="b3tp-719-market-maker-bot:${image_tag}"
 export SOAK_ALERT_RECEIVER_IMAGE="b3tp-719-alert-receiver:${image_tag}"
 
-# Build the exact checkout once.
+# The manifest-creating run must build the exact clean checkout. Do not add
+# --no-build here; the helper rejects it while the suite has no accepted runs.
 SOAK_PROJECT_NAME=b3tp-719-baseline-01 \
 SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/baseline" \
   scripts/soak/run-market-maker-soak.sh --profile baseline
@@ -192,11 +193,14 @@ SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/pause-and-cancel" \
   scripts/soak/run-market-maker-soak.sh --profile pause-and-cancel --no-build
 ```
 
-The configured tags are labels only and may be mutable. Acceptance is pinned to
-the `sha256:` IDs obtained from the running containers. If `latest` or any
-other tag resolves to a different image between profiles, the helper fails the
-suite compatibility check. Do not rebuild, pull, or retag suite images between
-profiles.
+The configured tags are labels only and may be mutable. The first
+acceptance-eligible run requires a clean checkout and Compose build, and records
+`builtFromGitSha`, build mode, image IDs, and available repo digests in the
+manifest's immutable `sourceBinding`. If that run fails before registration,
+the manifest still has zero accepted runs and the retry must build again.
+Subsequent `--no-build` profiles are accepted only when their full runtime image
+identity list exactly matches the manifest. Do not rebuild, pull, or retag suite
+images between profiles.
 
 Useful controls:
 
@@ -238,10 +242,14 @@ isolated project and volumes unless `--keep-stack`/`SOAK_KEEP_STACK=true` is
 set. It refuses a non-empty artifact directory so stale evidence cannot be
 mixed into a rerun.
 
-Login JSON and bearer headers are delivered to `curl` through anonymous,
-process-local file descriptors. Passwords and tokens are never placed in the
-`curl` process argument list or a temporary file, and the helper disables shell
-xtrace before loading credentials. Errors and evidence contain identities but
+At process start the helper copies `SOAK_TRADING_PASSWORD` and
+`SOAK_COUNTERPARTY_PASSWORD` into private, non-exported shell variables and
+immediately unsets both exported names before its first child process. Login JSON
+and bearer headers are delivered to `curl` through anonymous, process-local file
+descriptors. Passwords and tokens are never placed in a child environment,
+`curl` argument list, or temporary file. The helper disables shell xtrace,
+checks every sensitive curl launch, and verifies the live `docker events`
+process environment through `/proc`. Errors and evidence contain identities but
 never credentials.
 
 The pre-run `docker compose down -v --remove-orphans` is a required isolation
@@ -475,6 +483,8 @@ The helper writes only under ignored `soak-artifacts/`:
 - `rendered-config.json` — allow-listed, secret-free rendered auth/strategy configuration;
 - `runtime-images.json` — configured references, actual image IDs, and available repo digests;
 - `compatibility.json` — exact cross-profile comparison input;
+- `suite-source-binding.json` — first-build or pinned-image policy evaluation;
+- `credential-environment.json` — secret-name/value scrubbing and child-environment checks;
 - `runtime.csv` / `runtime.jsonl` — container IDs, image IDs, start time, restart count, and state;
 - `runtime-events.jsonl` / `runtime-lifecycle.json` — Docker lifecycle events and exact transition counts;
 - `runtime-continuity.json` — per-critical-service identity/start/status proof;
@@ -500,7 +510,7 @@ Use this summary shape (generated values only; never fabricate results):
 
 ```json
 {
-  "schemaVersion": "5",
+  "schemaVersion": "6",
   "runId": "20260724T180000Z-baseline",
   "profile": "baseline",
   "gitSha": "<40-hex commit>",
@@ -536,7 +546,12 @@ Use this summary shape (generated values only; never fabricate results):
     "reconnectStaleHoldSeconds": 10,
     "withGrafana": false
   },
-  "execution": {"buildImages": true, "keepStack": false},
+  "execution": {
+    "buildImages": true,
+    "buildMode": "clean-checkout-compose-build",
+    "builtFromGitSha": "<same 40-hex commit>",
+    "keepStack": false
+  },
   "workload": {
     "identities": {
       "trading": {"seedIndex": 0, "username": "<trading-user>", "firm": "<firm>", "role": "<role>"},
@@ -575,7 +590,7 @@ Suite manifest completion shape:
 
 ```json
 {
-  "schemaVersion": "1",
+  "schemaVersion": "2",
   "suiteId": "b3tp-719-<commit>-01",
   "expectedProfiles": [
     "baseline",
@@ -583,6 +598,21 @@ Suite manifest completion shape:
     "volatility-spread",
     "pause-and-cancel"
   ],
+  "sourceBinding": {
+    "builtFromGitSha": "<40-hex clean checkout commit>",
+    "buildMode": "clean-checkout-compose-build",
+    "buildImages": true,
+    "firstRunProfile": "baseline",
+    "builtServices": ["trading-host", "market-maker-bot", "alert-receiver"],
+    "runtimeImages": [
+      {
+        "service": "trading-host",
+        "configuredImage": "<suite tag>",
+        "imageId": "sha256:<actual image ID>",
+        "repoDigests": ["<digest when available>"]
+      }
+    ]
+  },
   "compatibility": {
     "gitSha": "<40-hex commit>",
     "settings": "<identical timing controls>",

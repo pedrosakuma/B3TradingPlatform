@@ -3,9 +3,20 @@
 set -euo pipefail
 case "$-" in *x*) set +x ;; esac
 
+trading_password="${SOAK_TRADING_PASSWORD:-}"
+counterparty_password="${SOAK_COUNTERPARTY_PASSWORD:-${SOAK_TRADING_PASSWORD:-}}"
+unset SOAK_TRADING_PASSWORD SOAK_COUNTERPARTY_PASSWORD
+export -n trading_password counterparty_password
+readonly trading_password counterparty_password
+
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
 source "$ROOT/scripts/soak/market-maker-soak-lib.sh"
+if ! soak_child_environment_is_secret_free trading_password counterparty_password; then
+    echo "ERROR: password input remained visible to child processes after environment scrubbing" >&2
+    exit 2
+fi
+credential_environment_check_count=1
 
 profile=""
 dry_run=false
@@ -464,12 +475,10 @@ if $dry_run; then
     exit 0
 fi
 
-[[ -n "${SOAK_TRADING_PASSWORD:-}" ]] || {
+[[ -n "$trading_password" ]] || {
     echo "ERROR: set SOAK_TRADING_PASSWORD to the plaintext matching the configured seed hash/salt." >&2
     exit 2
 }
-readonly trading_password="$SOAK_TRADING_PASSWORD"
-readonly counterparty_password="${SOAK_COUNTERPARTY_PASSWORD:-$SOAK_TRADING_PASSWORD}"
 readonly base_url="http://127.0.0.1:${TRADING_HOST_PORT}"
 readonly prometheus_url="http://127.0.0.1:${PROMETHEUS_PORT}"
 mkdir -p "$artifacts_dir"
@@ -496,6 +505,16 @@ printf 'timestamp_utc,phase,service,containerId,imageId,startedAtUtc,restartCoun
 : >"$runtime_events_jsonl"
 : >"$checks_tsv"
 printf '%s\n' "$sanitized_rendered_config" >"${artifacts_dir}/rendered-config.json"
+jq -n \
+    --argjson exportedNamesUnset true \
+    --argjson initialChildEnvironmentClean true \
+    '{
+      exportedNamesUnset: $exportedNamesUnset,
+      initialChildEnvironmentClean: $initialChildEnvironmentClean,
+      curlEnvironmentCheckedPerRequest: true,
+      dockerEventsEnvironmentClean: false,
+      childEnvironmentCheckCount: 1
+    }' >"${artifacts_dir}/credential-environment.json"
 
 log() {
     printf '%s [mm-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
@@ -543,6 +562,7 @@ register_accepted_suite_run() {
             settings: $summary[0].settings,
             workload: $summary[0].workload,
             profileConfiguration: $summary[0].profileConfiguration,
+            execution: $summary[0].execution,
             accountingPeriodStartedAtUtc: $summary[0].accountingPeriodStartedAtUtc,
             acceptanceEligible: true,
             passed: true,
@@ -645,9 +665,45 @@ timing_eligible=false
 if (( warmup_seconds >= 600 && duration_seconds >= 7200 && sample_interval_seconds <= 30 )); then
     timing_eligible=true
 fi
+if [[ -n "$suite_manifest" ]]; then
+    $timing_eligible || {
+        log "ERROR: SOAK_SUITE_MANIFEST is only valid with acceptance timing (warmup>=600, duration>=7200, sample<=30)"
+        exit 3
+    }
+    $git_clean || {
+        log "ERROR: acceptance evidence requires a clean checkout before image build"
+        exit 3
+    }
+    suite_preflight_run_count=0
+    if [[ -f "$suite_manifest" ]]; then
+        suite_preflight_run_count="$(jq -er '.runs | length' "$suite_manifest")" || {
+            log "ERROR: existing suite manifest has no valid runs object"
+            exit 3
+        }
+    fi
+    if (( suite_preflight_run_count == 0 )) && ! $build_images; then
+        log "ERROR: the first acceptance-eligible suite run must build images from the clean checkout; --no-build is not permitted"
+        exit 3
+    fi
+fi
+build_mode="preexisting-images-smoke"
+built_from_git_sha=""
+if $build_images; then
+    build_mode="compose-build-smoke"
+    if $git_clean; then
+        built_from_git_sha="$git_sha"
+    fi
+fi
+if [[ -n "$suite_manifest" ]]; then
+    if $build_images; then
+        build_mode="clean-checkout-compose-build"
+    else
+        build_mode="pinned-runtime-images"
+    fi
+fi
 configured_symbols_json="$(printf '%s\n' "${configured_symbols[@]}" | jq -R . | jq -s .)"
 jq -n \
-    --arg schemaVersion "5" \
+    --arg schemaVersion "6" \
     --arg runId "$run_id" \
     --arg profile "$profile" \
     --arg projectName "$project_name" \
@@ -686,6 +742,8 @@ jq -n \
     --argjson identities "$identity_mappings_json" \
     --argjson timingEligible "$timing_eligible" \
     --argjson buildImages "$build_images" \
+    --arg buildMode "$build_mode" \
+    --arg builtFromGitSha "$built_from_git_sha" \
     --argjson keepStack "$keep_stack" \
     --argjson withGrafana "$with_grafana" \
     --arg suiteManifest "$suite_manifest_relative" \
@@ -743,6 +801,10 @@ jq -n \
       renderedConfigArtifact: "rendered-config.json",
       execution: {
         buildImages: $buildImages,
+        buildMode: $buildMode,
+        builtFromGitSha: (
+          if $builtFromGitSha == "" then null else $builtFromGitSha end
+        ),
         keepStack: $keepStack
       },
       suiteManifest: (if $suiteManifest == "" then null else $suiteManifest end),
@@ -964,6 +1026,12 @@ capture_service_runtime_snapshot() {
 }
 
 capture_runtime_state initial
+if ! soak_child_environment_is_secret_free \
+    trading_password counterparty_password trading_token counterparty_token; then
+    log "ERROR: refusing to launch docker events with credentials visible in its child environment"
+    exit 1
+fi
+credential_environment_check_count=$((credential_environment_check_count + 1))
 docker events \
     --filter type=container \
     --filter "label=com.docker.compose.project=$project_name" \
@@ -974,7 +1042,29 @@ kill -0 "$runtime_event_monitor_pid" 2>/dev/null || {
     log "ERROR: Docker runtime event monitor failed to start"
     exit 1
 }
+runtime_event_environment=""
+while IFS= read -r -d '' environment_entry; do
+    runtime_event_environment+="${environment_entry}"$'\n'
+done <"/proc/${runtime_event_monitor_pid}/environ"
+if ! soak_environment_snapshot_is_secret_free runtime_event_environment \
+    trading_password counterparty_password trading_token counterparty_token; then
+    log "ERROR: docker events process environment contains credential material"
+    exit 1
+fi
+unset runtime_event_environment environment_entry
+jq \
+    --argjson checkCount "$credential_environment_check_count" '
+      .dockerEventsEnvironmentClean = true |
+      .childEnvironmentCheckCount = $checkCount
+    ' "${artifacts_dir}/credential-environment.json" \
+    >"${artifacts_dir}/credential-environment.json.next"
+mv "${artifacts_dir}/credential-environment.json.next" \
+    "${artifacts_dir}/credential-environment.json"
 
+runtime_image_binding="$(jq '
+  [.[] | {service, configuredImage, imageId, repoDigests}] |
+  sort_by(.service)
+' "${artifacts_dir}/runtime-images.json")"
 compatibility_json="$(jq -n \
     --slurpfile run "${artifacts_dir}/run.json" \
     --slurpfile rendered "${artifacts_dir}/rendered-config.json" \
@@ -1003,19 +1093,47 @@ printf '%s\n' "$compatibility_json" >"${artifacts_dir}/compatibility.json"
 
 suite_compatible=false
 if [[ -n "$suite_manifest" ]]; then
-    $timing_eligible || {
-        log "ERROR: SOAK_SUITE_MANIFEST is only valid with acceptance timing (warmup>=600, duration>=7200, sample<=30)"
-        exit 3
-    }
-    ! $git_dirty || {
-        log "ERROR: acceptance evidence requires a clean checkout"
-        exit 3
-    }
     suite_id="$(basename "$(dirname "$suite_manifest")")"
+    suite_manifest_exists=false
+    accepted_run_count=0
+    manifest_built_from_git_sha=null
+    pinned_runtime_images=null
     if [[ -e "$suite_manifest" ]]; then
+        suite_manifest_exists=true
+        accepted_run_count="$(jq -er '.runs | length' "$suite_manifest")"
+        manifest_built_from_git_sha="$(jq -c '.sourceBinding.builtFromGitSha // null' \
+            "$suite_manifest")"
+        pinned_runtime_images="$(jq -c '.sourceBinding.runtimeImages // null' "$suite_manifest")"
+    fi
+    suite_source_binding_report="$(jq -cn \
+        --argjson manifestExists "$suite_manifest_exists" \
+        --argjson acceptedRunCount "$accepted_run_count" \
+        --argjson buildImages "$build_images" \
+        --argjson gitClean "$git_clean" \
+        --arg gitSha "$git_sha" \
+        --argjson manifestBuiltFromGitSha "$manifest_built_from_git_sha" \
+        --argjson pinnedRuntimeImages "$pinned_runtime_images" \
+        --argjson actualRuntimeImages "$runtime_image_binding" \
+        '{
+          manifestExists: $manifestExists,
+          acceptedRunCount: $acceptedRunCount,
+          buildImages: $buildImages,
+          gitClean: $gitClean,
+          gitSha: $gitSha,
+          manifestBuiltFromGitSha: $manifestBuiltFromGitSha,
+          pinnedRuntimeImages: $pinnedRuntimeImages,
+          actualRuntimeImages: $actualRuntimeImages
+        }' | soak_evaluate_suite_source_binding)"
+    printf '%s\n' "$suite_source_binding_report" \
+        >"${artifacts_dir}/suite-source-binding.json"
+    if [[ "$(jq -r '.passed' <<<"$suite_source_binding_report")" != "true" ]]; then
+        log "ERROR: acceptance suite source/image binding failed: $(jq -c . <<<"$suite_source_binding_report")"
+        exit 1
+    fi
+    if $suite_manifest_exists; then
         if ! jq -e \
             --argjson compatibility "$compatibility_json" '
-              .schemaVersion == "1" and
+              .schemaVersion == "2" and
               .expectedProfiles == ["baseline","inventory-skew","volatility-spread","pause-and-cancel"] and
               .compatibility == $compatibility
             ' >/dev/null "$suite_manifest"; then
@@ -1030,11 +1148,23 @@ if [[ -n "$suite_manifest" ]]; then
     else
         jq -n \
             --arg suiteId "$suite_id" \
+            --arg builtFromGitSha "$git_sha" \
+            --arg buildMode "$build_mode" \
+            --arg firstRunProfile "$profile" \
+            --argjson runtimeImages "$runtime_image_binding" \
             --argjson compatibility "$compatibility_json" '{
-              schemaVersion: "1",
+              schemaVersion: "2",
               suiteId: $suiteId,
               createdAtUtc: (now | todateiso8601),
               expectedProfiles: ["baseline","inventory-skew","volatility-spread","pause-and-cancel"],
+              sourceBinding: {
+                builtFromGitSha: $builtFromGitSha,
+                buildMode: $buildMode,
+                buildImages: true,
+                firstRunProfile: $firstRunProfile,
+                builtServices: ["trading-host","market-maker-bot","alert-receiver"],
+                runtimeImages: $runtimeImages
+              },
               compatibility: $compatibility,
               runs: {},
               suiteAcceptanceEligible: false
@@ -1065,8 +1195,10 @@ login() {
 }
 
 trading_token="$(login "$trading_user" "$trading_password")"
+export -n trading_token
 readonly trading_token
 counterparty_token="$(login "$counterparty_user" "$counterparty_password")"
+export -n counterparty_token
 readonly counterparty_token
 
 deposit() {
@@ -2169,6 +2301,14 @@ record_check "own-fills-accounted" \
 record_check "operational-error-counters" \
     "$(numeric_test "$operational_errors == 0" && echo true || echo false)" \
     "0 submit/reject/cancel error events" "$operational_errors"
+record_check "credential-child-environments" true \
+    "exported password names/values absent from child environments; curl checks every request and docker events is checked before launch" \
+    "artifact=credential-environment.json"
+if [[ -n "$suite_manifest" ]]; then
+    record_check "suite-source-binding" "$suite_compatible" \
+        "first accepted run clean-builds the recorded git SHA; later no-build runs exactly match pinned runtime image IDs/digests" \
+        "buildMode=$build_mode builtFromGitSha=${built_from_git_sha:-manifest-pinned} artifact=suite-source-binding.json"
+fi
 record_check "runtime-containers-stable" \
     "$($runtime_stable && [[ "$runtime_continuity_pass" == "true" ]] && echo true || echo false)" \
     "all critical services keep container/image identity and restartCount=0 with no lifecycle event; PauseAndCancel permits exactly one marketdata die/start pair" \
