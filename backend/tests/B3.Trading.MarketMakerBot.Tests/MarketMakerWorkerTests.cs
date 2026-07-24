@@ -123,7 +123,7 @@ public class MarketMakerWorkerTests : IDisposable
             pnlLedger, priceTracker, volatilitySpread, Options.Create(options));
         _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
-        marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance);
+        marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance, clock);
         var worker = new MarketMakerWorker(
             Options.Create(options), tracker, priceTracker, volatilitySpread, pnlLedger, metrics,
             marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance, clock);
@@ -1473,6 +1473,32 @@ public class MarketMakerWorkerTests : IDisposable
         Assert.Equal(2, client.SubmittedOrders.Count);
         Assert.Equal(31.95m, client.SubmittedOrders.Single(order => order.Side == Side.Buy).Price);
         Assert.Equal(32.05m, client.SubmittedOrders.Single(order => order.Side == Side.Sell).Price);
+    }
+
+    [Theory]
+    [InlineData(FeedLossPolicy.StaticRefPrice)]
+    [InlineData(FeedLossPolicy.PauseAndCancel)]
+    public async Task FutureReferenceIsRejectedUnderBothFeedLossPolicies(FeedLossPolicy policy)
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new FakeClock(t0);
+        Action<MarketMakerBotOptions>? configure = policy == FeedLossPolicy.PauseAndCancel
+            ? EnablePauseAndCancel
+            : null;
+        var (worker, _, client, instrument, prices) = CreateWorker(clock, configure);
+        prices.SetConnected(true, t0);
+        Assert.True(prices.OnTrade(instrument.Symbol, 31m, t0));
+
+        Assert.False(prices.OnTrade(instrument.Symbol, 99m, t0.AddSeconds(1)));
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.Equal(30.95m, client.SubmittedOrders.Single(order => order.Side == Side.Buy).Price);
+        Assert.Equal(31.05m, client.SubmittedOrders.Single(order => order.Side == Side.Sell).Price);
     }
 
     [Fact]

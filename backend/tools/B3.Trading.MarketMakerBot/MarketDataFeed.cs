@@ -255,7 +255,8 @@ internal sealed class MarketDataFeed : IAsyncDisposable
     {
         var before = StrictAvailability(symbol);
         var updated = _tracker.OnTrade(symbol, price, receivedAtUtc ?? _clock.GetUtcNow());
-        PublishVolatilityChange(_volatilitySpread.OnTrade(symbol, price));
+        if (updated)
+            PublishVolatilityChange(_volatilitySpread.OnTrade(symbol, price));
         PublishStrictAvailabilityChange(symbol, before, updated);
     }
 

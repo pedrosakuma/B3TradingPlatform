@@ -262,18 +262,57 @@ public class MarketPriceTrackerTests
         var tracker = new MarketPriceTracker(clock);
         tracker.SetConnected(true, t0);
 
-        tracker.OnTrade("PETR4", 30m, t0.AddSeconds(1));
+        Assert.False(tracker.OnTrade("PETR4", 30m, t0.AddSeconds(1)));
+        Assert.False(tracker.TryGetReferencePrice("PETR4", out _));
         Assert.Equal(
             FeedUnavailableReason.AwaitingCurrentEpochReference,
             tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).UnavailableReason);
 
         clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.False(tracker.TryGetReferencePrice("PETR4", out _));
         Assert.Equal(
             FeedUnavailableReason.AwaitingCurrentEpochReference,
             tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).UnavailableReason);
 
         tracker.OnTrade("PETR4", 31m, clock.GetUtcNow());
         Assert.True(tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).IsEligible);
+    }
+
+    [Fact]
+    public void OutOfOrderOlderTimestampDoesNotReplacePriceSourceOrTime()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new ManualTimeProvider(t0.AddSeconds(2));
+        var tracker = new MarketPriceTracker(clock);
+        tracker.SetConnected(true, t0);
+        Assert.True(tracker.OnInfoSnapshot("PETR4", 31m, null, t0.AddSeconds(2)));
+
+        Assert.False(tracker.OnTrade("PETR4", 29m, t0.AddSeconds(1)));
+
+        Assert.True(tracker.TryGetReferencePrice("PETR4", out var price));
+        Assert.Equal(31m, price);
+        var availability = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.True(availability.IsEligible);
+        Assert.Equal(31m, availability.LastValidMark?.Price);
+        Assert.Equal(ReferencePriceSource.TradingReferencePrice, availability.LastValidMark?.Source);
+        Assert.Equal(t0.AddSeconds(2), availability.LastValidMark?.ReceivedAtUtc);
+    }
+
+    [Fact]
+    public void EqualTimestampLatestCallbackDeterminesPriceAndSource()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new ManualTimeProvider(t0);
+        var tracker = new MarketPriceTracker(clock);
+        tracker.SetConnected(true, t0);
+        tracker.OnInfoSnapshot("PETR4", 31m, null, t0);
+
+        Assert.True(tracker.OnTrade("PETR4", 32m, t0));
+
+        var availability = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.Equal(32m, availability.LastValidMark?.Price);
+        Assert.Equal(ReferencePriceSource.Trade, availability.LastValidMark?.Source);
+        Assert.Equal(t0, availability.LastValidMark?.ReceivedAtUtc);
     }
 
     [Fact]

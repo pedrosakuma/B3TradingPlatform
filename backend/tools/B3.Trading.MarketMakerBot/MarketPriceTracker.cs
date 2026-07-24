@@ -206,16 +206,26 @@ public sealed class MarketPriceTracker
         lock (_gate)
         {
             var now = _clock.GetUtcNow();
+            if (receivedAtUtc > now)
+                return false;
+
+            var state = GetOrAdd(symbol);
+            if (state.LastValidMark is { } last &&
+                receivedAtUtc < last.ReceivedAtUtc)
+            {
+                return false;
+            }
+
             var belongsToCurrentEpoch = _connected &&
                 _connectionStartedAtUtc is { } epochStart &&
-                receivedAtUtc >= epochStart &&
-                receivedAtUtc <= now;
+                receivedAtUtc >= epochStart;
             var mark = new MarketMark(
                 price,
                 receivedAtUtc,
                 source,
                 belongsToCurrentEpoch ? _connectionEpoch : 0);
-            var state = GetOrAdd(symbol);
+            // Equal source timestamps are resolved by callback order: the latest
+            // callback replaces the prior mark and therefore determines source.
             state.LastValidMark = mark;
             if (belongsToCurrentEpoch &&
                 (state.CurrentEpochMark is not { } current ||
