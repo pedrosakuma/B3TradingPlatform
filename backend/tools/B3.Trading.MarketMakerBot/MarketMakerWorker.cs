@@ -33,16 +33,13 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly ILogger<MarketMakerWorker> _log;
     private long _nextClOrdId;
     private IEntryPointClient? _client;
-    // RFC #703 book-driven quoting: OnBookOrderChanged runs synchronously
-    // on MarketDataFeed's receive callback, so it can't itself await a
-    // CancelAsync — it just signals the symbol here and returns. A
-    // per-symbol pending flag coalesces a burst of deltas for the same
-    // symbol into a single queued signal (mirrors the SDK's own
-    // BackPressurePolicy.DropOldest intent) instead of unboundedly
-    // queuing one entry per delta.
-    private readonly Channel<string> _bookSignals = Channel.CreateUnbounded<string>(
-        new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
-    private readonly ConcurrentDictionary<string, byte> _pendingBookSignals = new(StringComparer.Ordinal);
+    // Pricing-context changes are coalesced per configured symbol. The
+    // bounded channel can contain at most one entry per symbol, while the
+    // reason map carries attribution for the eventual cancel attempt.
+    private readonly Channel<string> _pricingContextSignals;
+    private readonly ConcurrentDictionary<string, CancelReason> _pendingPricingContextSignals =
+        new(StringComparer.Ordinal);
+    private readonly HashSet<string> _configuredSymbols;
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
         MarketPriceTracker priceTracker, MarketMakerPnlLedger pnlLedger, MarketMakerMetrics metrics,
@@ -57,6 +54,16 @@ internal sealed class MarketMakerWorker : BackgroundService
         _marketData = marketData;
         _loggerFactory = loggerFactory;
         _log = log;
+        _configuredSymbols = new HashSet<string>(
+            _options.Instruments.Select(instrument => instrument.Symbol),
+            StringComparer.Ordinal);
+        _pricingContextSignals = Channel.CreateBounded<string>(new BoundedChannelOptions(
+            Math.Max(1, _configuredSymbols.Count))
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait,
+        });
         // Time-of-day high bits + monotonic low bits give unique ClOrdIDs
         // across restarts within the same SessionVerId. The SDK's
         // FileSessionStateStore handles SessionVerId itself, but ClOrdID
@@ -136,10 +143,10 @@ internal sealed class MarketMakerWorker : BackgroundService
 
             var receive = ReceiveLoopAsync(_client, stoppingToken);
             var reconcile = ReconcileLoopAsync(_client, stoppingToken);
-            var bookReaction = BookReactionLoopAsync(_client, stoppingToken);
-            await Task.WhenAny(receive, reconcile, bookReaction);
+            var pricingReaction = PricingContextReactionLoopAsync(_client, stoppingToken);
+            await Task.WhenAny(receive, reconcile, pricingReaction);
             // Surface the failing task's exception (if any).
-            await Task.WhenAll(receive, reconcile, bookReaction);
+            await Task.WhenAll(receive, reconcile, pricingReaction);
         }
         catch (OperationCanceledException) { /* expected on shutdown */ }
         catch (Exception ex)
@@ -150,7 +157,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         finally
         {
             _marketData.BookOrderChanged -= OnBookOrderChanged;
-            _bookSignals.Writer.TryComplete();
+            _pricingContextSignals.Writer.TryComplete();
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
             await _marketData.DisposeAsync();
         }
@@ -318,12 +325,12 @@ internal sealed class MarketMakerWorker : BackgroundService
                         if (!_tracker.TryResolveCancelAttempt(
                                 r.ClOrdID.Value,
                                 out var origClOrdId,
-                                out var wasBookDriven))
+                                out var cancelReason))
                         {
                             return (
                                 Matched: false,
                                 OrigClOrdId: 0UL,
-                                WasBookDriven: false,
+                                CancelReason: default(CancelReason),
                                 StuckSymbol: "?");
                         }
 
@@ -338,32 +345,35 @@ internal sealed class MarketMakerWorker : BackgroundService
                         return (
                             Matched: true,
                             OrigClOrdId: origClOrdId,
-                            WasBookDriven: wasBookDriven,
+                            CancelReason: cancelReason,
                             StuckSymbol: stuckSymbol);
                     });
                     if (cancelReject.Matched)
                     {
-                        // Attributed to the trigger that actually raised
-                        // this cancel — both CancelStaleOrdersAsync and
-                        // ReactToBookChangeAsync share SubmitCancelAsync,
-                        // so without this tag a routine book-driven
-                        // requote race would otherwise always be
-                        // misreported as the miss-fill safety net itself
-                        // failing (the stale-cancel-rejected counter should
-                        // normally stay at zero).
-                        if (cancelReject.WasBookDriven)
+                        // Attribute the reject to the trigger that raised
+                        // the shared cancel request. Existing stale-order
+                        // and price-drift metrics retain their historical
+                        // names while future strategy/feed reasons can use
+                        // the same correlation seam.
+                        if (cancelReject.CancelReason == CancelReason.PriceDrift)
                         {
                             _metrics.RecordBookDrivenRequoteCancelRejected(cancelReject.StuckSymbol);
                             _log.LogInformation(
                                 "[mm] book-driven requote cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
                                 cancelReject.OrigClOrdId, r.Reason);
                         }
-                        else
+                        else if (cancelReject.CancelReason == CancelReason.StaleOrder)
                         {
                             _metrics.RecordStaleCancelRejected(cancelReject.StuckSymbol);
                             _log.LogWarning(
                                 "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
                                 cancelReject.OrigClOrdId, r.Reason);
+                        }
+                        else
+                        {
+                            _log.LogWarning(
+                                "[mm] cancel rejected for clordid={ClOrdId} trigger={CancelReason} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
+                                cancelReject.OrigClOrdId, cancelReject.CancelReason, r.Reason);
                         }
                         break;
                     }
@@ -486,7 +496,13 @@ internal sealed class MarketMakerWorker : BackgroundService
                     o.ClOrdId, o.Symbol);
                 continue;
             }
-            if (await SubmitCancelAsync(client, o, instr, _metrics.RecordStaleCancelSubmitFailed, ct))
+            if (await SubmitCancelAsync(
+                    client,
+                    o,
+                    instr,
+                    CancelReason.StaleOrder,
+                    _metrics.RecordStaleCancelSubmitFailed,
+                    ct))
             {
                 _metrics.RecordStaleOrderCancelled(o.Symbol);
                 _log.LogWarning(
@@ -498,10 +514,8 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     /// <summary>
     /// RFC #703 book-driven quoting: <see cref="MarketDataFeed.BookOrderChanged"/>
-    /// signals a symbol here — it can't itself await a cancel since it
-    /// runs synchronously on the market-data callback. Coalesced per
-    /// symbol by <see cref="_pendingBookSignals"/> so a burst of deltas
-    /// for the same symbol only queues one reaction.
+    /// can't await a cancel from its synchronous callback, so it signals
+    /// the shared pricing-context reaction path after filtering self-orders.
     /// </summary>
     private void OnBookOrderChanged(string symbol, ulong orderId)
     {
@@ -522,22 +536,50 @@ internal sealed class MarketMakerWorker : BackgroundService
         // "external" self-delta just causes one extra no-op evaluation,
         // never an incorrect cancel.
         if (_tracker.IsOwnOrder(orderId)) return;
-        if (_pendingBookSignals.TryAdd(symbol, 0))
-            _bookSignals.Writer.TryWrite(symbol);
+        SignalPricingContextChanged(symbol, CancelReason.PriceDrift);
     }
 
-    private async Task BookReactionLoopAsync(IEntryPointClient client, CancellationToken ct)
+    /// <summary>
+    /// Coalesces a pricing-context change for one configured symbol. A signal
+    /// arriving while that symbol is already queued is folded into the queued
+    /// reaction; one arriving after dequeue schedules exactly one follow-up.
+    /// </summary>
+    internal bool SignalPricingContextChanged(string symbol, CancelReason reason)
+    {
+        if (!_configuredSymbols.Contains(symbol)) return false;
+
+        while (true)
+        {
+            if (_pendingPricingContextSignals.TryAdd(symbol, reason))
+            {
+                if (_pricingContextSignals.Writer.TryWrite(symbol))
+                    return true;
+                _pendingPricingContextSignals.TryRemove(symbol, out _);
+                return false;
+            }
+
+            if (!_pendingPricingContextSignals.TryGetValue(symbol, out var current))
+                continue;
+            if (_pendingPricingContextSignals.TryUpdate(symbol, reason, current))
+                return false;
+        }
+    }
+
+    internal async Task PricingContextReactionLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
         try
         {
-            await foreach (var symbol in _bookSignals.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            await foreach (var symbol in _pricingContextSignals.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                _pendingBookSignals.TryRemove(symbol, out _);
-                try { await ReactToBookChangeAsync(client, symbol, ct); }
+                if (!_pendingPricingContextSignals.TryRemove(symbol, out var reason))
+                    continue;
+                try { await ReactToPricingContextChangeAsync(client, symbol, reason, ct); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    _log.LogError(ex, "[mm] book-reaction failed for {Symbol}", symbol);
+                    _log.LogError(ex,
+                        "[mm] pricing-context reaction failed for {Symbol} trigger={CancelReason}",
+                        symbol, reason);
                 }
             }
         }
@@ -565,11 +607,17 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// internal (not private) so <c>MarketMakerWorkerTests</c> can drive
     /// it directly — see #711's follow-up.
     /// </summary>
-    internal async Task ReactToBookChangeAsync(IEntryPointClient client, string symbol, CancellationToken ct)
+    internal Task ReactToBookChangeAsync(IEntryPointClient client, string symbol, CancellationToken ct) =>
+        ReactToPricingContextChangeAsync(client, symbol, CancelReason.PriceDrift, ct);
+
+    private async Task ReactToPricingContextChangeAsync(
+        IEntryPointClient client,
+        string symbol,
+        CancelReason reason,
+        CancellationToken ct)
     {
         var instr = FindInstrument(symbol);
-        if (instr is null || _priceTracker.IsDelisted(symbol)) return;
-        var refPrice = _priceTracker.TryGetReferencePrice(symbol, out var live) ? live : instr.RefPrice;
+        if (instr is null) return;
         var now = _tracker.UtcNow;
         var maxDeviation = instr.TickSize * _options.RequoteDeviationTicks;
 
@@ -585,28 +633,45 @@ internal sealed class MarketMakerWorker : BackgroundService
             var lastActivity = resting.LastCancelAttemptAtUtc ?? resting.SubmittedAtUtc;
             if (now - lastActivity < _options.MinRequoteInterval) continue;
 
-            var target = QuoteCalculator.ComputeQuotePrice(instr, isBuy, refPrice);
-            if (target <= 0m) continue;
+            var decision = BuildQuoteDecision(instr, isBuy);
+            if (!decision.ShouldQuote || decision.Price is not { } target) continue;
             if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
 
-            if (await SubmitCancelAsync(client, resting, instr, _metrics.RecordBookDrivenRequoteSubmitFailed, ct,
-                    _options.MinRequoteInterval, isBookDriven: true))
+            if (await SubmitCancelAsync(
+                    client,
+                    resting,
+                    instr,
+                    reason,
+                    reason == CancelReason.PriceDrift
+                        ? _metrics.RecordBookDrivenRequoteSubmitFailed
+                        : static _ => { },
+                    ct,
+                    _options.MinRequoteInterval))
             {
-                _metrics.RecordBookDrivenRequote(symbol, isBuy);
-                _log.LogInformation(
-                    "[mm] book-driven requote: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} resting={Resting} target={Target}",
-                    resting.ClOrdId, symbol, isBuy ? "buy" : "sell", resting.Price, target);
+                if (reason == CancelReason.PriceDrift)
+                {
+                    _metrics.RecordBookDrivenRequote(symbol, isBuy);
+                    _log.LogInformation(
+                        "[mm] book-driven requote: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} resting={Resting} target={Target}",
+                        resting.ClOrdId, symbol, isBuy ? "buy" : "sell", resting.Price, target);
+                }
+                else
+                {
+                    _log.LogInformation(
+                        "[mm] pricing-context requote: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} trigger={CancelReason} resting={Resting} target={Target}",
+                        resting.ClOrdId, symbol, isBuy ? "buy" : "sell", reason, resting.Price, target);
+                }
             }
         }
     }
 
     /// <summary>
-    /// Shared cancel-submit path for both the staleness guard and the
-    /// book-driven reactive requote: atomically registers the
+    /// Shared cancel-submit path for the staleness guard and all reactive
+    /// pricing-context requotes: atomically registers the
     /// cancel-attempt correlation BEFORE the SDK await (see <see
     /// cref="OrderTracker.TryRegisterCancelAttempt"/>'s doc comment on
     /// why atomicity matters here specifically — the staleness guard and
-    /// the reactive path run on separate concurrent loops and could
+    /// pricing-context reaction run on separate concurrent loops and could
     /// otherwise both target the same order), sends the request, and on
     /// synchronous failure clears the pending-cancel marker (and its now
     /// -abandoned correlation row) it just set so the order isn't
@@ -615,9 +680,9 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// than only by a separate pre-call check in the caller, so a
     /// concurrent register/clear on another thread can't leave the
     /// caller's own throttle decision stale by the time this actually
-    /// commits. <paramref name="isBookDriven"/> is stamped onto the
+    /// commits. <paramref name="reason"/> is stamped onto the
     /// correlation row so a later OrderRejected can be attributed to the
-    /// right trigger (see <see cref="OrderTracker.TryResolveCancelAttempt(ulong, out ulong, out bool)"/>
+    /// right trigger (see <see cref="OrderTracker.TryResolveCancelAttempt(ulong, out ulong, out CancelReason)"/>
     /// and <see cref="HandleEventAsync"/>'s OrderRejected case) instead of
     /// always being reported as a stale-order cancel reject now that both
     /// triggers share this same submit path. Returns whether the cancel
@@ -627,11 +692,11 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// their own reason-specific success metric/log.
     /// </summary>
     private async Task<bool> SubmitCancelAsync(IEntryPointClient client, TrackedOrder o, InstrumentConfig instr,
-        Action<string> recordSubmitFailed, CancellationToken ct,
-        TimeSpan? minIntervalSinceLastAttempt = null, bool isBookDriven = false)
+        CancelReason reason, Action<string> recordSubmitFailed, CancellationToken ct,
+        TimeSpan? minIntervalSinceLastAttempt = null)
     {
         var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
-        if (!_tracker.TryRegisterCancelAttempt(cancelClOrdId, o.ClOrdId, minIntervalSinceLastAttempt, isBookDriven))
+        if (!_tracker.TryRegisterCancelAttempt(cancelClOrdId, o.ClOrdId, minIntervalSinceLastAttempt, reason))
             return false;
         var req = new UpModels.CancelOrderRequest
         {
@@ -663,7 +728,8 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     internal async Task QuoteSideAsync(IEntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
     {
-        if (_priceTracker.IsDelisted(instr.Symbol)) return;
+        var decision = BuildQuoteDecision(instr, isBuy);
+        if (!decision.ShouldQuote || decision.Price is not { } price) return;
         // RFC #703 client-side safety cap (defense in depth against the
         // failure mode in pedrosakuma/B3MatchingPlatform#567): stop adding
         // NEW resting orders once the bot's own tracked open-order count
@@ -678,10 +744,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                 openCount, _options.MaxOpenOrders, instr.Symbol, isBuy ? "buy" : "sell");
             return;
         }
-        var refPrice = _priceTracker.TryGetReferencePrice(instr.Symbol, out var live) ? live : instr.RefPrice;
-        var price = QuoteCalculator.ComputeQuotePrice(instr, isBuy, refPrice);
         var quantity = QuoteCalculator.QuoteQuantity(instr);
-        if (price <= 0m) return; // pathological config; skip silently.
 
         var clOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
         // Atomic check-and-reserve: if another caller (the event-driven
@@ -728,6 +791,31 @@ internal sealed class MarketMakerWorker : BackgroundService
             _log.LogWarning(ex, "[mm] quote submit failed for {Symbol} side={Side} clordid={ClOrdId}",
                 instr.Symbol, isBuy ? "buy" : "sell", clOrdId);
         }
+    }
+
+    /// <summary>
+    /// The single worker-side context builder for both initial/replacement
+    /// submits and reactive drift comparisons. Inventory shift is zero and
+    /// effective spread equals configured spread until #717/#718 opt in.
+    /// </summary>
+    internal QuoteDecision BuildQuoteDecision(InstrumentConfig instrument, bool isBuy)
+    {
+        var hasLiveReference = _priceTracker.TryGetReferencePrice(instrument.Symbol, out var liveReference);
+        var referencePrice = hasLiveReference ? liveReference : instrument.RefPrice;
+        var configuredHalfSpread = instrument.SpreadTicks * instrument.TickSize;
+        return QuoteCalculator.Decide(new QuoteInputs(
+            isBuy,
+            referencePrice,
+            hasLiveReference
+                ? QuoteReferenceSource.LiveMarketData
+                : QuoteReferenceSource.ConfiguredRefPrice,
+            InventoryMidShift: 0m,
+            ConfiguredHalfSpread: configuredHalfSpread,
+            EffectiveHalfSpread: configuredHalfSpread,
+            instrument.TickSize,
+            _priceTracker.IsDelisted(instrument.Symbol)
+                ? QuoteSuppressionReason.InstrumentDelisted
+                : QuoteSuppressionReason.None));
     }
 
     private InstrumentConfig? FindInstrument(string symbol)
