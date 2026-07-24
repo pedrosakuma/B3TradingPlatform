@@ -43,6 +43,13 @@ internal sealed class MarketDataFeed : IAsyncDisposable
     /// </summary>
     public event Action<string, ulong>? BookOrderChanged;
 
+    /// <summary>
+    /// Raised after a symbol's quote availability changes in the local price
+    /// tracker. The feed exposes only the symbol; pricing/cancel policy remains
+    /// the worker's responsibility.
+    /// </summary>
+    public event Action<string>? SymbolAvailabilityChanged;
+
     public MarketDataFeed(MarketPriceTracker tracker, ILogger log)
     {
         _tracker = tracker;
@@ -128,11 +135,13 @@ internal sealed class MarketDataFeed : IAsyncDisposable
 
     private void OnOrderDeleted(OrderDeletedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
 
+    private void OnSymbolDelisted(SymbolDelistedEvent ev) => NotifySymbolDelisted(ev.Symbol);
 
-    private void OnSymbolDelisted(SymbolDelistedEvent ev)
+    internal void NotifySymbolDelisted(string symbol)
     {
-        _log.LogWarning("[mm] MarketData reports {Symbol} delisted; pausing quotes for it.", ev.Symbol);
-        _tracker.OnSymbolDelisted(ev.Symbol);
+        _log.LogWarning("[mm] MarketData reports {Symbol} delisted; pausing quotes for it.", symbol);
+        _tracker.OnSymbolDelisted(symbol);
+        SymbolAvailabilityChanged?.Invoke(symbol);
     }
 
     private void OnConnectionStateChanged(ConnectionStateChangedEvent ev)

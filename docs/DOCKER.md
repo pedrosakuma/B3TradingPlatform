@@ -230,12 +230,30 @@ overlay's `AllowErInjection`.
 ### Tuning
 
 The bot's instruments (`Symbol`/`SecurityId`/`RefPrice`/`TickSize`/
-`LotSize`/`QuoteLots`/`SpreadTicks`) and reconcile interval are set via
+`LotSize`/`QuoteLots`/`SpreadTicks`/`InventorySkew`) and reconcile interval are set via
 `MarketMaker__*` env vars in `docker-compose.market-maker.yml` — see
 that file's inline comments for the full list. `MarketMaker__Instruments`
 must line up with `docker/real/instruments-eqt.json`'s `SecurityId`s
 (matching-platform's wire truth), which is independent of whatever
 `SecurityId` numbering `marketdata` itself uses for the same symbols.
+
+Inventory skew is opt-in and defaults off independently for every
+instrument:
+
+```yaml
+MarketMaker__Instruments__0__InventorySkew__Enabled: "false"
+MarketMaker__Instruments__0__InventorySkew__FullSkewAtLots: "10"
+MarketMaker__Instruments__0__InventorySkew__MaxSkewTicks: "5"
+```
+
+When enabled, the bot reads signed net quantity from its process-local P&L
+ledger and shifts both sides' mid down while long or up while short. The shift
+scales linearly until `FullSkewAtLots * LotSize`, saturates at
+`MaxSkewTicks`, and is combined with the spread before the single final tick
+rounding. `FullSkewAtLots` is only the normalization/saturation band: it is
+not a position limit, does not suppress either side, and does not cap exposure.
+Each newly-accounted partial or full own fill reevaluates both resting sides
+through the normal throttled cancel-ack-then-requote path.
 
 ### Out of scope
 

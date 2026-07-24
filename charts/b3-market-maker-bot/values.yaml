@@ -92,6 +92,11 @@ instruments:
     lotSize: 100
     quoteLots: 1
     spreadTicks: 5
+    inventorySkew:
+      enabled: false
+      # Normalization/saturation band only; this is not a position risk limit.
+      fullSkewAtLots: 10
+      maxSkewTicks: 5
   - symbol: VALE3
     securityId: "900000000002"
     refPrice: "70.00"
@@ -99,6 +104,10 @@ instruments:
     lotSize: 100
     quoteLots: 1
     spreadTicks: 5
+    inventorySkew:
+      enabled: false
+      fullSkewAtLots: 10
+      maxSkewTicks: 5
   - symbol: ITUB4
     securityId: "900000000003"
     refPrice: "32.00"
@@ -106,6 +115,10 @@ instruments:
     lotSize: 100
     quoteLots: 1
     spreadTicks: 5
+    inventorySkew:
+      enabled: false
+      fullSkewAtLots: 10
+      maxSkewTicks: 5
 
 resources:
   requests:

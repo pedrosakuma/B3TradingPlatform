@@ -28,7 +28,7 @@ public class MarketMakerWorkerTests : IDisposable
         CreateWorker() => CreateWorker(out _);
 
     private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client, InstrumentConfig Instrument)
-        CreateWorker(out MarketMakerPnlLedger pnlLedger)
+        CreateWorker(out MarketMakerPnlLedger pnlLedger, Action<MarketMakerBotOptions>? configure = null)
     {
         var instrument = new InstrumentConfig
         {
@@ -47,6 +47,7 @@ public class MarketMakerWorkerTests : IDisposable
             AccessKey = "test",
             Instruments = [instrument],
         };
+        configure?.Invoke(options);
         var tracker = new OrderTracker();
         var priceTracker = new MarketPriceTracker();
         pnlLedger = new MarketMakerPnlLedger();
@@ -74,6 +75,25 @@ public class MarketMakerWorkerTests : IDisposable
         InstrumentConfig Instrument, MarketPriceTracker PriceTracker) CreateWorker(
         TimeProvider clock, Action<MarketMakerBotOptions>? configure = null)
     {
+        return CreateWorker(clock, configure, out _);
+    }
+
+    private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client,
+        InstrumentConfig Instrument, MarketPriceTracker PriceTracker) CreateWorker(
+        TimeProvider clock,
+        Action<MarketMakerBotOptions>? configure,
+        out MarketMakerPnlLedger pnlLedger)
+    {
+        return CreateWorker(clock, configure, out pnlLedger, out _);
+    }
+
+    private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client,
+        InstrumentConfig Instrument, MarketPriceTracker PriceTracker) CreateWorker(
+        TimeProvider clock,
+        Action<MarketMakerBotOptions>? configure,
+        out MarketMakerPnlLedger pnlLedger,
+        out MarketDataFeed marketData)
+    {
         var instrument = new InstrumentConfig
         {
             Symbol = "PETR4",
@@ -94,11 +114,11 @@ public class MarketMakerWorkerTests : IDisposable
         configure?.Invoke(options);
         var tracker = new OrderTracker(clock);
         var priceTracker = new MarketPriceTracker(clock);
-        var pnlLedger = new MarketMakerPnlLedger(clock);
+        pnlLedger = new MarketMakerPnlLedger(clock);
         var metrics = new MarketMakerMetrics(pnlLedger, priceTracker, Options.Create(options));
         _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
-        var marketData = new MarketDataFeed(priceTracker, NullLogger.Instance);
+        marketData = new MarketDataFeed(priceTracker, NullLogger.Instance);
         var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, pnlLedger, metrics,
             marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance);
         return (worker, tracker, new FakeEntryPointClient(), instrument, priceTracker);
@@ -148,6 +168,38 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public void BuildQuoteDecision_InventorySkewDisabled_PreservesPricesWithNonzeroInventory()
+    {
+        var (worker, _, _, instrument) = CreateWorker(out var ledger);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            1, 1, instrument.Symbol, true, 500, 30m, 500, 500, 0, true)).Status);
+
+        var bid = worker.BuildQuoteDecision(instrument, isBuy: true);
+        var ask = worker.BuildQuoteDecision(instrument, isBuy: false);
+
+        Assert.Equal(29.95m, bid.Price);
+        Assert.Equal(30.05m, ask.Price);
+        Assert.Equal(0m, bid.InventoryMidShift);
+        Assert.Equal(0m, bid.InventorySkewTicks);
+    }
+
+    [Fact]
+    public async Task QuoteSideAsync_InventorySkewedSubmitMatchesUnifiedDecision()
+    {
+        var (worker, _, client, instrument) = CreateWorker(out var ledger, EnableInventorySkew);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            1, 1, instrument.Symbol, true, 50, 30m, 50, 50, 0, true)).Status);
+
+        var decision = worker.BuildQuoteDecision(instrument, isBuy: true);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        Assert.Equal(2.5m, decision.InventorySkewTicks);
+        Assert.Equal(-0.025m, decision.InventoryMidShift);
+        Assert.Equal(29.93m, decision.Price);
+        Assert.Equal(decision.Price, Assert.Single(client.SubmittedOrders).Price);
+    }
+
+    [Fact]
     public void BuildQuoteDecision_DefaultContextPreservesStaticBehaviorAndDelistSuppression()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);
@@ -183,8 +235,370 @@ public class MarketMakerWorkerTests : IDisposable
         clock.Advance(TimeSpan.FromMinutes(1));
         await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
 
-        Assert.Equal(submittedDecision.Price, Assert.Single(client.SubmittedOrders).Price);
+        Assert.Equal(submittedDecision.Price,
+            client.SubmittedOrders.Single(order => order.Side == Side.Buy).Price);
+        Assert.Equal(2, client.SubmittedOrders.Count);
         Assert.Empty(client.SubmittedCancels);
+    }
+
+    [Fact]
+    public async Task ReactToBookChangeAsync_InventorySkewedTargetMatchesSubmitDecision()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, _) = CreateWorker(
+            clock,
+            EnableInventorySkew,
+            out var ledger);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            1, 1, instrument.Symbol, true, 50, 30m, 50, 50, 0, true)).Status);
+
+        var submittedDecision = worker.BuildQuoteDecision(instrument, isBuy: true);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
+
+        Assert.Equal(submittedDecision.Price,
+            client.SubmittedOrders.Single(order => order.Side == Side.Buy).Price);
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.Empty(client.SubmittedCancels);
+    }
+
+    [Fact]
+    public async Task ReactToPricingContextChangeAsync_SuppressedSide_IsRestoredImmediatelyByLaterFill()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options =>
+            {
+                EnableInventorySkew(options);
+                options.Instruments[0].RefPrice = 0.10m;
+                options.Instruments[0].InventorySkew.MaxSkewTicks = 10m;
+            },
+            out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var original = Assert.Single(client.SubmittedOrders);
+        Assert.Equal(0.05m, original.Price);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            900, 900, instrument.Symbol, true, 100, 0.10m, 100, 100, 0, true)).Status);
+
+        var suppressed = worker.BuildQuoteDecision(instrument, isBuy: true);
+        Assert.False(suppressed.ShouldQuote);
+        await worker.ReactToPricingContextChangeAsync(
+            client,
+            instrument.Symbol,
+            CancelReason.InventoryStrategy,
+            CancellationToken.None);
+
+        var cancel = Assert.Single(client.SubmittedCancels);
+        Assert.Equal(original.ClOrdID.Value, cancel.OrigClOrdID.Value);
+        await worker.HandleEventAsync(client, new OrderCancelled
+        {
+            ClOrdID = cancel.ClOrdID,
+            OrigClOrdID = cancel.OrigClOrdID,
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+
+        var buyRestored = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.SubmitHandler = (request, _) =>
+        {
+            if (request.Side == Side.Buy && request.ClOrdID.Value != original.ClOrdID.Value)
+                buyRestored.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            901, 901, instrument.Symbol, false, 100, 0.10m, 100, 100, 0, true)).Status);
+        worker.SignalPricingContextChanged(instrument.Symbol, CancelReason.InventoryStrategy);
+
+        await buyRestored.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+        await reactionLoop;
+
+        Assert.Equal(3, client.SubmittedOrders.Count);
+        Assert.Equal(0.05m, client.SubmittedOrders.Last(order => order.Side == Side.Buy).Price);
+        Assert.True(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+    }
+
+    [Fact]
+    public async Task SymbolDelistedSignal_CancelsBothSidesAndNeverReplacesThem()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options => options.MinRequoteInterval = TimeSpan.Zero,
+            out _,
+            out var marketData);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        var originalIds = client.SubmittedOrders.Select(order => order.ClOrdID.Value).ToHashSet();
+
+        var bothSidesCancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 2)
+                bothSidesCancelled.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        marketData.SymbolAvailabilityChanged += worker.OnSymbolAvailabilityChanged;
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        try
+        {
+            marketData.NotifySymbolDelisted(instrument.Symbol);
+            await bothSidesCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(originalIds,
+                client.SubmittedCancels.Select(cancel => cancel.OrigClOrdID.Value).ToHashSet());
+            foreach (var cancel in client.SubmittedCancels.ToArray())
+            {
+                await worker.HandleEventAsync(client, new OrderCancelled
+                {
+                    ClOrdID = cancel.ClOrdID,
+                    OrigClOrdID = cancel.OrigClOrdID,
+                    OrderId = 100,
+                    OrderStatus = OrderStatus.Cancelled,
+                    SeqNum = 1,
+                    SendingTime = DateTimeOffset.UtcNow,
+                }, CancellationToken.None);
+            }
+
+            await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+            await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+
+            Assert.Equal(2, client.SubmittedOrders.Count);
+            Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+            Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: false));
+        }
+        finally
+        {
+            marketData.SymbolAvailabilityChanged -= worker.OnSymbolAvailabilityChanged;
+            cts.Cancel();
+            await reactionLoop;
+        }
+    }
+
+    [Fact]
+    public async Task DelistedCancelSubmitFailure_RetriesAfterNonzeroThrottle()
+    {
+        var minRequoteInterval = TimeSpan.FromMilliseconds(50);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            TimeProvider.System,
+            options => options.MinRequoteInterval = minRequoteInterval,
+            out _,
+            out var marketData);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        Assert.True(tracker.TryGet(originalClOrdId, out var resting));
+        resting.SubmittedAtUtc = tracker.UtcNow - TimeSpan.FromSeconds(1);
+
+        var attempt = 0;
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (Interlocked.Increment(ref attempt) == 1)
+                throw new InvalidOperationException("test transport failure");
+            retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        marketData.SymbolAvailabilityChanged += worker.OnSymbolAvailabilityChanged;
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        try
+        {
+            marketData.NotifySymbolDelisted(instrument.Symbol);
+            await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(2, client.SubmittedCancels.Count);
+            Assert.All(client.SubmittedCancels,
+                cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+            Assert.True(tracker.TryResolveCancelAttempt(
+                client.SubmittedCancels[^1].ClOrdID.Value,
+                out _,
+                out var reason));
+            Assert.Equal(CancelReason.FeedUnavailable, reason);
+        }
+        finally
+        {
+            marketData.SymbolAvailabilityChanged -= worker.OnSymbolAvailabilityChanged;
+            cts.Cancel();
+            await reactionLoop;
+        }
+    }
+
+    [Fact]
+    public async Task DelistedCancelReject_RetriesAfterNonzeroThrottleWithoutHotLoop()
+    {
+        var minRequoteInterval = TimeSpan.FromMilliseconds(50);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            TimeProvider.System,
+            options => options.MinRequoteInterval = minRequoteInterval,
+            out _,
+            out var marketData);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        Assert.True(tracker.TryGet(originalClOrdId, out var resting));
+        resting.SubmittedAtUtc = tracker.UtcNow - TimeSpan.FromSeconds(1);
+
+        var firstSubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 1)
+                firstSubmitted.TrySetResult(true);
+            else if (client.SubmittedCancels.Count == 2)
+                retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        marketData.SymbolAvailabilityChanged += worker.OnSymbolAvailabilityChanged;
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        try
+        {
+            marketData.NotifySymbolDelisted(instrument.Symbol);
+            await firstSubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var firstCancel = client.SubmittedCancels[0];
+            await worker.HandleEventAsync(client, new OrderRejected
+            {
+                ClOrdID = firstCancel.ClOrdID,
+                OrderId = 0,
+                RejectCode = 1,
+                Reason = "test reject",
+                SeqNum = 1,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, CancellationToken.None);
+
+            await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var retryCancel = client.SubmittedCancels[1];
+            await worker.HandleEventAsync(client, new OrderRejected
+            {
+                ClOrdID = retryCancel.ClOrdID,
+                OrderId = 0,
+                RejectCode = 1,
+                Reason = "test retry reject",
+                SeqNum = 2,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, CancellationToken.None);
+            await Task.Delay(minRequoteInterval * 2);
+
+            Assert.Equal(2, client.SubmittedCancels.Count);
+            Assert.All(client.SubmittedCancels,
+                cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+        }
+        finally
+        {
+            marketData.SymbolAvailabilityChanged -= worker.OnSymbolAvailabilityChanged;
+            cts.Cancel();
+            await reactionLoop;
+        }
+    }
+
+    [Fact]
+    public async Task CancelReject_ReplaysInventoryContextThatArrivedWhileCancelWasPending()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            EnableInventorySkew,
+            out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        var originalClOrdId = client.SubmittedOrders.Single(order => order.Side == Side.Buy).ClOrdID.Value;
+        const ulong firstCancelClOrdId = 999_001;
+        tracker.RegisterCancelAttempt(firstCancelClOrdId, originalClOrdId, CancelReason.PriceDrift);
+        tracker.RegisterCancelAttempt(
+            999_002,
+            client.SubmittedOrders.Single(order => order.Side == Side.Sell).ClOrdID.Value,
+            CancelReason.PriceDrift);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            900, 900, instrument.Symbol, true, 50, 30m, 50, 50, 0, true)).Status);
+        await worker.ReactToPricingContextChangeAsync(
+            client,
+            instrument.Symbol,
+            CancelReason.InventoryStrategy,
+            CancellationToken.None);
+
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 1)
+                retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        await worker.HandleEventAsync(client, new OrderRejected
+        {
+            ClOrdID = new ClOrdID(firstCancelClOrdId),
+            OrderId = 0,
+            RejectCode = 1,
+            Reason = "test reject",
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+        await reactionLoop;
+
+        var retryCancel = Assert.Single(client.SubmittedCancels);
+        Assert.All(client.SubmittedCancels,
+            cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+        Assert.True(tracker.TryResolveCancelAttempt(
+            retryCancel.ClOrdID.Value,
+            out _,
+            out var reason));
+        Assert.Equal(CancelReason.InventoryStrategy, reason);
+    }
+
+    [Fact]
+    public async Task CancelSubmitFailure_ReplaysInventoryContextOnceAndRegistersRetry()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            EnableInventorySkew,
+            out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            900, 900, instrument.Symbol, true, 50, 30m, 50, 50, 0, true)).Status);
+
+        var attempt = 0;
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (Interlocked.Increment(ref attempt) == 1)
+                throw new InvalidOperationException("test transport failure");
+            retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+
+        await worker.ReactToPricingContextChangeAsync(
+            client,
+            instrument.Symbol,
+            CancelReason.InventoryStrategy,
+            CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+        await reactionLoop;
+
+        Assert.Equal(2, client.SubmittedCancels.Count);
+        Assert.All(client.SubmittedCancels,
+            cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+        Assert.True(tracker.TryResolveCancelAttempt(
+            client.SubmittedCancels[^1].ClOrdID.Value,
+            out _,
+            out var reason));
+        Assert.Equal(CancelReason.InventoryStrategy, reason);
     }
 
     [Fact]
@@ -273,6 +687,128 @@ public class MarketMakerWorkerTests : IDisposable
 
         Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
         Assert.Single(client.SubmittedOrders); // no requote — still the same resting order.
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_PartialFill_ReevaluatesBothSidesAndRequotesAfterCancelAcks()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, _) = CreateWorker(
+            clock,
+            EnableInventorySkew,
+            out _);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        var originalIds = client.SubmittedOrders.Select(order => order.ClOrdID.Value).ToHashSet();
+
+        var bothSidesCancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 2)
+                bothSidesCancelled.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+
+        var buyClOrdId = client.SubmittedOrders.Single(order => order.Side == Side.Buy).ClOrdID.Value;
+        await worker.HandleEventAsync(client, new OrderTrade
+        {
+            ClOrdID = new ClOrdID(buyClOrdId),
+            OrderId = 100,
+            TradeId = 1,
+            OrderStatus = OrderStatus.PartiallyFilled,
+            LastPx = 29.95m,
+            LastQty = 50,
+            CumQty = 50,
+            LeavesQty = 50,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        await bothSidesCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(originalIds,
+            client.SubmittedCancels.Select(cancel => cancel.OrigClOrdID.Value).ToHashSet());
+        Assert.Equal(2, client.SubmittedOrders.Count);
+
+        foreach (var cancel in client.SubmittedCancels.ToArray())
+        {
+            await worker.HandleEventAsync(client, new OrderCancelled
+            {
+                ClOrdID = cancel.ClOrdID,
+                OrigClOrdID = cancel.OrigClOrdID,
+                OrderId = 100,
+                OrderStatus = OrderStatus.Cancelled,
+                SeqNum = 2,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, CancellationToken.None);
+        }
+
+        cts.Cancel();
+        await reactionLoop;
+        Assert.Equal(4, client.SubmittedOrders.Count);
+        Assert.Equal(29.93m, client.SubmittedOrders.Last(order => order.Side == Side.Buy).Price);
+        Assert.Equal(30.03m, client.SubmittedOrders.Last(order => order.Side == Side.Sell).Price);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_FullFill_RequotesFilledSideAndReevaluatesOtherSideWithoutDuplicates()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, _) = CreateWorker(
+            clock,
+            EnableInventorySkew,
+            out _);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        var buyClOrdId = client.SubmittedOrders.Single(order => order.Side == Side.Buy).ClOrdID.Value;
+        var sellClOrdId = client.SubmittedOrders.Single(order => order.Side == Side.Sell).ClOrdID.Value;
+
+        var otherSideCancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            otherSideCancelled.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        var trade = new OrderTrade
+        {
+            ClOrdID = new ClOrdID(buyClOrdId),
+            OrderId = 100,
+            TradeId = 1,
+            OrderStatus = OrderStatus.Filled,
+            LastPx = 29.95m,
+            LastQty = 100,
+            CumQty = 100,
+            LeavesQty = 0,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        };
+
+        await worker.HandleEventAsync(client, trade, CancellationToken.None);
+        await otherSideCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await worker.HandleEventAsync(client, trade, CancellationToken.None);
+
+        var cancel = Assert.Single(client.SubmittedCancels);
+        Assert.Equal(sellClOrdId, cancel.OrigClOrdID.Value);
+        Assert.Equal(3, client.SubmittedOrders.Count);
+        Assert.Equal(29.90m, client.SubmittedOrders.Last(order => order.Side == Side.Buy).Price);
+
+        await worker.HandleEventAsync(client, new OrderCancelled
+        {
+            ClOrdID = cancel.ClOrdID,
+            OrigClOrdID = cancel.OrigClOrdID,
+            OrderId = 101,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 2,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        cts.Cancel();
+        await reactionLoop;
+        Assert.Equal(4, client.SubmittedOrders.Count);
+        Assert.Equal(30.00m, client.SubmittedOrders.Last(order => order.Side == Side.Sell).Price);
     }
 
     [Fact]
@@ -748,5 +1284,16 @@ public class MarketMakerWorkerTests : IDisposable
         public FakeClock(DateTimeOffset start) => _now = start;
         public override DateTimeOffset GetUtcNow() => _now;
         public void Advance(TimeSpan delta) => _now += delta;
+    }
+
+    private static void EnableInventorySkew(MarketMakerBotOptions options)
+    {
+        options.MinRequoteInterval = TimeSpan.Zero;
+        options.Instruments[0].InventorySkew = new InventorySkewConfig
+        {
+            Enabled = true,
+            FullSkewAtLots = 1,
+            MaxSkewTicks = 5m,
+        };
     }
 }

@@ -94,6 +94,51 @@ public class MarketMakerMetricsTests
         Assert.DoesNotContain(measurements, item => item.Name == "bot.pnl.total");
     }
 
+    [Fact]
+    public void InventorySkewGauge_UsesConfiguredSymbolsWithoutDuplicatingPositionState()
+    {
+        var ledger = new MarketMakerPnlLedger();
+        var prices = new MarketPriceTracker();
+        var options = Options.Create(new MarketMakerBotOptions
+        {
+            Instruments =
+            [
+                new InstrumentConfig
+                {
+                    Symbol = "PETR4",
+                    SecurityId = 1,
+                    RefPrice = 30m,
+                    TickSize = 0.01m,
+                    LotSize = 100,
+                    InventorySkew = new InventorySkewConfig
+                    {
+                        Enabled = true,
+                        FullSkewAtLots = 10,
+                        MaxSkewTicks = 5m,
+                    },
+                },
+            ],
+        });
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            1, 1, "PETR4", true, 500, 30m, 500, 500, 0, true)).Status);
+
+        using var metrics = new MarketMakerMetrics(ledger, prices, options);
+        using var listener = new MeterListener();
+        var measurements = new ConcurrentBag<(string Name, double Value, string Symbol)>();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (ReferenceEquals(instrument.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) =>
+            measurements.Add((instrument.Name, value, GetSymbol(tags))));
+        listener.Start();
+
+        listener.RecordObservableInstruments();
+
+        Assert.Contains(("bot.strategy.inventory_skew_ticks", 2.5d, "PETR4"), measurements);
+    }
+
     private static string GetSymbol(ReadOnlySpan<KeyValuePair<string, object?>> tags)
     {
         foreach (var tag in tags)
