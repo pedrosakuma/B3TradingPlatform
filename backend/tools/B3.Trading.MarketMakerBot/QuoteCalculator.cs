@@ -12,6 +12,7 @@ public enum QuoteSuppressionReason
     None,
     InstrumentDelisted,
     NonPositivePrice,
+    InvalidPriceCalculation,
 }
 
 /// <summary>
@@ -27,6 +28,7 @@ public readonly record struct QuoteInputs(
     decimal InventorySkewTicks,
     decimal ConfiguredHalfSpread,
     decimal EffectiveHalfSpread,
+    int AdditionalHalfSpreadTicks,
     decimal TickSize,
     QuoteSuppressionReason SuppressionReason = QuoteSuppressionReason.None);
 
@@ -40,6 +42,7 @@ public readonly record struct QuoteDecision(
     decimal InventorySkewTicks,
     decimal ConfiguredHalfSpread,
     decimal EffectiveHalfSpread,
+    int AdditionalHalfSpreadTicks,
     QuoteSuppressionReason SuppressionReason);
 
 /// <summary>
@@ -50,10 +53,25 @@ public static class QuoteCalculator
 {
     public static QuoteDecision Decide(QuoteInputs inputs)
     {
+        inputs = inputs with
+        {
+            EffectiveHalfSpread = Math.Max(inputs.ConfiguredHalfSpread, inputs.EffectiveHalfSpread),
+            AdditionalHalfSpreadTicks = Math.Max(0, inputs.AdditionalHalfSpreadTicks),
+        };
         if (inputs.SuppressionReason != QuoteSuppressionReason.None)
             return Suppressed(inputs, inputs.SuppressionReason);
+        if (inputs.TickSize <= 0m)
+            return Suppressed(inputs, QuoteSuppressionReason.InvalidPriceCalculation);
 
-        var price = CalculateRoundedPrice(inputs);
+        decimal price;
+        try
+        {
+            price = CalculateRoundedPrice(inputs);
+        }
+        catch (OverflowException)
+        {
+            return Suppressed(inputs, QuoteSuppressionReason.InvalidPriceCalculation);
+        }
         return price > 0m
             ? new QuoteDecision(
                 true,
@@ -64,6 +82,7 @@ public static class QuoteCalculator
                 inputs.InventorySkewTicks,
                 inputs.ConfiguredHalfSpread,
                 inputs.EffectiveHalfSpread,
+                inputs.AdditionalHalfSpreadTicks,
                 QuoteSuppressionReason.None)
             : Suppressed(inputs, QuoteSuppressionReason.NonPositivePrice);
     }
@@ -92,6 +111,7 @@ public static class QuoteCalculator
             InventorySkewTicks: 0m,
             ConfiguredHalfSpread: halfSpread,
             EffectiveHalfSpread: halfSpread,
+            AdditionalHalfSpreadTicks: 0,
             instrument.TickSize));
     }
 
@@ -120,14 +140,15 @@ public static class QuoteCalculator
             inputs.InventorySkewTicks,
             inputs.ConfiguredHalfSpread,
             inputs.EffectiveHalfSpread,
+            inputs.AdditionalHalfSpreadTicks,
             reason);
 
     private static decimal CalculateRoundedPrice(QuoteInputs inputs)
     {
-        var shiftedMid = inputs.ReferencePrice + inputs.InventoryMidShift;
+        var shiftedMid = checked(inputs.ReferencePrice + inputs.InventoryMidShift);
         var raw = inputs.IsBuy
-            ? shiftedMid - inputs.EffectiveHalfSpread
-            : shiftedMid + inputs.EffectiveHalfSpread;
+            ? checked(shiftedMid - inputs.EffectiveHalfSpread)
+            : checked(shiftedMid + inputs.EffectiveHalfSpread);
         return RoundToTick(raw, inputs.TickSize);
     }
 }

@@ -485,6 +485,7 @@ public enum CancelReason
     StaleOrder,
     PriceDrift,
     InventoryStrategy,
+    VolatilityStrategy,
     FeedUnavailable,
 }
 

@@ -167,6 +167,12 @@ public sealed class InstrumentConfig
     /// historical symmetric quote behavior remains unchanged.
     /// </summary>
     public InventorySkewConfig InventorySkew { get; set; } = new();
+
+    /// <summary>
+    /// Optional trade-driven widening added to <see cref="SpreadTicks"/>.
+    /// Disabled by default so historical static-spread pricing is unchanged.
+    /// </summary>
+    public VolatilitySpreadConfig VolatilitySpread { get; set; } = new();
 }
 
 public sealed class InventorySkewConfig
@@ -182,4 +188,25 @@ public sealed class InventorySkewConfig
 
     /// <summary>Maximum absolute mid-price shift, in ticks.</summary>
     public decimal MaxSkewTicks { get; set; } = 5m;
+}
+
+public sealed class VolatilitySpreadConfig
+{
+    /// <summary>Whether valid market-data trades may widen this instrument's spread.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Maximum age of absolute trade-to-trade move samples.</summary>
+    public TimeSpan Window { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>Hard per-symbol sample-count bound.</summary>
+    public int MaxSamples { get; set; } = 120;
+
+    /// <summary>Samples required before dynamic widening becomes active.</summary>
+    public int MinSamples { get; set; } = 10;
+
+    /// <summary>Scale applied to the arithmetic mean move in ticks before ceiling.</summary>
+    public decimal Multiplier { get; set; } = 1m;
+
+    /// <summary>Maximum dynamic ticks added to the configured half-spread.</summary>
+    public int MaxAdditionalSpreadTicks { get; set; } = 20;
 }

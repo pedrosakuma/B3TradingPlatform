@@ -26,6 +26,7 @@ namespace B3.Trading.MarketMakerBot;
 internal sealed class MarketDataFeed : IAsyncDisposable
 {
     private readonly MarketPriceTracker _tracker;
+    private readonly VolatilitySpreadEstimator _volatilitySpread;
     private readonly ILogger _log;
     private MarketDataClient? _client;
 
@@ -50,9 +51,16 @@ internal sealed class MarketDataFeed : IAsyncDisposable
     /// </summary>
     public event Action<string>? SymbolAvailabilityChanged;
 
-    public MarketDataFeed(MarketPriceTracker tracker, ILogger log)
+    /// <summary>Raised only when a symbol's effective dynamic spread tick count changes.</summary>
+    public event Action<string>? VolatilitySpreadChanged;
+
+    public MarketDataFeed(
+        MarketPriceTracker tracker,
+        VolatilitySpreadEstimator volatilitySpread,
+        ILogger log)
     {
         _tracker = tracker;
+        _volatilitySpread = volatilitySpread;
         _log = log;
     }
 
@@ -97,7 +105,7 @@ internal sealed class MarketDataFeed : IAsyncDisposable
                     .ConfigureAwait(false);
             }
             _client = client;
-            _tracker.SetConnected(true);
+            NotifyConnectionState(connected: true);
             _log.LogInformation("[mm] MarketData connected to {WsUrl}; subscribed to {Count} instrument(s).",
                 options.WsUrl, instruments.Count);
         }
@@ -124,10 +132,10 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         }
     }
 
-    private void OnTrade(TradeEvent ev) => _tracker.OnTrade(ev.Symbol, ev.Price);
+    private void OnTrade(TradeEvent ev) => NotifyTrade(ev.Symbol, ev.Price);
 
     private void OnInfoSnapshot(InfoSnapshotEvent ev) =>
-        _tracker.OnInfoSnapshot(ev.Symbol, ev.TradingReferencePrice, ev.LastTradePrice);
+        NotifyInfoSnapshot(ev.Symbol, ev.TradingReferencePrice, ev.LastTradePrice);
 
     private void OnOrderAdded(OrderAddedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
 
@@ -144,6 +152,22 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         SymbolAvailabilityChanged?.Invoke(symbol);
     }
 
+    internal void NotifyTrade(string symbol, decimal price)
+    {
+        _tracker.OnTrade(symbol, price);
+        PublishVolatilityChange(_volatilitySpread.OnTrade(symbol, price));
+    }
+
+    internal void NotifyInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice) =>
+        _tracker.OnInfoSnapshot(symbol, tradingReferencePrice, lastTradePrice);
+
+    internal void NotifyConnectionState(bool connected)
+    {
+        _tracker.SetConnected(connected);
+        foreach (var change in _volatilitySpread.SetConnected(connected))
+            PublishVolatilityChange(change);
+    }
+
     private void OnConnectionStateChanged(ConnectionStateChangedEvent ev)
     {
         _log.LogInformation("[mm] MarketData connection state: {State}", ev.State);
@@ -151,11 +175,27 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         // last-known price served through a Reconnecting/Faulted gap
         // could anchor quotes far from the real market. See
         // MarketPriceTracker.TryGetReferencePrice.
-        _tracker.SetConnected(ev.State == ConnectionState.Connected);
+        NotifyConnectionState(ev.State == ConnectionState.Connected);
     }
 
     private void OnSubscribeError(SubscribeErrorEvent ev) =>
         _log.LogWarning("[mm] MarketData subscribe error for {Symbol}: {Error}", ev.Symbol, ev.ErrorCode);
+
+    private void PublishVolatilityChange(VolatilitySpreadChange? change)
+    {
+        if (change is not { } value)
+            return;
+        _log.LogInformation(
+            "[mm-volatility] effective spread changed symbol={Symbol} estimateTicks={MoveEstimateTicks} samples={SampleCount} ready={Ready} connected={Connected} previousAdditionalTicks={PreviousAdditionalTicks} additionalTicks={AdditionalTicks}",
+            value.Symbol,
+            value.Current.MoveEstimateTicks,
+            value.Current.SampleCount,
+            value.Current.IsReady,
+            value.Current.IsConnected,
+            value.PreviousAdditionalSpreadTicks,
+            value.Current.AdditionalSpreadTicks);
+        VolatilitySpreadChanged?.Invoke(value.Symbol);
+    }
 
     public async ValueTask DisposeAsync()
     {

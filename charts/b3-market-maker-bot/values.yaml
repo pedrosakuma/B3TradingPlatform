@@ -97,6 +97,13 @@ instruments:
       # Normalization/saturation band only; this is not a position risk limit.
       fullSkewAtLots: 10
       maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
   - symbol: VALE3
     securityId: "900000000002"
     refPrice: "70.00"
@@ -108,6 +115,13 @@ instruments:
       enabled: false
       fullSkewAtLots: 10
       maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
   - symbol: ITUB4
     securityId: "900000000003"
     refPrice: "32.00"
@@ -119,6 +133,13 @@ instruments:
       enabled: false
       fullSkewAtLots: 10
       maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
 
 resources:
   requests:

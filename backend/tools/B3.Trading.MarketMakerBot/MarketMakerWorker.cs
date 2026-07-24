@@ -25,6 +25,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly MarketMakerBotOptions _options;
     private readonly OrderTracker _tracker;
     private readonly MarketPriceTracker _priceTracker;
+    private readonly VolatilitySpreadEstimator _volatilitySpread;
     private readonly MarketMakerPnlLedger _pnlLedger;
     private readonly MarketMakerOrderLifecycle _orderLifecycle;
     private readonly MarketMakerMetrics _metrics;
@@ -46,12 +47,14 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly HashSet<string> _configuredSymbols;
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
-        MarketPriceTracker priceTracker, MarketMakerPnlLedger pnlLedger, MarketMakerMetrics metrics,
+        MarketPriceTracker priceTracker, VolatilitySpreadEstimator volatilitySpread,
+        MarketMakerPnlLedger pnlLedger, MarketMakerMetrics metrics,
         MarketDataFeed marketData, ILoggerFactory loggerFactory, ILogger<MarketMakerWorker> log)
     {
         _options = options.Value;
         _tracker = tracker;
         _priceTracker = priceTracker;
+        _volatilitySpread = volatilitySpread;
         _pnlLedger = pnlLedger;
         _orderLifecycle = new MarketMakerOrderLifecycle(tracker, pnlLedger);
         _metrics = metrics;
@@ -125,6 +128,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         _client = new EntryPointClient(clientOpts);
         _marketData.BookOrderChanged += OnBookOrderChanged;
         _marketData.SymbolAvailabilityChanged += OnSymbolAvailabilityChanged;
+        _marketData.VolatilitySpreadChanged += OnVolatilitySpreadChanged;
         try
         {
             _log.LogInformation("[mm] connecting to {Endpoint} session={Session} verId={VerId}",
@@ -163,6 +167,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         {
             _marketData.BookOrderChanged -= OnBookOrderChanged;
             _marketData.SymbolAvailabilityChanged -= OnSymbolAvailabilityChanged;
+            _marketData.VolatilitySpreadChanged -= OnVolatilitySpreadChanged;
             _pricingContextSignals.Writer.TryComplete();
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
             await _marketData.DisposeAsync();
@@ -468,6 +473,19 @@ internal sealed class MarketMakerWorker : BackgroundService
             catch (OperationCanceledException) { return; }
 
             await CancelStaleOrdersAsync(client, ct);
+            foreach (var change in _volatilitySpread.Refresh())
+            {
+                _log.LogInformation(
+                    "[mm-volatility] effective spread changed during window refresh symbol={Symbol} estimateTicks={MoveEstimateTicks} samples={SampleCount} ready={Ready} connected={Connected} previousAdditionalTicks={PreviousAdditionalTicks} additionalTicks={AdditionalTicks}",
+                    change.Symbol,
+                    change.Current.MoveEstimateTicks,
+                    change.Current.SampleCount,
+                    change.Current.IsReady,
+                    change.Current.IsConnected,
+                    change.PreviousAdditionalSpreadTicks,
+                    change.Current.AdditionalSpreadTicks);
+                SignalPricingContextChanged(change.Symbol, CancelReason.VolatilityStrategy);
+            }
             // RFC #703 book-driven quoting makes cancel/resubmit cycles
             // common rather than rare, so tracker housekeeping now runs
             // every reconcile tick too — see OrderTracker.PruneClosed's
@@ -565,6 +583,9 @@ internal sealed class MarketMakerWorker : BackgroundService
     internal void OnSymbolAvailabilityChanged(string symbol) =>
         SignalPricingContextChanged(symbol, CancelReason.FeedUnavailable);
 
+    internal void OnVolatilitySpreadChanged(string symbol) =>
+        SignalPricingContextChanged(symbol, CancelReason.VolatilityStrategy);
+
     /// <summary>
     /// Coalesces a pricing-context change for one configured symbol. A signal
     /// arriving while that symbol is already queued is folded into the queued
@@ -620,7 +641,8 @@ internal sealed class MarketMakerWorker : BackgroundService
         _dirtyPricingContextSignals.TryRemove(symbol, out reason);
 
     private static bool IsPricingContextReason(CancelReason reason) =>
-        reason is CancelReason.PriceDrift or CancelReason.InventoryStrategy or CancelReason.FeedUnavailable;
+        reason is CancelReason.PriceDrift or CancelReason.InventoryStrategy or
+            CancelReason.VolatilityStrategy or CancelReason.FeedUnavailable;
 
     private static CancelReason MergePricingContextReason(CancelReason current, CancelReason incoming) =>
         PricingContextPriority(incoming) > PricingContextPriority(current) ? incoming : current;
@@ -628,6 +650,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     private static int PricingContextPriority(CancelReason reason) => reason switch
     {
         CancelReason.FeedUnavailable => 3,
+        CancelReason.VolatilityStrategy => 2,
         CancelReason.InventoryStrategy => 2,
         CancelReason.PriceDrift => 1,
         _ => 0,
@@ -687,7 +710,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         var instr = FindInstrument(symbol);
         if (instr is null) return;
         var now = _tracker.UtcNow;
-        var maxDeviation = reason == CancelReason.InventoryStrategy
+        var maxDeviation = reason is CancelReason.InventoryStrategy or CancelReason.VolatilityStrategy
             ? 0m
             : instr.TickSize * _options.RequoteDeviationTicks;
         TimeSpan? retryAfter = null;
@@ -720,6 +743,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             if (elapsed < _options.MinRequoteInterval)
             {
                 if (reason == CancelReason.InventoryStrategy ||
+                    reason == CancelReason.VolatilityStrategy ||
                     reason == CancelReason.FeedUnavailable ||
                     isSuppressed)
                 {
@@ -904,14 +928,18 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// <summary>
     /// The single worker-side context builder for both initial/replacement
     /// submits and reactive drift comparisons. Inventory comes only from the
-    /// process-local P&amp;L ledger; effective spread remains configured spread
-    /// until #718 opts in.
+    /// process-local P&amp;L ledger; dynamic spread comes only from valid
+    /// market-data trades through <see cref="VolatilitySpreadEstimator"/>.
     /// </summary>
     internal QuoteDecision BuildQuoteDecision(InstrumentConfig instrument, bool isBuy)
     {
         var hasLiveReference = _priceTracker.TryGetReferencePrice(instrument.Symbol, out var liveReference);
         var referencePrice = hasLiveReference ? liveReference : instrument.RefPrice;
-        var configuredHalfSpread = instrument.SpreadTicks * instrument.TickSize;
+        var volatilitySpread = _volatilitySpread.GetSnapshot(instrument.Symbol);
+        var effectiveHalfSpreadTicks = checked(
+            instrument.SpreadTicks + volatilitySpread.AdditionalSpreadTicks);
+        var configuredHalfSpread = checked(instrument.SpreadTicks * instrument.TickSize);
+        var effectiveHalfSpread = checked(effectiveHalfSpreadTicks * instrument.TickSize);
         var netQuantity = _pnlLedger.TryGetSnapshot(instrument.Symbol, out var position)
             ? position.Position
             : 0L;
@@ -929,7 +957,8 @@ internal sealed class MarketMakerWorker : BackgroundService
             inventorySkew.MidShift,
             inventorySkew.SkewTicks,
             ConfiguredHalfSpread: configuredHalfSpread,
-            EffectiveHalfSpread: configuredHalfSpread,
+            EffectiveHalfSpread: effectiveHalfSpread,
+            AdditionalHalfSpreadTicks: volatilitySpread.AdditionalSpreadTicks,
             instrument.TickSize,
             _priceTracker.IsDelisted(instrument.Symbol)
                 ? QuoteSuppressionReason.InstrumentDelisted

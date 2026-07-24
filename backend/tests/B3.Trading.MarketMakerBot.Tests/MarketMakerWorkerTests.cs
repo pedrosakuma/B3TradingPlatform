@@ -51,11 +51,14 @@ public class MarketMakerWorkerTests : IDisposable
         var tracker = new OrderTracker();
         var priceTracker = new MarketPriceTracker();
         pnlLedger = new MarketMakerPnlLedger();
-        var metrics = new MarketMakerMetrics(pnlLedger, priceTracker, Options.Create(options));
+        var volatilitySpread = new VolatilitySpreadEstimator(Options.Create(options), TimeProvider.System);
+        var metrics = new MarketMakerMetrics(
+            pnlLedger, priceTracker, volatilitySpread, Options.Create(options));
         _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
-        var marketData = new MarketDataFeed(priceTracker, NullLogger.Instance);
-        var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, pnlLedger, metrics,
+        var marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance);
+        var worker = new MarketMakerWorker(
+            Options.Create(options), tracker, priceTracker, volatilitySpread, pnlLedger, metrics,
             marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance);
         return (worker, tracker, new FakeEntryPointClient(), instrument);
     }
@@ -115,11 +118,14 @@ public class MarketMakerWorkerTests : IDisposable
         var tracker = new OrderTracker(clock);
         var priceTracker = new MarketPriceTracker(clock);
         pnlLedger = new MarketMakerPnlLedger(clock);
-        var metrics = new MarketMakerMetrics(pnlLedger, priceTracker, Options.Create(options));
+        var volatilitySpread = new VolatilitySpreadEstimator(Options.Create(options), clock);
+        var metrics = new MarketMakerMetrics(
+            pnlLedger, priceTracker, volatilitySpread, Options.Create(options));
         _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
-        marketData = new MarketDataFeed(priceTracker, NullLogger.Instance);
-        var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, pnlLedger, metrics,
+        marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance);
+        var worker = new MarketMakerWorker(
+            Options.Create(options), tracker, priceTracker, volatilitySpread, pnlLedger, metrics,
             marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance);
         return (worker, tracker, new FakeEntryPointClient(), instrument, priceTracker);
     }
@@ -196,6 +202,29 @@ public class MarketMakerWorkerTests : IDisposable
         Assert.Equal(2.5m, decision.InventorySkewTicks);
         Assert.Equal(-0.025m, decision.InventoryMidShift);
         Assert.Equal(29.93m, decision.Price);
+        Assert.Equal(decision.Price, Assert.Single(client.SubmittedOrders).Price);
+    }
+
+    [Fact]
+    public async Task QuoteSideAsync_AdaptiveSpreadSubmitMatchesUnifiedDecision()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, _) = CreateWorker(
+            clock,
+            EnableVolatilitySpread,
+            out _,
+            out var marketData);
+        marketData.NotifyConnectionState(true);
+        marketData.NotifyTrade(instrument.Symbol, 30m);
+        marketData.NotifyTrade(instrument.Symbol, 30.02m);
+
+        var decision = worker.BuildQuoteDecision(instrument, isBuy: false);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+
+        Assert.Equal(2, decision.AdditionalHalfSpreadTicks);
+        Assert.Equal(0.05m, decision.ConfiguredHalfSpread);
+        Assert.Equal(0.07m, decision.EffectiveHalfSpread);
+        Assert.Equal(30.09m, decision.Price);
         Assert.Equal(decision.Price, Assert.Single(client.SubmittedOrders).Price);
     }
 
@@ -999,6 +1028,7 @@ public class MarketMakerWorkerTests : IDisposable
     [InlineData(CancelReason.StaleOrder)]
     [InlineData(CancelReason.PriceDrift)]
     [InlineData(CancelReason.InventoryStrategy)]
+    [InlineData(CancelReason.VolatilityStrategy)]
     [InlineData(CancelReason.FeedUnavailable)]
     public async Task HandleEventAsync_OrderRejected_CancelAttemptRejected_LeavesOriginalOrderUntouched(
         CancelReason cancelReason)
@@ -1193,6 +1223,136 @@ public class MarketMakerWorkerTests : IDisposable
         });
     }
 
+    [Fact]
+    public async Task VolatilityTickChange_RepricesBothSidesWithoutDuplicateCancels()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options =>
+            {
+                EnableVolatilitySpread(options);
+                options.Instruments[0].VolatilitySpread.Multiplier = 2m;
+            },
+            out _,
+            out var marketData);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        var originalIds = client.SubmittedOrders.Select(order => order.ClOrdID.Value).ToHashSet();
+
+        var bothSidesCancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 2)
+                bothSidesCancelled.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        marketData.VolatilitySpreadChanged += worker.OnVolatilitySpreadChanged;
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        try
+        {
+            marketData.NotifyConnectionState(true);
+            marketData.NotifyTrade(instrument.Symbol, 30m);
+            marketData.NotifyTrade(instrument.Symbol, 30.04m);
+            await bothSidesCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            // Same 4-tick estimate: no second pricing signal/cancel storm.
+            marketData.NotifyTrade(instrument.Symbol, 30m);
+            await Task.Yield();
+            Assert.Equal(2, client.SubmittedCancels.Count);
+            Assert.Equal(originalIds,
+                client.SubmittedCancels.Select(cancel => cancel.OrigClOrdID.Value).ToHashSet());
+            Assert.All(client.SubmittedCancels, cancel =>
+            {
+                Assert.True(tracker.TryResolveCancelAttempt(cancel.ClOrdID.Value, out _, out var reason));
+                Assert.Equal(CancelReason.VolatilityStrategy, reason);
+            });
+
+            foreach (var cancel in client.SubmittedCancels.ToArray())
+            {
+                await worker.HandleEventAsync(client, new OrderCancelled
+                {
+                    ClOrdID = cancel.ClOrdID,
+                    OrigClOrdID = cancel.OrigClOrdID,
+                    OrderId = 100,
+                    OrderStatus = OrderStatus.Cancelled,
+                    SeqNum = 1,
+                    SendingTime = DateTimeOffset.UtcNow,
+                }, CancellationToken.None);
+            }
+
+            Assert.Equal(4, client.SubmittedOrders.Count);
+            Assert.Equal(29.87m, client.SubmittedOrders.Last(order => order.Side == Side.Buy).Price);
+            Assert.Equal(30.13m, client.SubmittedOrders.Last(order => order.Side == Side.Sell).Price);
+            Assert.Equal(
+                worker.BuildQuoteDecision(instrument, isBuy: true).Price,
+                client.SubmittedOrders.Last(order => order.Side == Side.Buy).Price);
+            Assert.Equal(
+                worker.BuildQuoteDecision(instrument, isBuy: false).Price,
+                client.SubmittedOrders.Last(order => order.Side == Side.Sell).Price);
+        }
+        finally
+        {
+            marketData.VolatilitySpreadChanged -= worker.OnVolatilitySpreadChanged;
+            cts.Cancel();
+            await reactionLoop;
+        }
+    }
+
+    [Fact]
+    public async Task VolatilityCancelSubmitFailure_RetriesWithoutDuplicatingRestingOrder()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options =>
+            {
+                EnableVolatilitySpread(options);
+                options.Instruments[0].VolatilitySpread.Multiplier = 2m;
+            },
+            out _,
+            out var marketData);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        marketData.NotifyConnectionState(true);
+        marketData.NotifyTrade(instrument.Symbol, 30m);
+        marketData.NotifyTrade(instrument.Symbol, 30.04m);
+
+        var attempts = 0;
+        var retried = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+                throw new InvalidOperationException("test transport failure");
+            retried.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+
+        await worker.ReactToPricingContextChangeAsync(
+            client,
+            instrument.Symbol,
+            CancelReason.VolatilityStrategy,
+            CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        await retried.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+        await reactionLoop;
+
+        Assert.Equal(2, client.SubmittedCancels.Count);
+        Assert.All(client.SubmittedCancels,
+            cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+        Assert.Single(client.SubmittedOrders, order => order.Side == Side.Buy);
+        Assert.Single(client.SubmittedOrders, order => order.Side == Side.Sell);
+        Assert.True(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        Assert.True(tracker.TryResolveCancelAttempt(
+            client.SubmittedCancels[^1].ClOrdID.Value,
+            out _,
+            out var reason));
+        Assert.Equal(CancelReason.VolatilityStrategy, reason);
+    }
+
     [Theory]
     [InlineData(CancelReason.StaleOrder, "bot.orders.stale_cancel_rejected")]
     [InlineData(CancelReason.PriceDrift, "bot.orders.book_driven_requote_cancel_rejected")]
@@ -1294,6 +1454,20 @@ public class MarketMakerWorkerTests : IDisposable
             Enabled = true,
             FullSkewAtLots = 1,
             MaxSkewTicks = 5m,
+        };
+    }
+
+    private static void EnableVolatilitySpread(MarketMakerBotOptions options)
+    {
+        options.MinRequoteInterval = TimeSpan.Zero;
+        options.Instruments[0].VolatilitySpread = new VolatilitySpreadConfig
+        {
+            Enabled = true,
+            Window = TimeSpan.FromMinutes(1),
+            MaxSamples = 10,
+            MinSamples = 1,
+            Multiplier = 1m,
+            MaxAdditionalSpreadTicks = 20,
         };
     }
 }

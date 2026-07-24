@@ -58,6 +58,7 @@ public class InventorySkewCalculatorTests
             skew.SkewTicks,
             ConfiguredHalfSpread: 0.05m,
             EffectiveHalfSpread: 0.05m,
+            AdditionalHalfSpreadTicks: 0,
             TickSize: 0.01m));
         var ask = QuoteCalculator.Decide(new QuoteInputs(
             false,
@@ -67,12 +68,43 @@ public class InventorySkewCalculatorTests
             skew.SkewTicks,
             ConfiguredHalfSpread: 0.05m,
             EffectiveHalfSpread: 0.05m,
+            AdditionalHalfSpreadTicks: 0,
             TickSize: 0.01m));
 
         Assert.Equal(29.93m, bid.Price);
         Assert.Equal(30.03m, ask.Price);
         Assert.Equal(-0.025m, bid.InventoryMidShift);
         Assert.Equal(2.5m, bid.InventorySkewTicks);
+    }
+
+    [Fact]
+    public void Decide_RoundsOnceAfterCombiningInventoryShiftAndAdaptiveSpread()
+    {
+        var skew = InventorySkewCalculator.Calculate(Enabled(), 500, 100, 0.01m);
+
+        var bid = QuoteCalculator.Decide(new QuoteInputs(
+            true,
+            30.001m,
+            QuoteReferenceSource.Explicit,
+            skew.MidShift,
+            skew.SkewTicks,
+            ConfiguredHalfSpread: 0.05m,
+            EffectiveHalfSpread: 0.07m,
+            AdditionalHalfSpreadTicks: 2,
+            TickSize: 0.01m));
+        var ask = QuoteCalculator.Decide(new QuoteInputs(
+            false,
+            30.001m,
+            QuoteReferenceSource.Explicit,
+            skew.MidShift,
+            skew.SkewTicks,
+            ConfiguredHalfSpread: 0.05m,
+            EffectiveHalfSpread: 0.07m,
+            AdditionalHalfSpreadTicks: 2,
+            TickSize: 0.01m));
+
+        Assert.Equal(29.91m, bid.Price);
+        Assert.Equal(30.05m, ask.Price);
     }
 
     [Fact]

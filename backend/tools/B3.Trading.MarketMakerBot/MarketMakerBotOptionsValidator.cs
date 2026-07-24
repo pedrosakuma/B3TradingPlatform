@@ -18,36 +18,69 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
                 failures.Add($"{path}:Symbol '{instrument.Symbol}' is duplicated.");
 
             var skew = instrument.InventorySkew;
-            if (skew is null || !skew.Enabled)
-                continue;
-            if (skew.FullSkewAtLots <= 0)
-                failures.Add($"{path}:InventorySkew:FullSkewAtLots must be positive when enabled.");
-            if (skew.MaxSkewTicks < 0m)
-                failures.Add($"{path}:InventorySkew:MaxSkewTicks must be nonnegative when enabled.");
-
-            if (skew.FullSkewAtLots > 0 && instrument.LotSize > 0)
+            if (skew?.Enabled == true)
             {
-                try
+                if (skew.FullSkewAtLots <= 0)
+                    failures.Add($"{path}:InventorySkew:FullSkewAtLots must be positive when enabled.");
+                if (skew.MaxSkewTicks < 0m)
+                    failures.Add($"{path}:InventorySkew:MaxSkewTicks must be nonnegative when enabled.");
+
+                if (skew.FullSkewAtLots > 0 && instrument.LotSize > 0)
                 {
-                    _ = checked(skew.FullSkewAtLots * instrument.LotSize);
+                    try
+                    {
+                        _ = checked(skew.FullSkewAtLots * instrument.LotSize);
+                    }
+                    catch (OverflowException)
+                    {
+                        failures.Add(
+                            $"{path}:InventorySkew:FullSkewAtLots times LotSize exceeds the supported quantity range.");
+                    }
                 }
-                catch (OverflowException)
+
+                if (skew.MaxSkewTicks >= 0m && instrument.TickSize > 0m)
                 {
-                    failures.Add(
-                        $"{path}:InventorySkew:FullSkewAtLots times LotSize exceeds the supported quantity range.");
+                    try
+                    {
+                        _ = checked(skew.MaxSkewTicks * instrument.TickSize);
+                    }
+                    catch (OverflowException)
+                    {
+                        failures.Add(
+                            $"{path}:InventorySkew:MaxSkewTicks times TickSize exceeds the supported price range.");
+                    }
                 }
             }
 
-            if (skew.MaxSkewTicks >= 0m && instrument.TickSize > 0m)
+            var volatility = instrument.VolatilitySpread;
+            if (volatility?.Enabled != true)
+                continue;
+
+            if (volatility.Window <= TimeSpan.Zero)
+                failures.Add($"{path}:VolatilitySpread:Window must be positive when enabled.");
+            if (volatility.MaxSamples <= 0)
+                failures.Add($"{path}:VolatilitySpread:MaxSamples must be positive when enabled.");
+            if (volatility.MinSamples <= 0)
+                failures.Add($"{path}:VolatilitySpread:MinSamples must be positive when enabled.");
+            if (volatility.MinSamples > volatility.MaxSamples)
+                failures.Add($"{path}:VolatilitySpread:MinSamples must not exceed MaxSamples.");
+            if (volatility.Multiplier <= 0m)
+                failures.Add($"{path}:VolatilitySpread:Multiplier must be positive when enabled.");
+            if (volatility.MaxAdditionalSpreadTicks < 0)
+                failures.Add($"{path}:VolatilitySpread:MaxAdditionalSpreadTicks must be nonnegative when enabled.");
+
+            if (instrument.SpreadTicks >= 0 && volatility.MaxAdditionalSpreadTicks >= 0 &&
+                instrument.TickSize > 0m)
             {
                 try
                 {
-                    _ = checked(skew.MaxSkewTicks * instrument.TickSize);
+                    var effectiveTicks = checked(instrument.SpreadTicks + volatility.MaxAdditionalSpreadTicks);
+                    _ = checked(effectiveTicks * instrument.TickSize);
                 }
                 catch (OverflowException)
                 {
                     failures.Add(
-                        $"{path}:InventorySkew:MaxSkewTicks times TickSize exceeds the supported price range.");
+                        $"{path}:SpreadTicks plus VolatilitySpread:MaxAdditionalSpreadTicks exceeds the supported price range.");
                 }
             }
         }
