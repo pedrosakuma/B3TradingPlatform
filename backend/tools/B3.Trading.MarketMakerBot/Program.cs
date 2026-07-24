@@ -37,10 +37,12 @@ builder.Services.AddSingleton<IValidateOptions<MarketMakerBotOptions>, MarketMak
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<OrderTracker>();
 builder.Services.AddSingleton<MarketPriceTracker>();
+builder.Services.AddSingleton<VolatilitySpreadEstimator>();
 builder.Services.AddSingleton<MarketMakerPnlLedger>();
 builder.Services.AddSingleton<MarketMakerMetrics>();
 builder.Services.AddSingleton<MarketDataFeed>(sp => new MarketDataFeed(
     sp.GetRequiredService<MarketPriceTracker>(),
+    sp.GetRequiredService<VolatilitySpreadEstimator>(),
     sp.GetRequiredService<ILoggerFactory>().CreateLogger("MarketDataFeed")));
 builder.Services.AddHostedService<MarketMakerWorker>();
 builder.Services.AddHostedService<MarketMakerPnlReporter>();

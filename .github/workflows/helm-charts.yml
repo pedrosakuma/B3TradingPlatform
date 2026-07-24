@@ -75,6 +75,27 @@ jobs:
             --set nginx.resolver=10.0.0.10 \
             --set nginx.tradingUpstream=trading-host.b3-prod.svc.cluster.local:5000
 
+      - name: helm template (market-maker legacy instrument values)
+        if: matrix.chart == 'b3-market-maker-bot'
+        run: |
+          helm template ci charts/b3-market-maker-bot \
+            --set-json 'instruments=[{"symbol":"PETR4","securityId":"1","refPrice":"30.00","tickSize":"0.01","lotSize":100,"quoteLots":1,"spreadTicks":5}]'
+
+      - name: helm template (market-maker partial volatility override)
+        if: matrix.chart == 'b3-market-maker-bot'
+        run: |
+          helm template ci charts/b3-market-maker-bot \
+            --set-json 'instruments=[{"symbol":"PETR4","securityId":"1","refPrice":"30.00","tickSize":"0.01","lotSize":100,"quoteLots":1,"spreadTicks":5,"volatilitySpread":{"enabled":true}}]'
+
+      - name: Assert market-maker default image is promoted
+        if: matrix.chart == 'b3-market-maker-bot'
+        run: |
+          set -euo pipefail
+          rendered="$(helm template ci charts/b3-market-maker-bot)"
+          grep -Fq 'image: ghcr.io/pedrosakuma/b3-market-maker-bot:latest' <<<"$rendered"
+          grep -Fq 'imagePullPolicy: Always' <<<"$rendered"
+          ! grep -Fq 'b3-market-maker-bot:0.1.0' <<<"$rendered"
+
       # #574: a values/template-only chart change that lands without a
       # Chart.yaml version bump silently fails to republish (the "Package +
       # push" job treats OCI tags as immutable and only emits a

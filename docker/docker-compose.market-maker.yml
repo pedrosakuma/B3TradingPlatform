@@ -121,6 +121,14 @@ services:
       MarketMaker__Instruments__0__InventorySkew__Enabled: "false"
       MarketMaker__Instruments__0__InventorySkew__FullSkewAtLots: "10"
       MarketMaker__Instruments__0__InventorySkew__MaxSkewTicks: "5"
+      # Trade-driven adaptive widening is independently opt-in per
+      # instrument. Static SpreadTicks always remains the floor.
+      MarketMaker__Instruments__0__VolatilitySpread__Enabled: "false"
+      MarketMaker__Instruments__0__VolatilitySpread__Window: "00:01:00"
+      MarketMaker__Instruments__0__VolatilitySpread__MaxSamples: "120"
+      MarketMaker__Instruments__0__VolatilitySpread__MinSamples: "10"
+      MarketMaker__Instruments__0__VolatilitySpread__Multiplier: "1.0"
+      MarketMaker__Instruments__0__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
 
       MarketMaker__Instruments__1__Symbol: VALE3
       MarketMaker__Instruments__1__SecurityId: "900000000002"
@@ -132,6 +140,12 @@ services:
       MarketMaker__Instruments__1__InventorySkew__Enabled: "false"
       MarketMaker__Instruments__1__InventorySkew__FullSkewAtLots: "10"
       MarketMaker__Instruments__1__InventorySkew__MaxSkewTicks: "5"
+      MarketMaker__Instruments__1__VolatilitySpread__Enabled: "false"
+      MarketMaker__Instruments__1__VolatilitySpread__Window: "00:01:00"
+      MarketMaker__Instruments__1__VolatilitySpread__MaxSamples: "120"
+      MarketMaker__Instruments__1__VolatilitySpread__MinSamples: "10"
+      MarketMaker__Instruments__1__VolatilitySpread__Multiplier: "1.0"
+      MarketMaker__Instruments__1__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
 
       MarketMaker__Instruments__2__Symbol: ITUB4
       MarketMaker__Instruments__2__SecurityId: "900000000003"
@@ -143,6 +157,12 @@ services:
       MarketMaker__Instruments__2__InventorySkew__Enabled: "false"
       MarketMaker__Instruments__2__InventorySkew__FullSkewAtLots: "10"
       MarketMaker__Instruments__2__InventorySkew__MaxSkewTicks: "5"
+      MarketMaker__Instruments__2__VolatilitySpread__Enabled: "false"
+      MarketMaker__Instruments__2__VolatilitySpread__Window: "00:01:00"
+      MarketMaker__Instruments__2__VolatilitySpread__MaxSamples: "120"
+      MarketMaker__Instruments__2__VolatilitySpread__MinSamples: "10"
+      MarketMaker__Instruments__2__VolatilitySpread__Multiplier: "1.0"
+      MarketMaker__Instruments__2__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
     volumes:
       - market-maker-bot-state:/var/lib/b3-market-maker-bot
 

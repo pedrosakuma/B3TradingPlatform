@@ -81,6 +81,80 @@ public class MarketMakerBotOptionsValidatorTests
         Assert.True(_validator.Validate(null, options).Succeeded);
     }
 
+    [Fact]
+    public void Validate_DisabledVolatility_DoesNotValidateInactiveValues()
+    {
+        var options = Options();
+        options.Instruments[0].VolatilitySpread = new VolatilitySpreadConfig
+        {
+            Enabled = false,
+            Window = TimeSpan.Zero,
+            MaxSamples = 0,
+            MinSamples = -1,
+            Multiplier = 0m,
+            MaxAdditionalSpreadTicks = -1,
+        };
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidVolatilityConfigurations))]
+    public void Validate_EnabledVolatility_RejectsInvalidValues(VolatilitySpreadConfig config)
+    {
+        var options = Options();
+        options.Instruments[0].VolatilitySpread = config;
+
+        Assert.False(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_EnabledVolatility_RejectsCheckedSpreadArithmeticOverflow()
+    {
+        var options = Options();
+        options.Instruments[0].SpreadTicks = int.MaxValue;
+        options.Instruments[0].VolatilitySpread = EnabledVolatility(maxAdditionalSpreadTicks: 1);
+
+        var result = _validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Failures!, failure => failure.Contains("supported price range", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_AcceptsEnabledVolatility()
+    {
+        var options = Options();
+        options.Instruments[0].VolatilitySpread = EnabledVolatility();
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+    }
+
+    public static TheoryData<VolatilitySpreadConfig> InvalidVolatilityConfigurations() => new()
+    {
+        EnabledVolatility(window: TimeSpan.Zero),
+        EnabledVolatility(maxSamples: 0),
+        EnabledVolatility(minSamples: 0),
+        EnabledVolatility(maxSamples: 10, minSamples: 11),
+        EnabledVolatility(multiplier: 0m),
+        EnabledVolatility(maxAdditionalSpreadTicks: -1),
+    };
+
+    private static VolatilitySpreadConfig EnabledVolatility(
+        TimeSpan? window = null,
+        int maxSamples = 10,
+        int minSamples = 2,
+        decimal multiplier = 1m,
+        int maxAdditionalSpreadTicks = 5) => new()
+        {
+            Enabled = true,
+            Window = window ?? TimeSpan.FromMinutes(1),
+            MaxSamples = maxSamples,
+            MinSamples = minSamples,
+            Multiplier = multiplier,
+            MaxAdditionalSpreadTicks = maxAdditionalSpreadTicks,
+        };
+
     private static MarketMakerBotOptions Options() => new()
     {
         Instruments = [Instrument("PETR4")],

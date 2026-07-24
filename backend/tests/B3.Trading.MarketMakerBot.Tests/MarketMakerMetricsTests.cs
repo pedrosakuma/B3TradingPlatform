@@ -12,7 +12,9 @@ public class MarketMakerMetricsTests
     {
         var ledger = new MarketMakerPnlLedger();
         var prices = new MarketPriceTracker();
-        using var metrics = new MarketMakerMetrics(ledger, prices, Options.Create(new MarketMakerBotOptions()));
+        var options = Options.Create(new MarketMakerBotOptions());
+        var volatility = new VolatilitySpreadEstimator(options, TimeProvider.System);
+        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
         using var listener = new MeterListener();
         var measurements = new ConcurrentBag<(string Name, long Value, string Symbol)>();
         listener.InstrumentPublished = (instrument, meterListener) =>
@@ -52,7 +54,8 @@ public class MarketMakerMetricsTests
         Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
             1, 1, "PETR4", true, 100, 30m, 100, 100, 0, true)).Status);
 
-        using var metrics = new MarketMakerMetrics(ledger, prices, options);
+        var volatility = new VolatilitySpreadEstimator(options, clock);
+        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
         using var listener = new MeterListener();
         var measurements = new ConcurrentBag<(string Name, double Value, string Symbol)>();
         var publishedNames = new ConcurrentBag<string>();
@@ -122,7 +125,8 @@ public class MarketMakerMetricsTests
         Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
             1, 1, "PETR4", true, 500, 30m, 500, 500, 0, true)).Status);
 
-        using var metrics = new MarketMakerMetrics(ledger, prices, options);
+        var volatility = new VolatilitySpreadEstimator(options, TimeProvider.System);
+        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
         using var listener = new MeterListener();
         var measurements = new ConcurrentBag<(string Name, double Value, string Symbol)>();
         listener.InstrumentPublished = (instrument, meterListener) =>
@@ -137,6 +141,57 @@ public class MarketMakerMetricsTests
         listener.RecordObservableInstruments();
 
         Assert.Contains(("bot.strategy.inventory_skew_ticks", 2.5d, "PETR4"), measurements);
+    }
+
+    [Fact]
+    public void VolatilityGauges_ReportEstimateAndEffectiveAdditionalTicksBySymbol()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var ledger = new MarketMakerPnlLedger();
+        var prices = new MarketPriceTracker(clock);
+        var options = Options.Create(new MarketMakerBotOptions
+        {
+            Instruments =
+            [
+                new InstrumentConfig
+                {
+                    Symbol = "PETR4",
+                    TickSize = 0.01m,
+                    VolatilitySpread = new VolatilitySpreadConfig
+                    {
+                        Enabled = true,
+                        Window = TimeSpan.FromMinutes(1),
+                        MaxSamples = 10,
+                        MinSamples = 1,
+                        Multiplier = 1.5m,
+                        MaxAdditionalSpreadTicks = 20,
+                    },
+                },
+            ],
+        });
+        var volatility = new VolatilitySpreadEstimator(options, clock);
+        volatility.SetConnected(true);
+        volatility.OnTrade("PETR4", 30m);
+        volatility.OnTrade("PETR4", 30.02m);
+        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
+        using var listener = new MeterListener();
+        var doubles = new ConcurrentBag<(string Name, double Value, string Symbol)>();
+        var longs = new ConcurrentBag<(string Name, long Value, string Symbol)>();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (ReferenceEquals(instrument.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) =>
+            doubles.Add((instrument.Name, value, GetSymbol(tags))));
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) =>
+            longs.Add((instrument.Name, value, GetSymbol(tags))));
+        listener.Start();
+
+        listener.RecordObservableInstruments();
+
+        Assert.Contains(("bot.strategy.volatility_move_estimate_ticks", 2d, "PETR4"), doubles);
+        Assert.Contains(("bot.strategy.volatility_additional_half_spread_ticks", 3L, "PETR4"), longs);
     }
 
     private static string GetSymbol(ReadOnlySpan<KeyValuePair<string, object?>> tags)

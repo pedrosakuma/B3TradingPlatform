@@ -14,12 +14,11 @@ type: application
 # Chart version is released in lockstep with the image (see #568 versioning
 # contract, extended here per #683 follow-up): bump this whenever
 # templates/values change, independent of appVersion.
-version: 0.2.0
-# appVersion tracks the validated ghcr.io/pedrosakuma/b3-market-maker-bot
-# image tag this chart was last verified against. Overridable per-release
-# via values.image.tag; .Chart.AppVersion IS used as the default image tag
-# when values.image.tag is empty, see templates/_helpers.tpl.
-appVersion: "0.1.0"
+version: 0.3.0
+# The promotion workflow moves `latest` only after the exact candidate digest
+# passes main's required validation. This chart defaults to that published path;
+# production deploys can still pin values.image.digest or values.image.tag.
+appVersion: "latest"
 home: https://github.com/pedrosakuma/B3TradingPlatform
 sources:
   - https://github.com/pedrosakuma/B3TradingPlatform

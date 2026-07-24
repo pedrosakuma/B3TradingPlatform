@@ -8,12 +8,15 @@ fullnameOverride: ""
 
 image:
   repository: ghcr.io/pedrosakuma/b3-market-maker-bot
-  # Defaults to .Chart.AppVersion when empty.
+  # Defaults to .Chart.AppVersion (`latest`, the main-validated promoted digest)
+  # when empty. Pin tag or digest explicitly for immutable deployments.
   tag: ""
   # Optional digest pin (e.g. "sha256:05f6a7f6...").
   # When set, the image reference becomes "repository@digest" and `tag` is ignored.
   digest: ""
-  pullPolicy: IfNotPresent
+  # `latest` is mutable by design, so avoid stale node-cache reuse. Operators
+  # pinning an immutable tag/digest may override this to IfNotPresent.
+  pullPolicy: Always
 
 # Hardcoded to 1 in templates/statefulset.yaml — the bot's FIXP session
 # (sessionId/sessionVerId below) is single-writer against matching-platform,
@@ -97,6 +100,13 @@ instruments:
       # Normalization/saturation band only; this is not a position risk limit.
       fullSkewAtLots: 10
       maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
   - symbol: VALE3
     securityId: "900000000002"
     refPrice: "70.00"
@@ -108,6 +118,13 @@ instruments:
       enabled: false
       fullSkewAtLots: 10
       maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
   - symbol: ITUB4
     securityId: "900000000003"
     refPrice: "32.00"
@@ -119,6 +136,13 @@ instruments:
       enabled: false
       fullSkewAtLots: 10
       maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
 
 resources:
   requests:

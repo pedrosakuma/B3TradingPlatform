@@ -230,7 +230,7 @@ overlay's `AllowErInjection`.
 ### Tuning
 
 The bot's instruments (`Symbol`/`SecurityId`/`RefPrice`/`TickSize`/
-`LotSize`/`QuoteLots`/`SpreadTicks`/`InventorySkew`) and reconcile interval are set via
+`LotSize`/`QuoteLots`/`SpreadTicks`/`InventorySkew`/`VolatilitySpread`) and reconcile interval are set via
 `MarketMaker__*` env vars in `docker-compose.market-maker.yml` — see
 that file's inline comments for the full list. `MarketMaker__Instruments`
 must line up with `docker/real/instruments-eqt.json`'s `SecurityId`s
@@ -254,6 +254,39 @@ rounding. `FullSkewAtLots` is only the normalization/saturation band: it is
 not a position limit, does not suppress either side, and does not cap exposure.
 Each newly-accounted partial or full own fill reevaluates both resting sides
 through the normal throttled cancel-ack-then-requote path.
+
+Volatility-adaptive spread is also opt-in and defaults off per instrument:
+
+```yaml
+MarketMaker__Instruments__0__VolatilitySpread__Enabled: "false"
+MarketMaker__Instruments__0__VolatilitySpread__Window: "00:01:00"
+MarketMaker__Instruments__0__VolatilitySpread__MaxSamples: "120"
+MarketMaker__Instruments__0__VolatilitySpread__MinSamples: "10"
+MarketMaker__Instruments__0__VolatilitySpread__Multiplier: "1.0"
+MarketMaker__Instruments__0__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
+```
+
+When enabled, only valid `Trade` events contribute samples; repeated
+`InfoSnapshot` reference updates never count as returns. After the first trade,
+each absolute trade-to-trade move is measured in `TickSize` units, including
+zero moves. The bounded, age-pruned arithmetic mean is multiplied and rounded
+up, then capped before being added to the configured `SpreadTicks`. The static
+spread is always the floor, and both bid and ask use the same unified pricing
+decision and single final tick rounding.
+
+The estimator retains bounded state across market-data disconnects, but dynamic
+widening is disabled while disconnected: the existing `StaticRefPrice`
+fallback remains in force and quotes revert to the configured static spread.
+On reconnect, retained samples resume widening only if they are still inside
+`Window` and satisfy `MinSamples`; otherwise fresh valid trades must rebuild
+readiness. This is deliberately not the `PauseAndCancel` feed-loss policy
+tracked separately in #720.
+
+The standard OTLP meter exposes
+`bot.strategy.volatility_move_estimate_ticks` and
+`bot.strategy.volatility_additional_half_spread_ticks`, each tagged only by
+configured `symbol`; effective-tick changes also emit structured
+`[mm-volatility]` diagnostics.
 
 ### Out of scope
 
