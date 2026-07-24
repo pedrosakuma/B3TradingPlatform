@@ -1,97 +1,143 @@
+using Microsoft.Extensions.Options;
 using System.Diagnostics.Metrics;
 
 namespace B3.Trading.MarketMakerBot;
 
 /// <summary>
-/// <see cref="System.Diagnostics.Metrics"/> instruments emitted by the
-/// bot. Visible to any host that registers the meter
-/// <c>"B3.Trading.MarketMakerBot"</c> with an OpenTelemetry exporter.
-/// MVP scope: log-shaped only — wiring an OTLP exporter is left to a
-/// follow-up if/when the bot lands in observability dashboards.
+/// Per-host metric publisher. The instance owns and disposes its meter, which
+/// prevents observable callbacks from retaining test or host singletons after
+/// their service provider is disposed.
 /// </summary>
-public static class MarketMakerMetrics
+public sealed class MarketMakerMetrics : IDisposable
 {
     public const string MeterName = "B3.Trading.MarketMakerBot";
+    private const string UnknownSymbol = "unknown";
 
-    public static readonly Meter Meter = new(MeterName, "0.1.0");
+    private readonly MarketMakerPnlLedger _ledger;
+    private readonly MarketPriceTracker _prices;
+    private readonly TimeSpan _markMaxAge;
+    private readonly Meter _meter;
+    private readonly Counter<long> _ordersSubmitted;
+    private readonly Counter<long> _ordersSubmitFailed;
+    private readonly Counter<long> _fillsReceived;
+    private readonly Counter<long> _fillsApplied;
+    private readonly Counter<long> _fillsUnknownOrder;
+    private readonly Counter<long> _fillsDuplicate;
+    private readonly Counter<long> _fillsInvalid;
+    private readonly Counter<long> _fillsInconsistent;
+    private readonly Counter<long> _rejects;
+    private readonly Counter<long> _cancelled;
+    private readonly Counter<long> _staleOrdersCancelled;
+    private readonly Counter<long> _staleCancelRejected;
+    private readonly Counter<long> _staleCancelSubmitFailed;
+    private readonly Counter<long> _safetyCapHits;
+    private readonly Counter<long> _bookDrivenRequotes;
+    private readonly Counter<long> _bookDrivenRequoteSubmitFailed;
+    private readonly Counter<long> _bookDrivenRequoteCancelRejected;
 
-    /// <summary>Orders accepted by the bot for transmission. Tagged
-    /// <c>{symbol, side}</c>.</summary>
-    public static readonly Counter<long> OrdersSubmitted =
-        Meter.CreateCounter<long>("bot.orders.submitted");
+    public MarketMakerMetrics(
+        MarketMakerPnlLedger ledger,
+        MarketPriceTracker prices,
+        IOptions<MarketMakerBotOptions> options)
+    {
+        _ledger = ledger;
+        _prices = prices;
+        _markMaxAge = options.Value.Telemetry.MarkMaxAge;
+        _meter = new Meter(MeterName, "1.0.0");
+        _ordersSubmitted = _meter.CreateCounter<long>("bot.orders.submitted");
+        _ordersSubmitFailed = _meter.CreateCounter<long>("bot.orders.submit_failed");
+        _fillsReceived = _meter.CreateCounter<long>("bot.fills.received");
+        _fillsApplied = _meter.CreateCounter<long>("bot.pnl.fills_applied");
+        _fillsUnknownOrder = _meter.CreateCounter<long>("bot.pnl.fills_unknown_order");
+        _fillsDuplicate = _meter.CreateCounter<long>("bot.pnl.fills_duplicate");
+        _fillsInvalid = _meter.CreateCounter<long>("bot.pnl.fills_invalid");
+        _fillsInconsistent = _meter.CreateCounter<long>("bot.pnl.fills_inconsistent");
+        _rejects = _meter.CreateCounter<long>("bot.orders.rejected");
+        _cancelled = _meter.CreateCounter<long>("bot.orders.cancelled");
+        _staleOrdersCancelled = _meter.CreateCounter<long>("bot.orders.stale_cancelled");
+        _staleCancelRejected = _meter.CreateCounter<long>("bot.orders.stale_cancel_rejected");
+        _staleCancelSubmitFailed = _meter.CreateCounter<long>("bot.orders.stale_cancel_submit_failed");
+        _safetyCapHits = _meter.CreateCounter<long>("bot.orders.safety_cap_hit");
+        _bookDrivenRequotes = _meter.CreateCounter<long>("bot.orders.book_driven_requote");
+        _bookDrivenRequoteSubmitFailed =
+            _meter.CreateCounter<long>("bot.orders.book_driven_requote_submit_failed");
+        _bookDrivenRequoteCancelRejected =
+            _meter.CreateCounter<long>("bot.orders.book_driven_requote_cancel_rejected");
 
-    /// <summary>Outbound submit attempts that the SDK rejected synchronously
-    /// (transport error, terminated session, etc).</summary>
-    public static readonly Counter<long> OrdersSubmitFailed =
-        Meter.CreateCounter<long>("bot.orders.submit_failed");
+        _meter.CreateObservableGauge("bot.position.quantity", ObservePositions);
+        _meter.CreateObservableGauge("bot.position.average_cost", ObserveAverageCosts);
+        _meter.CreateObservableGauge("bot.pnl.realized", ObserveRealizedPnl);
+        _meter.CreateObservableGauge("bot.pnl.unrealized", ObserveUnrealizedPnl);
+    }
 
-    /// <summary>Trades observed via OrderTrade events. Tagged <c>{symbol}</c>.</summary>
-    public static readonly Counter<long> Fills =
-        Meter.CreateCounter<long>("bot.fills.received");
+    public void RecordOrderSubmitted(string symbol, bool isBuy) =>
+        _ordersSubmitted.Add(1, SymbolTag(symbol), SideTag(isBuy));
 
-    /// <summary>OrderRejected events received. Tagged <c>{symbol}</c>.</summary>
-    public static readonly Counter<long> Rejects =
-        Meter.CreateCounter<long>("bot.orders.rejected");
+    public void RecordOrderSubmitFailed(string symbol) =>
+        _ordersSubmitFailed.Add(1, SymbolTag(symbol));
 
-    /// <summary>OrderCancelled events received.</summary>
-    public static readonly Counter<long> Cancelled =
-        Meter.CreateCounter<long>("bot.orders.cancelled");
+    public void RecordFillReceived(string? symbol) =>
+        _fillsReceived.Add(1, SymbolTag(symbol));
 
-    /// <summary>RFC #703 miss-fill/staleness guard: orders explicitly
-    /// cancelled by <c>MarketMakerWorker.CancelStaleOrdersAsync</c> for
-    /// exceeding <see cref="MarketMakerBotOptions.MaxOrderAge"/>. Tagged
-    /// <c>{symbol}</c>. Should normally stay at zero — a nonzero rate
-    /// means the event-driven requote path is missing terminal events.</summary>
-    public static readonly Counter<long> StaleOrdersCancelled =
-        Meter.CreateCounter<long>("bot.orders.stale_cancelled");
+    public void RecordFillResult(string symbol, FillApplyStatus status)
+    {
+        var counter = status switch
+        {
+            FillApplyStatus.Applied => _fillsApplied,
+            FillApplyStatus.Duplicate => _fillsDuplicate,
+            FillApplyStatus.Invalid => _fillsInvalid,
+            FillApplyStatus.Inconsistent => _fillsInconsistent,
+            _ => throw new ArgumentOutOfRangeException(nameof(status)),
+        };
+        counter.Add(1, SymbolTag(symbol));
+    }
 
-    /// <summary>RFC #703 miss-fill/staleness guard: the venue rejected a
-    /// stale-order cancel request (e.g. the order was already
-    /// terminal/unknown, or a transient reject). The tracker deliberately
-    /// leaves the original order's reservation untouched in this case —
-    /// see <c>MarketMakerWorker.HandleEventAsync</c>'s OrderRejected case
-    /// for the rationale. Tagged <c>{symbol}</c>.</summary>
-    public static readonly Counter<long> StaleCancelRejected =
-        Meter.CreateCounter<long>("bot.orders.stale_cancel_rejected");
+    public void RecordUnknownOrderFill() =>
+        _fillsUnknownOrder.Add(1, SymbolTag(null));
 
-    /// <summary>RFC #703 miss-fill/staleness guard: a stale-order cancel
-    /// request failed synchronously (transport error, terminated session,
-    /// etc) before any ER could arrive to resolve it. Tagged
-    /// <c>{symbol}</c>.</summary>
-    public static readonly Counter<long> StaleCancelSubmitFailed =
-        Meter.CreateCounter<long>("bot.orders.stale_cancel_submit_failed");
+    public void RecordRejected(string? symbol) => _rejects.Add(1, SymbolTag(symbol));
+    public void RecordCancelled() => _cancelled.Add(1);
+    public void RecordStaleOrderCancelled(string symbol) => _staleOrdersCancelled.Add(1, SymbolTag(symbol));
+    public void RecordStaleCancelRejected(string symbol) => _staleCancelRejected.Add(1, SymbolTag(symbol));
+    public void RecordStaleCancelSubmitFailed(string symbol) => _staleCancelSubmitFailed.Add(1, SymbolTag(symbol));
+    public void RecordSafetyCapHit(string symbol) => _safetyCapHits.Add(1, SymbolTag(symbol));
+    public void RecordBookDrivenRequote(string symbol, bool isBuy) =>
+        _bookDrivenRequotes.Add(1, SymbolTag(symbol), SideTag(isBuy));
+    public void RecordBookDrivenRequoteSubmitFailed(string symbol) =>
+        _bookDrivenRequoteSubmitFailed.Add(1, SymbolTag(symbol));
+    public void RecordBookDrivenRequoteCancelRejected(string symbol) =>
+        _bookDrivenRequoteCancelRejected.Add(1, SymbolTag(symbol));
 
-    /// <summary>RFC #703 client-side safety cap: incremented every time a
-    /// quote is skipped because <see cref="OrderTracker.OpenCount"/> is at
-    /// or above <see cref="MarketMakerBotOptions.MaxOpenOrders"/>. Should
-    /// normally stay at zero.</summary>
-    public static readonly Counter<long> SafetyCapHits =
-        Meter.CreateCounter<long>("bot.orders.safety_cap_hit");
+    public void Dispose() => _meter.Dispose();
 
-    /// <summary>RFC #703 book-driven quoting: a market-data book delta not
-    /// caused by the bot's own resting order (see
-    /// <c>OrderTracker.IsOwnOrder</c>) revealed a side's resting price had
-    /// drifted past <see cref="MarketMakerBotOptions.RequoteDeviationTicks"/>
-    /// from the freshly-computed target, triggering a reactive
-    /// cancel-and-requote instead of waiting for the resting order to
-    /// terminate on its own. Tagged <c>{symbol, side}</c>.</summary>
-    public static readonly Counter<long> BookDrivenRequotes =
-        Meter.CreateCounter<long>("bot.orders.book_driven_requote");
+    private IEnumerable<Measurement<long>> ObservePositions() =>
+        _ledger.SnapshotAll().Select(snapshot =>
+            new Measurement<long>(snapshot.Position, SymbolTag(snapshot.Symbol)));
 
-    /// <summary>RFC #703 book-driven quoting: a reactive cancel triggered
-    /// by <c>MarketMakerWorker.ReactToBookChangeAsync</c> failed
-    /// synchronously before any ER could arrive to resolve it. Tagged
-    /// <c>{symbol}</c>.</summary>
-    public static readonly Counter<long> BookDrivenRequoteSubmitFailed =
-        Meter.CreateCounter<long>("bot.orders.book_driven_requote_submit_failed");
+    private IEnumerable<Measurement<double>> ObserveAverageCosts() =>
+        _ledger.SnapshotAll().Select(snapshot =>
+            new Measurement<double>((double)snapshot.AverageCost, SymbolTag(snapshot.Symbol)));
 
-    /// <summary>RFC #703 book-driven quoting: the venue rejected a
-    /// reactive cancel request raised by
-    /// <c>MarketMakerWorker.ReactToBookChangeAsync</c>. Distinct from
-    /// <see cref="StaleCancelRejected"/> so a routine book-driven
-    /// requote race (e.g. the order filled or was already being
-    /// cancelled by the staleness guard) isn't misreported as the
-    /// miss-fill safety net itself failing. Tagged <c>{symbol}</c>.</summary>
-    public static readonly Counter<long> BookDrivenRequoteCancelRejected =
-        Meter.CreateCounter<long>("bot.orders.book_driven_requote_cancel_rejected");
+    private IEnumerable<Measurement<double>> ObserveRealizedPnl() =>
+        _ledger.SnapshotAll().Select(snapshot =>
+            new Measurement<double>((double)snapshot.RealizedPnl, SymbolTag(snapshot.Symbol)));
+
+    private IEnumerable<Measurement<double>> ObserveUnrealizedPnl()
+    {
+        foreach (var snapshot in _ledger.SnapshotAll())
+        {
+            if (_prices.TryGetFreshMark(snapshot.Symbol, _markMaxAge, out var mark))
+            {
+                yield return new Measurement<double>(
+                    (double)snapshot.UnrealizedPnl(mark.Price),
+                    SymbolTag(snapshot.Symbol));
+            }
+        }
+    }
+
+    private static KeyValuePair<string, object?> SymbolTag(string? symbol) =>
+        new("symbol", string.IsNullOrWhiteSpace(symbol) ? UnknownSymbol : symbol);
+
+    private static KeyValuePair<string, object?> SideTag(bool isBuy) =>
+        new("side", isBuy ? "buy" : "sell");
 }

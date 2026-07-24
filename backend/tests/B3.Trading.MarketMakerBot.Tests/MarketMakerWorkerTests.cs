@@ -12,9 +12,21 @@ namespace B3.Trading.MarketMakerBot.Tests;
 /// coverage that #707's investigation had to substitute with a live
 /// Docker soak test before <c>IEntryPointClient</c> was adopted here.
 /// </summary>
-public class MarketMakerWorkerTests
+public class MarketMakerWorkerTests : IDisposable
 {
-    private static (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client, InstrumentConfig Instrument) CreateWorker()
+    private readonly List<MarketMakerMetrics> _metrics = [];
+
+    public void Dispose()
+    {
+        foreach (var metrics in _metrics)
+            metrics.Dispose();
+    }
+
+    private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client, InstrumentConfig Instrument)
+        CreateWorker() => CreateWorker(out _);
+
+    private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client, InstrumentConfig Instrument)
+        CreateWorker(out MarketMakerPnlLedger pnlLedger)
     {
         var instrument = new InstrumentConfig
         {
@@ -35,10 +47,13 @@ public class MarketMakerWorkerTests
         };
         var tracker = new OrderTracker();
         var priceTracker = new MarketPriceTracker();
+        pnlLedger = new MarketMakerPnlLedger();
+        var metrics = new MarketMakerMetrics(pnlLedger, priceTracker, Options.Create(options));
+        _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
         var marketData = new MarketDataFeed(priceTracker, NullLogger.Instance);
-        var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, marketData,
-            loggerFactory, NullLogger<MarketMakerWorker>.Instance);
+        var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, pnlLedger, metrics,
+            marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance);
         return (worker, tracker, new FakeEntryPointClient(), instrument);
     }
 
@@ -54,7 +69,7 @@ public class MarketMakerWorkerTests
     /// <see cref="MarketPriceTracker"/> so tests can move the live
     /// reference price.
     /// </summary>
-    private static (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client,
+    private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client,
         InstrumentConfig Instrument, MarketPriceTracker PriceTracker) CreateWorker(
         TimeProvider clock, Action<MarketMakerBotOptions>? configure = null)
     {
@@ -77,11 +92,14 @@ public class MarketMakerWorkerTests
         };
         configure?.Invoke(options);
         var tracker = new OrderTracker(clock);
-        var priceTracker = new MarketPriceTracker();
+        var priceTracker = new MarketPriceTracker(clock);
+        var pnlLedger = new MarketMakerPnlLedger();
+        var metrics = new MarketMakerMetrics(pnlLedger, priceTracker, Options.Create(options));
+        _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
         var marketData = new MarketDataFeed(priceTracker, NullLogger.Instance);
-        var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, marketData,
-            loggerFactory, NullLogger<MarketMakerWorker>.Instance);
+        var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, pnlLedger, metrics,
+            marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance);
         return (worker, tracker, new FakeEntryPointClient(), instrument, priceTracker);
     }
 
@@ -195,6 +213,57 @@ public class MarketMakerWorkerTests
 
         Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
         Assert.Single(client.SubmittedOrders); // no requote — still the same resting order.
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_KnownOwnTrade_AppliesLedgerAndDuplicateIsIdempotent()
+    {
+        var (worker, _, client, instrument) = CreateWorker(out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+        var trade = new OrderTrade
+        {
+            ClOrdID = new ClOrdID(clOrdId),
+            OrderId = 100,
+            TradeId = 55,
+            OrderStatus = OrderStatus.Filled,
+            LastPx = 30m,
+            LastQty = 100,
+            CumQty = 100,
+            LeavesQty = 0,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        };
+
+        await worker.HandleEventAsync(client, trade, CancellationToken.None);
+        await worker.HandleEventAsync(client, trade, CancellationToken.None);
+
+        Assert.True(ledger.TryGetSnapshot("PETR4", out var snapshot));
+        Assert.Equal(100, snapshot.Position);
+        Assert.Equal(30m, snapshot.AverageCost);
+        Assert.Equal(0m, snapshot.RealizedPnl);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_UnknownOrderTrade_DoesNotCreateLedgerState()
+    {
+        var (worker, _, client, _) = CreateWorker(out var ledger);
+
+        await worker.HandleEventAsync(client, new OrderTrade
+        {
+            ClOrdID = new ClOrdID(999),
+            OrderId = 100,
+            TradeId = 55,
+            OrderStatus = OrderStatus.Filled,
+            LastPx = 30m,
+            LastQty = 100,
+            CumQty = 100,
+            LeavesQty = 0,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.Empty(ledger.SnapshotAll());
     }
 
     [Fact]

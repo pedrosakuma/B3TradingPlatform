@@ -25,6 +25,8 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly MarketMakerBotOptions _options;
     private readonly OrderTracker _tracker;
     private readonly MarketPriceTracker _priceTracker;
+    private readonly MarketMakerPnlLedger _pnlLedger;
+    private readonly MarketMakerMetrics _metrics;
     private readonly MarketDataFeed _marketData;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<MarketMakerWorker> _log;
@@ -42,12 +44,14 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly ConcurrentDictionary<string, byte> _pendingBookSignals = new(StringComparer.Ordinal);
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
-        MarketPriceTracker priceTracker, MarketDataFeed marketData, ILoggerFactory loggerFactory,
-        ILogger<MarketMakerWorker> log)
+        MarketPriceTracker priceTracker, MarketMakerPnlLedger pnlLedger, MarketMakerMetrics metrics,
+        MarketDataFeed marketData, ILoggerFactory loggerFactory, ILogger<MarketMakerWorker> log)
     {
         _options = options.Value;
         _tracker = tracker;
         _priceTracker = priceTracker;
+        _pnlLedger = pnlLedger;
+        _metrics = metrics;
         _marketData = marketData;
         _loggerFactory = loggerFactory;
         _log = log;
@@ -190,10 +194,34 @@ internal sealed class MarketMakerWorker : BackgroundService
                 break;
             case UpModels.OrderTrade t:
                 {
-                    _tracker.SetOrderId(t.ClOrdID.Value, t.OrderId);
                     var known = _tracker.TryGet(t.ClOrdID.Value, out var o);
-                    var symbol = known ? o.Symbol : "?";
-                    MarketMakerMetrics.Fills.Add(1, new KeyValuePair<string, object?>("symbol", symbol));
+                    var symbol = known ? o.Symbol : null;
+                    _metrics.RecordFillReceived(symbol);
+                    if (known)
+                    {
+                        _tracker.SetOrderId(t.ClOrdID.Value, t.OrderId);
+                        var fillResult = _pnlLedger.Apply(new OwnFill(
+                            t.ClOrdID.Value,
+                            t.TradeId,
+                            o.Symbol,
+                            o.IsBuy,
+                            o.Quantity,
+                            t.LastPx,
+                            t.LastQty,
+                            t.CumQty,
+                            t.LeavesQty,
+                            t.OrderStatus == UpModels.OrderStatus.Filled,
+                            t.OrderStatus is UpModels.OrderStatus.PartiallyFilled or UpModels.OrderStatus.Filled));
+                        _metrics.RecordFillResult(o.Symbol, fillResult.Status);
+                        LogFillResult(t, o.Symbol, fillResult);
+                    }
+                    else
+                    {
+                        _metrics.RecordUnknownOrderFill();
+                        _log.LogWarning(
+                            "[mm-pnl] ignored fill for unknown order clordid={ClOrdId} orderId={OrderId} tradeId={TradeId} lastQty={LastQty} cumQty={CumQty}",
+                            t.ClOrdID.Value, t.OrderId, t.TradeId, t.LastQty, t.CumQty);
+                    }
                     // The authoritative "is this order done" signal is
                     // OrderStatus (Filled vs PartiallyFilled), not
                     // LeavesQty — same rationale as OrderAccepted above;
@@ -210,7 +238,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                 }
             case UpModels.OrderCancelled c:
                 {
-                    MarketMakerMetrics.Cancelled.Add(1);
+                    _metrics.RecordCancelled();
                     // OrigClOrdID is the original resting order's id; it's
                     // only set when the cancel was in response to an
                     // explicit CancelOrderRequest (ours or another
@@ -267,20 +295,18 @@ internal sealed class MarketMakerWorker : BackgroundService
                         // so without this tag a routine book-driven
                         // requote race would otherwise always be
                         // misreported as the miss-fill safety net itself
-                        // failing (see MarketMakerMetrics.StaleCancelRejected's
-                        // doc comment: "should normally stay at zero").
+                        // failing (the stale-cancel-rejected counter should
+                        // normally stay at zero).
                         if (wasBookDriven)
                         {
-                            MarketMakerMetrics.BookDrivenRequoteCancelRejected.Add(1,
-                                new KeyValuePair<string, object?>("symbol", stuckSymbol));
+                            _metrics.RecordBookDrivenRequoteCancelRejected(stuckSymbol);
                             _log.LogInformation(
                                 "[mm] book-driven requote cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
                                 origClOrdId, r.Reason);
                         }
                         else
                         {
-                            MarketMakerMetrics.StaleCancelRejected.Add(1,
-                                new KeyValuePair<string, object?>("symbol", stuckSymbol));
+                            _metrics.RecordStaleCancelRejected(stuckSymbol);
                             _log.LogWarning(
                                 "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
                                 origClOrdId, r.Reason);
@@ -288,8 +314,8 @@ internal sealed class MarketMakerWorker : BackgroundService
                         break;
                     }
                     var known = _tracker.TryGet(r.ClOrdID.Value, out var o);
-                    var symbol = known ? o.Symbol : "?";
-                    MarketMakerMetrics.Rejects.Add(1, new KeyValuePair<string, object?>("symbol", symbol));
+                    var symbol = known ? o.Symbol : null;
+                    _metrics.RecordRejected(symbol);
                     _tracker.OnTerminal(r.ClOrdID.Value);
                     // Deliberately do NOT re-quote immediately here: an
                     // instrument-level reject (bad config, halt, risk
@@ -401,10 +427,9 @@ internal sealed class MarketMakerWorker : BackgroundService
                     o.ClOrdId, o.Symbol);
                 continue;
             }
-            if (await SubmitCancelAsync(client, o, instr, MarketMakerMetrics.StaleCancelSubmitFailed, ct))
+            if (await SubmitCancelAsync(client, o, instr, _metrics.RecordStaleCancelSubmitFailed, ct))
             {
-                MarketMakerMetrics.StaleOrdersCancelled.Add(1,
-                    new KeyValuePair<string, object?>("symbol", o.Symbol));
+                _metrics.RecordStaleOrderCancelled(o.Symbol);
                 _log.LogWarning(
                     "[mm] cancelled stale order clordid={ClOrdId} symbol={Symbol} side={Side} age={Age} (miss-fill guard)",
                     o.ClOrdId, o.Symbol, o.IsBuy ? "buy" : "sell", _tracker.UtcNow - o.SubmittedAtUtc);
@@ -505,12 +530,10 @@ internal sealed class MarketMakerWorker : BackgroundService
             if (target <= 0m) continue;
             if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
 
-            if (await SubmitCancelAsync(client, resting, instr, MarketMakerMetrics.BookDrivenRequoteSubmitFailed, ct,
+            if (await SubmitCancelAsync(client, resting, instr, _metrics.RecordBookDrivenRequoteSubmitFailed, ct,
                     _options.MinRequoteInterval, isBookDriven: true))
             {
-                MarketMakerMetrics.BookDrivenRequotes.Add(1,
-                    new KeyValuePair<string, object?>("symbol", symbol),
-                    new KeyValuePair<string, object?>("side", isBuy ? "buy" : "sell"));
+                _metrics.RecordBookDrivenRequote(symbol, isBuy);
                 _log.LogInformation(
                     "[mm] book-driven requote: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} resting={Resting} target={Target}",
                     resting.ClOrdId, symbol, isBuy ? "buy" : "sell", resting.Price, target);
@@ -545,7 +568,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// their own reason-specific success metric/log.
     /// </summary>
     private async Task<bool> SubmitCancelAsync(IEntryPointClient client, TrackedOrder o, InstrumentConfig instr,
-        System.Diagnostics.Metrics.Counter<long> submitFailedMetric, CancellationToken ct,
+        Action<string> recordSubmitFailed, CancellationToken ct,
         TimeSpan? minIntervalSinceLastAttempt = null, bool isBookDriven = false)
     {
         var cancelClOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
@@ -573,7 +596,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             // already been registered for this order by the time this
             // catch runs.
             _tracker.ClearPendingCancelIfMatches(o.ClOrdId, cancelClOrdId);
-            submitFailedMetric.Add(1, new KeyValuePair<string, object?>("symbol", o.Symbol));
+            recordSubmitFailed(o.Symbol);
             _log.LogWarning(ex, "[mm] failed to cancel clordid={ClOrdId} symbol={Symbol}", o.ClOrdId, o.Symbol);
             return false;
         }
@@ -590,8 +613,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         var openCount = _tracker.OpenCount();
         if (openCount >= _options.MaxOpenOrders)
         {
-            MarketMakerMetrics.SafetyCapHits.Add(1,
-                new KeyValuePair<string, object?>("symbol", instr.Symbol));
+            _metrics.RecordSafetyCapHit(instr.Symbol);
             _log.LogWarning(
                 "[mm] safety cap hit: {OpenCount} open orders >= MaxOpenOrders={MaxOpenOrders}; skipping quote for {Symbol} side={Side}",
                 openCount, _options.MaxOpenOrders, instr.Symbol, isBuy ? "buy" : "sell");
@@ -637,16 +659,13 @@ internal sealed class MarketMakerWorker : BackgroundService
         try
         {
             await client.SubmitAsync(req, ct);
-            MarketMakerMetrics.OrdersSubmitted.Add(1,
-                new KeyValuePair<string, object?>("symbol", instr.Symbol),
-                new KeyValuePair<string, object?>("side", isBuy ? "buy" : "sell"));
+            _metrics.RecordOrderSubmitted(instr.Symbol, isBuy);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             _tracker.OnTerminal(clOrdId);
-            MarketMakerMetrics.OrdersSubmitFailed.Add(1,
-                new KeyValuePair<string, object?>("symbol", instr.Symbol));
+            _metrics.RecordOrderSubmitFailed(instr.Symbol);
             _log.LogWarning(ex, "[mm] quote submit failed for {Symbol} side={Side} clordid={ClOrdId}",
                 instr.Symbol, isBuy ? "buy" : "sell", clOrdId);
         }
@@ -661,4 +680,32 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     internal static System.Net.DnsEndPoint ParseEndpoint(string endpoint) =>
         EndpointParser.Parse(endpoint);
+
+    private void LogFillResult(UpModels.OrderTrade trade, string symbol, FillApplyResult result)
+    {
+        switch (result.Status)
+        {
+            case FillApplyStatus.Applied:
+                break;
+            case FillApplyStatus.Duplicate:
+                _log.LogInformation(
+                    "[mm-pnl] ignored duplicate fill symbol={Symbol} clordid={ClOrdId} tradeId={TradeId} cumQty={CumQty}",
+                    symbol, trade.ClOrdID.Value, trade.TradeId, trade.CumQty);
+                break;
+            case FillApplyStatus.Invalid:
+                _log.LogWarning(
+                    "[mm-pnl] ignored invalid fill symbol={Symbol} clordid={ClOrdId} tradeId={TradeId} lastPx={LastPx} lastQty={LastQty} cumQty={CumQty} reason={Reason}",
+                    symbol, trade.ClOrdID.Value, trade.TradeId, trade.LastPx, trade.LastQty, trade.CumQty,
+                    result.Reason);
+                break;
+            case FillApplyStatus.Inconsistent:
+                _log.LogWarning(
+                    "[mm-pnl] ignored inconsistent fill symbol={Symbol} clordid={ClOrdId} tradeId={TradeId} lastQty={LastQty} cumQty={CumQty} leavesQty={LeavesQty} reason={Reason}",
+                    symbol, trade.ClOrdID.Value, trade.TradeId, trade.LastQty, trade.CumQty, trade.LeavesQty,
+                    result.Reason);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(result));
+        }
+    }
 }

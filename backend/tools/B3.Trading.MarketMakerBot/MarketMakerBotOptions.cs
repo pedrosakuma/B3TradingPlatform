@@ -106,6 +106,9 @@ public sealed class MarketMakerBotOptions
     /// start — a co-located bot without a feed is still useful liquidity
     /// in a pinch.</summary>
     public MarketDataOptions MarketData { get; set; } = new();
+
+    /// <summary>Process-local P&amp;L snapshot and mark-freshness settings.</summary>
+    public MarketMakerTelemetryOptions Telemetry { get; set; } = new();
 }
 
 /// <summary>Connection to B3MarketDataPlatform's WebSocket feed (see
@@ -117,6 +120,16 @@ public sealed class MarketDataOptions
     /// <summary>WebSocket endpoint, e.g. <c>ws://market-data-platform:8080/ws</c>.
     /// Leave unset to run with static RefPrice anchors only.</summary>
     public string? WsUrl { get; set; }
+}
+
+public sealed class MarketMakerTelemetryOptions
+{
+    /// <summary>Cadence for structured per-symbol position/P&amp;L logs.</summary>
+    public TimeSpan SnapshotInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Maximum live-market mark age allowed for unrealized P&amp;L.
+    /// Missing, disconnected, or older marks suppress that measurement.</summary>
+    public TimeSpan MarkMaxAge { get; set; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>One instrument the bot quotes. <see cref="SecurityId"/> must

@@ -14,9 +14,15 @@ namespace B3.Trading.MarketMakerBot;
 /// </summary>
 public sealed class MarketPriceTracker
 {
-    private readonly ConcurrentDictionary<string, decimal> _referencePrice = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, MarketMark> _referencePrice = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _delisted = new(StringComparer.Ordinal);
+    private readonly TimeProvider _clock;
     private volatile bool _connected;
+
+    public MarketPriceTracker(TimeProvider? clock = null)
+    {
+        _clock = clock ?? TimeProvider.System;
+    }
 
     /// <summary>Returns the last live price for <paramref name="symbol"/>
     /// only while the feed is actually connected — once disconnected the
@@ -30,14 +36,38 @@ public sealed class MarketPriceTracker
             price = default;
             return false;
         }
-        return _referencePrice.TryGetValue(symbol, out price);
+        if (_referencePrice.TryGetValue(symbol, out var mark))
+        {
+            price = mark.Price;
+            return true;
+        }
+        price = default;
+        return false;
+    }
+
+    /// <summary>Returns a connected live mark only when it was updated within
+    /// <paramref name="maxAge"/>. Quote fallback behavior deliberately keeps
+    /// using <see cref="TryGetReferencePrice"/>; this stricter seam is only
+    /// for unrealized P&amp;L publication.</summary>
+    public bool TryGetFreshMark(string symbol, TimeSpan maxAge, out MarketMark mark)
+    {
+        if (!_connected)
+        {
+            mark = default;
+            return false;
+        }
+        if (!_referencePrice.TryGetValue(symbol, out mark))
+            return false;
+
+        var age = _clock.GetUtcNow() - mark.ObservedAtUtc;
+        return age >= TimeSpan.Zero && age <= maxAge;
     }
 
     public bool IsDelisted(string symbol) => _delisted.ContainsKey(symbol);
 
     public void OnTrade(string symbol, decimal price)
     {
-        if (price > 0m) _referencePrice[symbol] = price;
+        if (price > 0m) _referencePrice[symbol] = new MarketMark(price, _clock.GetUtcNow());
     }
 
     /// <summary>Prefers the venue's own <c>TradingReferencePrice</c> — the
@@ -47,8 +77,11 @@ public sealed class MarketPriceTracker
     public void OnInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice)
     {
         var candidate = tradingReferencePrice ?? lastTradePrice;
-        if (candidate is { } p && p > 0m) _referencePrice[symbol] = p;
+        if (candidate is { } p && p > 0m)
+            _referencePrice[symbol] = new MarketMark(p, _clock.GetUtcNow());
     }
+
+    public readonly record struct MarketMark(decimal Price, DateTimeOffset ObservedAtUtc);
 
     public void OnSymbolDelisted(string symbol) => _delisted[symbol] = 0;
 

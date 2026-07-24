@@ -1,6 +1,7 @@
 # Metrics
 
-The trading-host emits OpenTelemetry metrics + traces opt-in via the
+The trading-host emits OpenTelemetry metrics + traces, and the standalone
+market-maker bot emits metrics, opt-in via the
 standard `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable. When that
 variable is unset, the OTel SDK is **not registered at all** — no
 exporter, no periodic pump, no warnings — so dev loops and unit tests pay
@@ -31,6 +32,34 @@ Every signal carries:
 | `deployment.environment` | `ASPNETCORE_ENVIRONMENT` (`Development`, `Docker`, `Production`, ...) |
 
 Operators can layer more via `OTEL_RESOURCE_ATTRIBUTES=foo=bar,baz=qux`.
+The market-maker bot uses `service.name=b3-market-maker-bot` and
+`DOTNET_ENVIRONMENT` for `deployment.environment`.
+
+## Market-maker meter (`B3.Trading.MarketMakerBot`)
+
+The bot's position ledger is process-local, gross/pre-fee, and derived only
+from validated `OrderTrade` events for known bot orders. It is deliberately
+independent of the trading application's persisted P&L state.
+
+| OTel name | Type | Tags | Notes |
+|---|---|---|---|
+| `bot.position.quantity` | Observable Gauge | `symbol` | Signed net quantity |
+| `bot.position.average_cost` | Observable Gauge | `symbol` | Weighted-average open cost |
+| `bot.pnl.realized` | Observable Gauge | `symbol` | Process-lifetime gross realized P&L |
+| `bot.pnl.unrealized` | Observable Gauge | `symbol` | Omitted unless a connected live mark is no older than `MarketMaker:Telemetry:MarkMaxAge` |
+| `bot.pnl.fills_applied` | Counter | `symbol` | Valid own executions booked |
+| `bot.pnl.fills_unknown_order` | Counter | `symbol=unknown` | Fill ignored because ClOrdID is not owned by this process |
+| `bot.pnl.fills_duplicate` | Counter | `symbol` | Execution identity replay ignored |
+| `bot.pnl.fills_invalid` | Counter | `symbol` | Invalid price/quantity/identity ignored |
+| `bot.pnl.fills_inconsistent` | Counter | `symbol` | CumQty, LeavesQty, status, or replay payload mismatch ignored |
+
+Structured snapshots use the same ledger and mark-freshness gate at
+`MarketMaker:Telemetry:SnapshotInterval`. A missing/stale mark is logged as
+null and is never exported as zero unrealized P&L.
+
+The bot exports only to an OTLP endpoint. The intended deployment path is
+`bot -> OTLP Collector in b3deploy -> Azure Monitor`; Azure-specific exporters
+and credentials belong to the collector deployment, not this repository.
 
 ## Application meter (`B3.Trading`)
 
