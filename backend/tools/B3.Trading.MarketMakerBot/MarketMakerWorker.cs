@@ -29,7 +29,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<MarketMakerWorker> _log;
     private long _nextClOrdId;
-    private EntryPointClient? _client;
+    private IEntryPointClient? _client;
     // RFC #703 book-driven quoting: OnBookOrderChanged runs synchronously
     // on MarketDataFeed's receive callback, so it can't itself await a
     // CancelAsync — it just signals the symbol here and returns. A
@@ -150,7 +150,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
-    private async Task ReceiveLoopAsync(EntryPointClient client, CancellationToken ct)
+    private async Task ReceiveLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
         await foreach (var ev in client.Events(ct).ConfigureAwait(false))
         {
@@ -166,7 +166,16 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
-    private async Task HandleEventAsync(EntryPointClient client, UpModels.EntryPointEvent ev, CancellationToken ct)
+    /// <summary>
+    /// internal (not private) + <c>IEntryPointClient</c> parameter: this
+    /// is the seam <c>MarketMakerWorkerTests</c> drives directly with a
+    /// fake client to deterministically exercise the accept/fill/reject
+    /// event interplay — see #709. It's how the #707 duplicate-order
+    /// regression (a null LeavesQty on OrderAccepted misread as a fill)
+    /// is now covered by a fast unit test instead of only a live Docker
+    /// soak test.
+    /// </summary>
+    internal async Task HandleEventAsync(IEntryPointClient client, UpModels.EntryPointEvent ev, CancellationToken ct)
     {
         switch (ev)
         {
@@ -318,7 +327,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
-    private async Task RequoteAsync(EntryPointClient client, string symbol, bool isBuy, CancellationToken ct)
+    private async Task RequoteAsync(IEntryPointClient client, string symbol, bool isBuy, CancellationToken ct)
     {
         var instr = FindInstrument(symbol);
         if (instr is null) return;
@@ -333,7 +342,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// <see cref="HandleEventAsync"/> is what keeps quotes fresh under
     /// normal operation; this loop should rarely find anything to do.
     /// </summary>
-    private async Task ReconcileLoopAsync(EntryPointClient client, CancellationToken ct)
+    private async Task ReconcileLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -373,7 +382,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// the original tracked order so the reject still resolves and frees
     /// the stale reservation, instead of retrying identically forever.
     /// </summary>
-    private async Task CancelStaleOrdersAsync(EntryPointClient client, CancellationToken ct)
+    private async Task CancelStaleOrdersAsync(IEntryPointClient client, CancellationToken ct)
     {
         var stale = _tracker.FindStale(_options.MaxOrderAge, _tracker.UtcNow);
         foreach (var o in stale)
@@ -429,7 +438,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             _bookSignals.Writer.TryWrite(symbol);
     }
 
-    private async Task BookReactionLoopAsync(EntryPointClient client, CancellationToken ct)
+    private async Task BookReactionLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
         try
         {
@@ -466,7 +475,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// hasn't even settled yet, the same venue-flooding shape RFC #703
     /// exists to prevent.
     /// </summary>
-    private async Task ReactToBookChangeAsync(EntryPointClient client, string symbol, CancellationToken ct)
+    private async Task ReactToBookChangeAsync(IEntryPointClient client, string symbol, CancellationToken ct)
     {
         var instr = FindInstrument(symbol);
         if (instr is null || _priceTracker.IsDelisted(symbol)) return;
@@ -529,7 +538,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// had already closed, or the interval hadn't elapsed); callers add
     /// their own reason-specific success metric/log.
     /// </summary>
-    private async Task<bool> SubmitCancelAsync(EntryPointClient client, TrackedOrder o, InstrumentConfig instr,
+    private async Task<bool> SubmitCancelAsync(IEntryPointClient client, TrackedOrder o, InstrumentConfig instr,
         System.Diagnostics.Metrics.Counter<long> submitFailedMetric, CancellationToken ct,
         TimeSpan? minIntervalSinceLastAttempt = null, bool isBookDriven = false)
     {
@@ -564,7 +573,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
-    private async Task QuoteSideAsync(EntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
+    internal async Task QuoteSideAsync(IEntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
     {
         if (_priceTracker.IsDelisted(instr.Symbol)) return;
         // RFC #703 client-side safety cap (defense in depth against the

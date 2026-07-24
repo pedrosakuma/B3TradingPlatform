@@ -14,4 +14,8 @@
     <PackageReference Include="B3.MarketData.WebSocketClient" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="B3.Trading.MarketMakerBot.Tests" />
+  </ItemGroup>
+
 </Project>
