@@ -8,7 +8,8 @@ fullnameOverride: ""
 
 image:
   repository: ghcr.io/pedrosakuma/b3-market-maker-bot
-  # Defaults to .Chart.AppVersion when empty.
+  # Defaults to .Chart.AppVersion (`latest`, the main-validated promoted digest)
+  # when empty. Pin tag or digest explicitly for immutable deployments.
   tag: ""
   # Optional digest pin (e.g. "sha256:05f6a7f6...").
   # When set, the image reference becomes "repository@digest" and `tag` is ignored.

@@ -124,6 +124,37 @@ public class VolatilitySpreadEstimatorTests
     }
 
     [Fact]
+    public void MinimumScalePositiveMultiplier_DoesNotOverflowThresholdArithmetic()
+    {
+        const decimal minimumScaleMultiplier = 0.0000000000000000000000000001m;
+        var estimator = Create(out _, minSamples: 1, multiplier: minimumScaleMultiplier);
+        estimator.SetConnected(true);
+        estimator.OnTrade("PETR4", 30m);
+
+        var change = estimator.OnTrade("PETR4", 30.02m);
+
+        Assert.NotNull(change);
+        Assert.Equal(minimumScaleMultiplier, checked(1m * minimumScaleMultiplier));
+        Assert.Equal(1, change.Value.Current.AdditionalSpreadTicks);
+    }
+
+    [Fact]
+    public void ScalingOverflow_SaturatesToConfiguredCap()
+    {
+        var estimator = Create(out _, minSamples: 1, multiplier: decimal.MaxValue, cap: 7);
+        estimator.SetConnected(true);
+        estimator.OnTrade("PETR4", 30m);
+
+        var change = estimator.OnTrade("PETR4", 30.02m);
+
+        Assert.NotNull(change);
+        var estimate = 2m;
+        var multiplier = decimal.MaxValue;
+        Assert.Throws<OverflowException>(() => checked(estimate * multiplier));
+        Assert.Equal(7, change.Value.Current.AdditionalSpreadTicks);
+    }
+
+    [Fact]
     public void SymbolsHaveIndependentBaselinesAndSamples()
     {
         var estimator = Create(out _, minSamples: 1, symbols: ["PETR4", "VALE3"]);

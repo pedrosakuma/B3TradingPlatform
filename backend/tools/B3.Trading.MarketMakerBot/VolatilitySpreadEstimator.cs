@@ -143,9 +143,19 @@ public sealed class VolatilitySpreadEstimator
             return 0;
 
         var cap = config.MaxAdditionalSpreadTicks;
-        if (estimate >= cap / config.Multiplier)
+        decimal scaled;
+        try
+        {
+            scaled = checked(estimate * config.Multiplier);
+        }
+        catch (OverflowException)
+        {
             return cap;
-        var scaled = Math.Ceiling(estimate * config.Multiplier);
+        }
+
+        if (scaled >= cap)
+            return cap;
+        scaled = Math.Ceiling(scaled);
         return decimal.ToInt32(decimal.Clamp(scaled, 0m, cap));
     }
 
