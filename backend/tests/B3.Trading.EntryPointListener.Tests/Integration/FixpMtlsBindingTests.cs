@@ -252,10 +252,9 @@ public sealed class FixpMtlsBindingTests : IDisposable
             var pin = (actualThumbprint[0] == '0' ? '1' : '0') + actualThumbprint[1..];
             return (pin, presented);
         });
-        Assert.True(
-            outcome == NegotiateOutcome.Frame((ushort)NegotiateRejectData.MESSAGE_ID) ||
-            outcome.Kind is NegotiateOutcomeKind.TlsRejected or NegotiateOutcomeKind.ConnectionClosed,
-            $"Expected NegotiateReject or a rejected TLS connection, got {outcome}.");
+        Assert.Equal(
+            NegotiateOutcome.Frame((ushort)NegotiateRejectData.MESSAGE_ID),
+            outcome);
     }
 
     [Fact(Timeout = 20_000)]
