@@ -43,19 +43,22 @@ independent of the trading application's persisted P&L state.
 
 | OTel name | Type | Tags | Notes |
 |---|---|---|---|
-| `bot.position.quantity` | Observable Gauge | `symbol` | Signed net quantity |
-| `bot.position.average_cost` | Observable Gauge | `symbol` | Weighted-average open cost |
+| `bot.position.net_quantity` | Observable Gauge | `symbol` | Signed net quantity |
+| `bot.position.average_entry_price` | Observable Gauge | `symbol` | Weighted-average open cost |
 | `bot.pnl.realized` | Observable Gauge | `symbol` | Process-lifetime gross realized P&L |
 | `bot.pnl.unrealized` | Observable Gauge | `symbol` | Omitted unless a connected live mark is no older than `MarketMaker:Telemetry:MarkMaxAge` |
+| `bot.pnl.total` | Observable Gauge | `symbol` | Realized + unrealized; omitted under the same fresh-mark gate |
 | `bot.pnl.fills_applied` | Counter | `symbol` | Valid own executions booked |
 | `bot.pnl.fills_unknown_order` | Counter | `symbol=unknown` | Fill ignored because ClOrdID is not owned by this process |
 | `bot.pnl.fills_duplicate` | Counter | `symbol` | Execution identity replay ignored |
 | `bot.pnl.fills_invalid` | Counter | `symbol` | Invalid price/quantity/identity ignored |
 | `bot.pnl.fills_inconsistent` | Counter | `symbol` | CumQty, LeavesQty, status, or replay payload mismatch ignored |
+| `bot.pnl.fill_delta_mismatch` | Counter | `symbol` | Advancing CumQty-derived delta differed from LastQty; authoritative cumulative delta was booked |
 
 Structured snapshots use the same ledger and mark-freshness gate at
 `MarketMaker:Telemetry:SnapshotInterval`. A missing/stale mark is logged as
-null and is never exported as zero unrealized P&L.
+null and is never exported as zero unrealized P&L. Every snapshot also carries
+the process accounting-period start timestamp.
 
 The bot exports only to an OTLP endpoint. The intended deployment path is
 `bot -> OTLP Collector in b3deploy -> Azure Monitor`; Azure-specific exporters

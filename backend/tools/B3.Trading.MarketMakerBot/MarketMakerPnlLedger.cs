@@ -11,6 +11,13 @@ public sealed class MarketMakerPnlLedger
     private readonly Dictionary<ulong, ulong> _orderCumQty = new();
     private readonly Dictionary<ExecutionIdentity, ExecutionSignature> _executions = new();
 
+    public MarketMakerPnlLedger(TimeProvider? clock = null)
+    {
+        AccountingPeriodStartedAtUtc = (clock ?? TimeProvider.System).GetUtcNow();
+    }
+
+    public DateTimeOffset AccountingPeriodStartedAtUtc { get; }
+
     public FillApplyResult Apply(OwnFill fill)
     {
         lock (_gate)
@@ -24,11 +31,11 @@ public sealed class MarketMakerPnlLedger
                     : new(FillApplyStatus.Inconsistent, "execution identity was reused with different fill data");
             }
 
-            var validationError = Validate(fill, out var nextCumQty);
+            var validationError = Validate(fill, out var nextCumQty, out var bookedQuantity, out var quantityMismatch);
             if (validationError is not null)
                 return validationError.Value;
 
-            var signedQuantity = checked((long)fill.Quantity) * (fill.IsBuy ? 1L : -1L);
+            var signedQuantity = checked((long)bookedQuantity) * (fill.IsBuy ? 1L : -1L);
             var isNewPosition = !_positions.TryGetValue(fill.Symbol, out var position);
             position ??= new MutablePosition();
 
@@ -44,7 +51,13 @@ public sealed class MarketMakerPnlLedger
                 _positions.Add(fill.Symbol, position);
             _orderCumQty[fill.ClOrdId] = nextCumQty;
             _executions.Add(identity, signature);
-            return new(FillApplyStatus.Applied, null);
+            return new(
+                FillApplyStatus.Applied,
+                quantityMismatch
+                    ? $"CumQty-derived delta {bookedQuantity} differs from LastQty {fill.Quantity}"
+                    : null,
+                bookedQuantity,
+                quantityMismatch);
         }
     }
 
@@ -74,9 +87,15 @@ public sealed class MarketMakerPnlLedger
         }
     }
 
-    private FillApplyResult? Validate(OwnFill fill, out ulong nextCumQty)
+    private FillApplyResult? Validate(
+        OwnFill fill,
+        out ulong nextCumQty,
+        out ulong bookedQuantity,
+        out bool quantityMismatch)
     {
         nextCumQty = 0;
+        bookedQuantity = 0;
+        quantityMismatch = false;
         if (string.IsNullOrWhiteSpace(fill.Symbol))
             return new(FillApplyStatus.Invalid, "symbol is missing");
         if (fill.OrderQuantity <= 0)
@@ -87,26 +106,36 @@ public sealed class MarketMakerPnlLedger
             return new(FillApplyStatus.Invalid, "TradeId is zero");
         if (fill.Price <= 0m)
             return new(FillApplyStatus.Invalid, "LastPx is not positive");
-        if (fill.Quantity == 0 || fill.Quantity > long.MaxValue)
-            return new(FillApplyStatus.Invalid, "LastQty is outside the supported range");
-
         var orderQuantity = (ulong)fill.OrderQuantity;
-        if (fill.Quantity > orderQuantity)
-            return new(FillApplyStatus.Invalid, "LastQty exceeds the known order quantity");
-
         var previousCumQty = _orderCumQty.GetValueOrDefault(fill.ClOrdId);
-        if (ulong.MaxValue - previousCumQty < fill.Quantity)
-            return new(FillApplyStatus.Invalid, "cumulative quantity overflow");
-        nextCumQty = previousCumQty + fill.Quantity;
-
-        if (fill.CumQty is { } reportedCumQty && reportedCumQty != nextCumQty)
+        if (fill.CumQty is { } reportedCumQty)
         {
-            return new(FillApplyStatus.Inconsistent,
-                $"CumQty {reportedCumQty} does not equal prior CumQty {previousCumQty} plus LastQty {fill.Quantity}");
+            if (reportedCumQty <= previousCumQty)
+            {
+                return new(
+                    FillApplyStatus.Duplicate,
+                    $"CumQty {reportedCumQty} did not advance beyond prior CumQty {previousCumQty}");
+            }
+
+            nextCumQty = reportedCumQty;
+            bookedQuantity = reportedCumQty - previousCumQty;
+            quantityMismatch = bookedQuantity != fill.Quantity;
+        }
+        else
+        {
+            if (fill.Quantity == 0 || fill.Quantity > long.MaxValue)
+                return new(FillApplyStatus.Invalid, "LastQty is outside the supported range");
+            if (ulong.MaxValue - previousCumQty < fill.Quantity)
+                return new(FillApplyStatus.Invalid, "cumulative quantity overflow");
+
+            bookedQuantity = fill.Quantity;
+            nextCumQty = previousCumQty + fill.Quantity;
         }
 
         if (nextCumQty > orderQuantity)
             return new(FillApplyStatus.Inconsistent, "cumulative quantity exceeds the known order quantity");
+        if (bookedQuantity == 0 || bookedQuantity > long.MaxValue)
+            return new(FillApplyStatus.Invalid, "booked fill delta is outside the supported range");
 
         if (fill.LeavesQty is { } leavesQty &&
             (leavesQty > orderQuantity || nextCumQty != orderQuantity - leavesQty))
@@ -161,8 +190,8 @@ public sealed class MarketMakerPnlLedger
         }
     }
 
-    private static MarketMakerPnlSnapshot ToSnapshot(string symbol, MutablePosition position) =>
-        new(symbol, position.Quantity, position.AverageCost, position.RealizedPnl);
+    private MarketMakerPnlSnapshot ToSnapshot(string symbol, MutablePosition position) =>
+        new(symbol, position.Quantity, position.AverageCost, position.RealizedPnl, AccountingPeriodStartedAtUtc);
 
     private sealed class MutablePosition
     {
@@ -188,7 +217,11 @@ public readonly record struct OwnFill(
     bool IsOrderFilled,
     bool HasValidOrderStatus = true);
 
-public readonly record struct FillApplyResult(FillApplyStatus Status, string? Reason);
+public readonly record struct FillApplyResult(
+    FillApplyStatus Status,
+    string? Reason,
+    ulong BookedQuantity = 0,
+    bool QuantityMismatch = false);
 
 public enum FillApplyStatus
 {
@@ -202,7 +235,9 @@ public readonly record struct MarketMakerPnlSnapshot(
     string Symbol,
     long Position,
     decimal AverageCost,
-    decimal RealizedPnl)
+    decimal RealizedPnl,
+    DateTimeOffset AccountingPeriodStartedAtUtc)
 {
     public decimal UnrealizedPnl(decimal mark) => (mark - AverageCost) * Position;
+    public decimal TotalPnl(decimal mark) => RealizedPnl + UnrealizedPnl(mark);
 }

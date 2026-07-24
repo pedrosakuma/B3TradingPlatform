@@ -39,21 +39,25 @@ internal sealed class MarketMakerPnlReporter : BackgroundService
         {
             decimal? markPrice = null;
             decimal? unrealizedPnl = null;
+            decimal? totalPnl = null;
             TimeSpan? markAge = null;
             if (_prices.TryGetFreshMark(snapshot.Symbol, _options.MarkMaxAge, out var mark))
             {
                 markPrice = mark.Price;
                 unrealizedPnl = snapshot.UnrealizedPnl(mark.Price);
+                totalPnl = snapshot.TotalPnl(mark.Price);
                 markAge = _clock.GetUtcNow() - mark.ObservedAtUtc;
             }
 
             _log.LogInformation(
-                "[mm-pnl] symbol={Symbol} position={Position} averageCost={AverageCost} realizedPnl={RealizedPnl} unrealizedPnl={UnrealizedPnl} mark={Mark} markAge={MarkAge}",
+                "[mm-pnl] accountingPeriodStartedAtUtc={AccountingPeriodStartedAtUtc} symbol={Symbol} position={Position} averageCost={AverageCost} realizedPnl={RealizedPnl} unrealizedPnl={UnrealizedPnl} totalPnl={TotalPnl} mark={Mark} markAge={MarkAge}",
+                snapshot.AccountingPeriodStartedAtUtc,
                 snapshot.Symbol,
                 snapshot.Position,
                 snapshot.AverageCost,
                 snapshot.RealizedPnl,
                 unrealizedPnl,
+                totalPnl,
                 markPrice,
                 markAge);
         }

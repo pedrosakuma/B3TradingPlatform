@@ -267,6 +267,32 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task HandleEventAsync_ForwardCumulativeJump_BooksAuthoritativeDelta()
+    {
+        var (worker, _, client, instrument) = CreateWorker(out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+
+        await worker.HandleEventAsync(client, new OrderTrade
+        {
+            ClOrdID = new ClOrdID(clOrdId),
+            OrderId = 100,
+            TradeId = 55,
+            OrderStatus = OrderStatus.PartiallyFilled,
+            LastPx = 30m,
+            LastQty = 20,
+            CumQty = 60,
+            LeavesQty = 40,
+            SeqNum = 3,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.True(ledger.TryGetSnapshot("PETR4", out var snapshot));
+        Assert.Equal(60, snapshot.Position);
+        Assert.Equal(30m, snapshot.AverageCost);
+    }
+
+    [Fact]
     public async Task HandleEventAsync_OrderModified_DoesNotFreeReservationOrRequote()
     {
         // The bot never sends ReplaceOrderRequest, so any OrderModified

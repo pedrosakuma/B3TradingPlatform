@@ -212,7 +212,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                             t.LeavesQty,
                             t.OrderStatus == UpModels.OrderStatus.Filled,
                             t.OrderStatus is UpModels.OrderStatus.PartiallyFilled or UpModels.OrderStatus.Filled));
-                        _metrics.RecordFillResult(o.Symbol, fillResult.Status);
+                        _metrics.RecordFillResult(o.Symbol, fillResult);
                         LogFillResult(t, o.Symbol, fillResult);
                     }
                     else
@@ -685,6 +685,12 @@ internal sealed class MarketMakerWorker : BackgroundService
     {
         switch (result.Status)
         {
+            case FillApplyStatus.Applied when result.QuantityMismatch:
+                _log.LogWarning(
+                    "[mm-pnl] fill delta mismatch symbol={Symbol} clordid={ClOrdId} tradeId={TradeId} lastQty={LastQty} cumQty={CumQty} bookedQuantity={BookedQuantity}",
+                    symbol, trade.ClOrdID.Value, trade.TradeId, trade.LastQty, trade.CumQty,
+                    result.BookedQuantity);
+                break;
             case FillApplyStatus.Applied:
                 break;
             case FillApplyStatus.Duplicate:

@@ -61,6 +61,62 @@ public class MarketMakerPnlLedgerTests
     }
 
     [Fact]
+    public void Apply_FirstObservedFillWithForwardCumQty_BooksCumulativeDeltaAndFlagsMismatch()
+    {
+        var ledger = new MarketMakerPnlLedger();
+
+        var result = ledger.Apply(Fill(1, 1, true, 20, 30m, orderQuantity: 100,
+            cumQty: 60, leavesQty: 40, isFilled: false));
+
+        Assert.Equal(FillApplyStatus.Applied, result.Status);
+        Assert.True(result.QuantityMismatch);
+        Assert.Equal((ulong)60, result.BookedQuantity);
+        AssertSnapshot(ledger, position: 60, averageCost: 30m, realizedPnl: 0m);
+    }
+
+    [Fact]
+    public void Apply_MissedIntermediateExecution_BooksForwardCumulativeJumpAtObservedPrice()
+    {
+        var ledger = new MarketMakerPnlLedger();
+        AssertApplied(ledger, Fill(1, 1, true, 20, 100m, orderQuantity: 100,
+            cumQty: 20, leavesQty: 80, isFilled: false));
+
+        var result = ledger.Apply(Fill(1, 3, true, 30, 110m, orderQuantity: 100,
+            cumQty: 100, leavesQty: 0, isFilled: true));
+
+        Assert.Equal(FillApplyStatus.Applied, result.Status);
+        Assert.True(result.QuantityMismatch);
+        Assert.Equal((ulong)80, result.BookedQuantity);
+        AssertSnapshot(ledger, position: 100, averageCost: 108m, realizedPnl: 0m);
+    }
+
+    [Fact]
+    public void Apply_StaleCumulativeQuantityWithNewExecutionIdentity_IsDeduplicated()
+    {
+        var ledger = new MarketMakerPnlLedger();
+        AssertApplied(ledger, Fill(1, 1, true, 40, 30m, orderQuantity: 100,
+            cumQty: 40, leavesQty: 60, isFilled: false));
+
+        var result = ledger.Apply(Fill(1, 2, true, 40, 30m, orderQuantity: 100,
+            cumQty: 40, leavesQty: 60, isFilled: false));
+
+        Assert.Equal(FillApplyStatus.Duplicate, result.Status);
+        AssertSnapshot(ledger, position: 40, averageCost: 30m, realizedPnl: 0m);
+    }
+
+    [Fact]
+    public void Apply_ForwardCumulativeQuantityBeyondKnownOrder_IsRejected()
+    {
+        var ledger = new MarketMakerPnlLedger();
+
+        var result = ledger.Apply(Fill(1, 1, true, 10, 30m, orderQuantity: 100,
+            cumQty: 101, leavesQty: 0, isFilled: true));
+
+        Assert.Equal(FillApplyStatus.Inconsistent, result.Status);
+        Assert.False(ledger.TryGetSnapshot("PETR4", out _));
+    }
+
+    [Fact]
     public void Apply_DuplicateExecution_IsIdempotent()
     {
         var ledger = new MarketMakerPnlLedger();
@@ -141,6 +197,17 @@ public class MarketMakerPnlLedgerTests
 
         Assert.All(results, status => Assert.Equal(FillApplyStatus.Applied, status));
         AssertSnapshot(ledger, position: 100, averageCost: 30m, realizedPnl: 0m);
+    }
+
+    [Fact]
+    public void Snapshot_IncludesProcessAccountingPeriodStart()
+    {
+        var startedAt = DateTimeOffset.Parse("2026-07-24T03:00:00Z");
+        var ledger = new MarketMakerPnlLedger(new ManualTimeProvider(startedAt));
+        AssertApplied(ledger, Fill(1, 1, true, 100, 30m));
+
+        Assert.True(ledger.TryGetSnapshot("PETR4", out var snapshot));
+        Assert.Equal(startedAt, snapshot.AccountingPeriodStartedAtUtc);
     }
 
     private static OwnFill Fill(

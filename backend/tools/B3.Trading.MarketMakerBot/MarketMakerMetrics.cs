@@ -25,6 +25,7 @@ public sealed class MarketMakerMetrics : IDisposable
     private readonly Counter<long> _fillsDuplicate;
     private readonly Counter<long> _fillsInvalid;
     private readonly Counter<long> _fillsInconsistent;
+    private readonly Counter<long> _fillDeltaMismatch;
     private readonly Counter<long> _rejects;
     private readonly Counter<long> _cancelled;
     private readonly Counter<long> _staleOrdersCancelled;
@@ -52,6 +53,7 @@ public sealed class MarketMakerMetrics : IDisposable
         _fillsDuplicate = _meter.CreateCounter<long>("bot.pnl.fills_duplicate");
         _fillsInvalid = _meter.CreateCounter<long>("bot.pnl.fills_invalid");
         _fillsInconsistent = _meter.CreateCounter<long>("bot.pnl.fills_inconsistent");
+        _fillDeltaMismatch = _meter.CreateCounter<long>("bot.pnl.fill_delta_mismatch");
         _rejects = _meter.CreateCounter<long>("bot.orders.rejected");
         _cancelled = _meter.CreateCounter<long>("bot.orders.cancelled");
         _staleOrdersCancelled = _meter.CreateCounter<long>("bot.orders.stale_cancelled");
@@ -64,10 +66,11 @@ public sealed class MarketMakerMetrics : IDisposable
         _bookDrivenRequoteCancelRejected =
             _meter.CreateCounter<long>("bot.orders.book_driven_requote_cancel_rejected");
 
-        _meter.CreateObservableGauge("bot.position.quantity", ObservePositions);
-        _meter.CreateObservableGauge("bot.position.average_cost", ObserveAverageCosts);
+        _meter.CreateObservableGauge("bot.position.net_quantity", ObservePositions);
+        _meter.CreateObservableGauge("bot.position.average_entry_price", ObserveAverageCosts);
         _meter.CreateObservableGauge("bot.pnl.realized", ObserveRealizedPnl);
         _meter.CreateObservableGauge("bot.pnl.unrealized", ObserveUnrealizedPnl);
+        _meter.CreateObservableGauge("bot.pnl.total", ObserveTotalPnl);
     }
 
     public void RecordOrderSubmitted(string symbol, bool isBuy) =>
@@ -79,17 +82,19 @@ public sealed class MarketMakerMetrics : IDisposable
     public void RecordFillReceived(string? symbol) =>
         _fillsReceived.Add(1, SymbolTag(symbol));
 
-    public void RecordFillResult(string symbol, FillApplyStatus status)
+    public void RecordFillResult(string symbol, FillApplyResult result)
     {
-        var counter = status switch
+        var counter = result.Status switch
         {
             FillApplyStatus.Applied => _fillsApplied,
             FillApplyStatus.Duplicate => _fillsDuplicate,
             FillApplyStatus.Invalid => _fillsInvalid,
             FillApplyStatus.Inconsistent => _fillsInconsistent,
-            _ => throw new ArgumentOutOfRangeException(nameof(status)),
+            _ => throw new ArgumentOutOfRangeException(nameof(result)),
         };
         counter.Add(1, SymbolTag(symbol));
+        if (result.QuantityMismatch)
+            _fillDeltaMismatch.Add(1, SymbolTag(symbol));
     }
 
     public void RecordUnknownOrderFill() =>
@@ -109,6 +114,8 @@ public sealed class MarketMakerMetrics : IDisposable
         _bookDrivenRequoteCancelRejected.Add(1, SymbolTag(symbol));
 
     public void Dispose() => _meter.Dispose();
+
+    internal Meter Meter => _meter;
 
     private IEnumerable<Measurement<long>> ObservePositions() =>
         _ledger.SnapshotAll().Select(snapshot =>
@@ -130,6 +137,19 @@ public sealed class MarketMakerMetrics : IDisposable
             {
                 yield return new Measurement<double>(
                     (double)snapshot.UnrealizedPnl(mark.Price),
+                    SymbolTag(snapshot.Symbol));
+            }
+        }
+    }
+
+    private IEnumerable<Measurement<double>> ObserveTotalPnl()
+    {
+        foreach (var snapshot in _ledger.SnapshotAll())
+        {
+            if (_prices.TryGetFreshMark(snapshot.Symbol, _markMaxAge, out var mark))
+            {
+                yield return new Measurement<double>(
+                    (double)snapshot.TotalPnl(mark.Price),
                     SymbolTag(snapshot.Symbol));
             }
         }
