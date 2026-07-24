@@ -179,4 +179,146 @@ public class MarketMakerWorkerTests
         Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
         Assert.Single(client.SubmittedOrders);
     }
+
+    [Fact]
+    public async Task HandleEventAsync_OrderCancelled_WithOrigClOrdID_ClosesAndRequotes()
+    {
+        // The common case: OrigClOrdID is populated because the cancel
+        // was in response to an explicit CancelOrderRequest.
+        var (worker, tracker, client, instrument) = CreateWorker();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+
+        await worker.HandleEventAsync(client, new OrderCancelled
+        {
+            ClOrdID = new ClOrdID(clOrdId + 1000), // the cancel request's own id
+            OrigClOrdID = new ClOrdID(clOrdId),
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        // Closed and immediately re-quoted, same as a fill.
+        Assert.False(tracker.TryGet(clOrdId, out var stale) && stale.IsOpen);
+        Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.NotEqual(clOrdId, client.SubmittedOrders[1].ClOrdID.Value);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_OrderCancelled_MissingOrigClOrdID_ResolvesViaCancelAttemptCorrelation()
+    {
+        // Some gateway paths drop OrigClOrdID on the cancel ack entirely
+        // (see ExecutionReportProcessorTests.Cancel_WithMissingOrigClOrdId_ResolvesViaCancelLink
+        // for the trading-host side of the same class of bug). The bot
+        // must fall back to its own RegisterCancelAttempt correlation
+        // table instead of assuming ClOrdID IS the original order.
+        var (worker, tracker, client, instrument) = CreateWorker();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+        var cancelClOrdId = clOrdId + 1000;
+        tracker.RegisterCancelAttempt(cancelClOrdId, clOrdId);
+
+        await worker.HandleEventAsync(client, new OrderCancelled
+        {
+            ClOrdID = new ClOrdID(cancelClOrdId),
+            OrigClOrdID = null,
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.False(tracker.TryGet(clOrdId, out var stale) && stale.IsOpen);
+        Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
+        Assert.Equal(2, client.SubmittedOrders.Count);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_OrderCancelled_SpontaneousCancel_TreatsClOrdIdAsOriginal()
+    {
+        // No OrigClOrdID and no cancel-attempt correlation row at all: a
+        // venue-initiated spontaneous cancel (e.g. Day expiry). ClOrdID
+        // must be assumed to BE the original order's id.
+        var (worker, tracker, client, instrument) = CreateWorker();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+
+        await worker.HandleEventAsync(client, new OrderCancelled
+        {
+            ClOrdID = new ClOrdID(clOrdId),
+            OrigClOrdID = null,
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.False(tracker.TryGet(clOrdId, out var stale) && stale.IsOpen);
+        Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
+        Assert.Equal(2, client.SubmittedOrders.Count);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task HandleEventAsync_OrderRejected_CancelAttemptRejected_LeavesOriginalOrderUntouched(bool isBookDriven)
+    {
+        // A rejected cancel (book-driven requote or staleness guard —
+        // both share SubmitCancelAsync) must NOT free the original
+        // order's reservation: if it's still genuinely resting, doing so
+        // would let the next reconcile tick submit a duplicate order
+        // alongside it — the exact bug #707 fixed for OrderAccepted.
+        var (worker, tracker, client, instrument) = CreateWorker();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+        var cancelClOrdId = clOrdId + 1000;
+        tracker.RegisterCancelAttempt(cancelClOrdId, clOrdId, isBookDriven);
+
+        await worker.HandleEventAsync(client, new OrderRejected
+        {
+            ClOrdID = new ClOrdID(cancelClOrdId),
+            OrderId = 0,
+            RejectCode = 1,
+            Reason = "test reject",
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.True(tracker.TryGet(clOrdId, out var order) && order.IsOpen);
+        Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
+        // The pending-cancel marker is cleared so a later reconcile tick
+        // / book delta can retry the cancel instead of treating one as
+        // permanently outstanding.
+        Assert.Null(order.PendingCancelClOrdId);
+        // No requote — the order was never actually closed.
+        Assert.Single(client.SubmittedOrders);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_OrderRejected_NewOrderReject_ClosesReservationWithoutImmediateRequote()
+    {
+        // A reject of a plain NEW order submit (not a cancel attempt):
+        // the reservation must close so the side isn't stuck forever,
+        // but must NOT be re-quoted immediately (an instrument-level
+        // reject would otherwise repeat identically forever) — the
+        // low-frequency ReconcileLoopAsync is the intended retry path.
+        var (worker, tracker, client, instrument) = CreateWorker();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+
+        await worker.HandleEventAsync(client, new OrderRejected
+        {
+            ClOrdID = new ClOrdID(clOrdId),
+            OrderId = 0,
+            RejectCode = 2,
+            Reason = "instrument halted",
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.False(tracker.HasOpenSide("PETR4", isBuy: true));
+        Assert.Single(client.SubmittedOrders); // no immediate requote.
+    }
 }
