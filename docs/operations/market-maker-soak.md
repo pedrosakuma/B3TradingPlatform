@@ -302,7 +302,13 @@ value `0` is valid; an absent or non-numeric series fails immediately. The bot
 publishes bounded zero baselines for configured-symbol counters and zero
 position/realized-P&L gauges so integrity checks can distinguish healthy zero
 from missing telemetry. Unrealized/total P&L still remain absent when no fresh
-mark exists.
+mark exists. The only phase-specific exception is that
+`bot.pnl.unrealized`/`bot.pnl.total` are not mandatory during
+`outage-settled`, `outage-hold`, or `reconnected-no-reference`, where the
+fresh-mark contract intentionally suppresses them. Position, realized P&L,
+open-order, spread, accounting, feed, corruption, and safety series remain
+mandatory; `reference_age_seconds` becomes mandatory again during
+`reconnected-no-reference`.
 
 Required comparison fields:
 
@@ -420,7 +426,11 @@ inspect the complete time series against these unambiguous thresholds:
   at least one complete export-plus-scrape cycle. At least two
   `reconnected-no-reference` samples must retain eligibility `0`, open orders
   `0`, and the pre-outage submitted-order count. This proves reconnect did not
-  reuse a stale prior-epoch reference.
+  reuse a stale prior-epoch reference. Fresh-mark-dependent unrealized/total
+  P&L may be absent in this phase; all other phase-required telemetry must be
+  present. Any required Prometheus request, normalization, presence check, or
+  phase snapshot failure aborts the phase rather than relying on Bash
+  `errexit`.
 - Restart alone is not accepted as recovery. Only after the reconnect hold does
   the helper generate fresh current-epoch trades; then
   eligibility becomes `1`, a
@@ -520,7 +530,7 @@ Use this summary shape (generated values only; never fabricate results):
 
 ```json
 {
-  "schemaVersion": "6",
+  "schemaVersion": "7",
   "runId": "20260724T180000Z-baseline",
   "profile": "baseline",
   "gitSha": "<40-hex commit>",

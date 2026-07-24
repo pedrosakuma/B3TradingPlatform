@@ -13,6 +13,30 @@ absent_sample="$(printf '%s\n' '{"data":{"result":[]}}' | soak_metric_sample)"
 [[ "$(jq -r '.present' <<<"$absent_sample")" == "false" ]]
 [[ "$(jq -r '.value' <<<"$absent_sample")" == "null" ]]
 
+phase_step_calls=""
+phase_step_ok() {
+    phase_step_calls+="${1}:ok "
+}
+phase_step_fail() {
+    phase_step_calls+="${1}:fail "
+    return 23
+}
+for critical_phase in pre-outage-stabilization reconnected-no-reference; do
+    if soak_run_required_phase_step "$critical_phase" capture-metrics phase_step_fail \
+        2>/dev/null; then
+        echo "ERROR: $critical_phase accepted a failed mandatory metric capture" >&2
+        exit 1
+    fi
+    if soak_run_required_phase_step "$critical_phase" capture-outage-snapshot phase_step_fail \
+        2>/dev/null; then
+        echo "ERROR: $critical_phase accepted a failed mandatory outage query" >&2
+        exit 1
+    fi
+    soak_run_required_phase_step "$critical_phase" capture-metrics phase_step_ok
+done
+[[ "$phase_step_calls" == \
+    "pre-outage-stabilization:fail pre-outage-stabilization:fail pre-outage-stabilization:ok reconnected-no-reference:fail reconnected-no-reference:fail reconnected-no-reference:ok " ]]
+
 passing_outage='{
   "expectedSymbolCount": 3,
   "reconnectHoldSeconds": 10,

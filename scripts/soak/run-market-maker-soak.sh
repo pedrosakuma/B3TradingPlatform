@@ -430,7 +430,7 @@ canonical_evidence_path() {
         echo "ERROR: $label must not overwrite a symlink: $input" >&2
         return 3
     }
-    canonical="$(realpath -m "$candidate")"
+    canonical="$(realpath -m "$candidate")" || return 3
     [[ "$canonical" == "$evidence_root"/* ]] || {
         echo "ERROR: $label must resolve below repository soak-artifacts/: $input" >&2
         return 3
@@ -580,6 +580,7 @@ register_accepted_suite_run() {
 }
 
 write_cleanup_evidence() {
+    local cleanup_json
     cleanup_json="$(jq -cn \
         --argjson originalExitCode "$original_status" \
         --argjson cleanupExitCode "$cleanup_status" \
@@ -589,10 +590,11 @@ write_cleanup_evidence() {
           originalExitCode: $originalExitCode,
           cleanupExitCode: $cleanupExitCode,
           errors: $errors[0]
-        }')"
-    printf '%s\n' "$cleanup_json" >"${artifacts_dir}/cleanup.json"
+        }')" || return 1
+    printf '%s\n' "$cleanup_json" >"${artifacts_dir}/cleanup.json" || return 1
     if [[ -f "${artifacts_dir}/summary.json" ]]; then
-        soak_apply_cleanup_to_summary "${artifacts_dir}/summary.json" "$cleanup_json"
+        soak_apply_cleanup_to_summary "${artifacts_dir}/summary.json" "$cleanup_json" ||
+            return 1
     fi
 }
 
@@ -705,7 +707,7 @@ if [[ -n "$suite_manifest" ]]; then
 fi
 configured_symbols_json="$(printf '%s\n' "${configured_symbols[@]}" | jq -R . | jq -s .)"
 jq -n \
-    --arg schemaVersion "6" \
+    --arg schemaVersion "7" \
     --arg runId "$run_id" \
     --arg profile "$profile" \
     --arg projectName "$project_name" \
@@ -912,10 +914,16 @@ marketdata_transition_phase=steady
 marketdata_after_started_at=""
 capture_runtime_state() {
     local phase="$1" timestamp service expected_id expected_image expected_started current_id inspect_json
-    local restart_count status started_at actual_image service_stable row
-    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local restart_count status started_at actual_image service_stable row runtime_baseline
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+    runtime_baseline="$(jq -r --argjson critical "$critical_services_json" '
+        .[] |
+        select(.service as $service | $critical | index($service)) |
+        [.service,.containerId,.imageId,.startedAtUtc] | @tsv' \
+        "${artifacts_dir}/runtime-images.json")" || return 1
+    [[ -n "$runtime_baseline" ]] || return 1
     while IFS=$'\t' read -r service expected_id expected_image expected_started; do
-        current_id="$("${compose[@]}" ps --all -q "$service")"
+        current_id="$("${compose[@]}" ps --all -q "$service")" || return 1
         restart_count=-1
         status=missing
         started_at=missing
@@ -923,10 +931,10 @@ capture_runtime_state() {
         service_stable=true
         if [[ "$current_id" == "$expected_id" ]] &&
             inspect_json="$(docker inspect "$current_id" 2>/dev/null | jq '.[0]')"; then
-            restart_count="$(jq -er '.RestartCount' <<<"$inspect_json")"
-            status="$(jq -er '.State.Status' <<<"$inspect_json")"
-            started_at="$(jq -er '.State.StartedAt' <<<"$inspect_json")"
-            actual_image="$(jq -er '.Image' <<<"$inspect_json")"
+            restart_count="$(jq -er '.RestartCount' <<<"$inspect_json")" || return 1
+            status="$(jq -er '.State.Status' <<<"$inspect_json")" || return 1
+            started_at="$(jq -er '.State.StartedAt' <<<"$inspect_json")" || return 1
+            actual_image="$(jq -er '.Image' <<<"$inspect_json")" || return 1
             [[ "$actual_image" == "$expected_image" ]] || service_stable=false
             (( restart_count == 0 )) || service_stable=false
             if [[ "$profile" == "pause-and-cancel" && "$service" == "marketdata" ]]; then
@@ -978,15 +986,11 @@ capture_runtime_state() {
               startedAtUtc: $startedAtUtc,
               restartCount: $restartCount,
               status: $status
-            }')"
-        printf '%s\n' "$row" >>"$runtime_jsonl"
+            }')" || return 1
+        printf '%s\n' "$row" >>"$runtime_jsonl" || return 1
         jq -r '[.timestampUtc,.phase,.service,.containerId,.imageId,.startedAtUtc,.restartCount,.status] | @csv' \
-            <<<"$row" >>"$runtime_csv"
-    done < <(jq -r --argjson critical "$critical_services_json" '
-        .[] |
-        select(.service as $service | $critical | index($service)) |
-        [.service,.containerId,.imageId,.startedAtUtc] | @tsv' \
-        "${artifacts_dir}/runtime-images.json")
+            <<<"$row" >>"$runtime_csv" || return 1
+    done <<<"$runtime_baseline"
     if [[ -n "${runtime_event_monitor_pid:-}" ]] &&
         ! kill -0 "$runtime_event_monitor_pid" 2>/dev/null; then
         runtime_event_monitor_stable=false
@@ -999,22 +1003,28 @@ capture_runtime_state() {
 }
 
 capture_service_runtime_snapshot() {
-    local service="$1" phase="$2" container_id inspect_json
-    container_id="$("${compose[@]}" ps --all -q "$service")"
+    local service="$1" phase="$2" container_id inspect_json timestamp image_id started_at
+    local restart_count status
+    container_id="$("${compose[@]}" ps --all -q "$service")" || return 1
     [[ -n "$container_id" ]] || {
         log "ERROR: critical service '$service' has no container while capturing '$phase'"
         return 1
     }
-    inspect_json="$(docker inspect "$container_id" | jq -e '.[0]')"
+    inspect_json="$(docker inspect "$container_id" | jq -e '.[0]')" || return 1
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+    image_id="$(jq -er '.Image' <<<"$inspect_json")" || return 1
+    started_at="$(jq -er '.State.StartedAt' <<<"$inspect_json")" || return 1
+    restart_count="$(jq -er '.RestartCount' <<<"$inspect_json")" || return 1
+    status="$(jq -er '.State.Status' <<<"$inspect_json")" || return 1
     jq -cn \
-        --arg timestampUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg timestampUtc "$timestamp" \
         --arg phase "$phase" \
         --arg service "$service" \
         --arg containerId "$container_id" \
-        --arg imageId "$(jq -er '.Image' <<<"$inspect_json")" \
-        --arg startedAtUtc "$(jq -er '.State.StartedAt' <<<"$inspect_json")" \
-        --argjson restartCount "$(jq -er '.RestartCount' <<<"$inspect_json")" \
-        --arg status "$(jq -er '.State.Status' <<<"$inspect_json")" \
+        --arg imageId "$image_id" \
+        --arg startedAtUtc "$started_at" \
+        --argjson restartCount "$restart_count" \
+        --arg status "$status" \
         '{
           timestampUtc: $timestampUtc,
           phase: $phase,
@@ -1024,7 +1034,7 @@ capture_service_runtime_snapshot() {
           startedAtUtc: $startedAtUtc,
           restartCount: $restartCount,
           status: $status
-        }'
+        }' || return 1
 }
 
 capture_runtime_state initial
@@ -1300,12 +1310,15 @@ prom_query() {
     local body
     body="$(curl -sS --max-time 10 --get \
         --data-urlencode "query=$1" \
-        "${prometheus_url}/api/v1/query")"
+        "${prometheus_url}/api/v1/query")" || {
+        log "ERROR: Prometheus request failed: $1"
+        return 1
+    }
     if ! jq -e '.status == "success"' >/dev/null <<<"$body"; then
-        log "ERROR: Prometheus query failed: $(jq -r '.error // .' <<<"$body")"
+        log "ERROR: Prometheus query failed: $(jq -r '.error // .' <<<"$body" 2>/dev/null || printf 'invalid response')"
         return 1
     fi
-    printf '%s\n' "$body"
+    printf '%s\n' "$body" || return 1
 }
 
 metric_names=(
@@ -1351,28 +1364,31 @@ metric_names=(
 )
 metric_observation() {
     local query="$1" body
-    body="$(prom_query "$query")"
-    soak_metric_sample <<<"$body"
+    body="$(prom_query "$query")" || return 1
+    soak_metric_sample <<<"$body" || return 1
 }
 
 metric_value() {
     local query="$1" sample
-    sample="$(metric_observation "$query")"
-    if [[ "$(jq -r '.present' <<<"$sample")" != "true" ||
-        "$(jq -r '.value' <<<"$sample")" == "null" ]]; then
+    local present value
+    sample="$(metric_observation "$query")" || return 1
+    present="$(jq -r '.present' <<<"$sample")" || return 1
+    value="$(jq -r '.value' <<<"$sample")" || return 1
+    if [[ "$present" != "true" || "$value" == "null" ]]; then
         log "ERROR: mandatory Prometheus series is absent or non-numeric: $query"
         return 1
     fi
-    jq -r '.value' <<<"$sample"
+    printf '%s\n' "$value" || return 1
 }
 
 sum_metric_values() {
     local total=0 value name
     for name in "$@"; do
-        value="$(metric_value "sum(${name})")"
-        total="$(awk -v total="$total" -v value="$value" 'BEGIN { print total + value }')"
+        value="$(metric_value "sum(${name})")" || return 1
+        total="$(awk -v total="$total" -v value="$value" 'BEGIN { print total + value }')" ||
+            return 1
     done
-    printf '%s\n' "$total"
+    printf '%s\n' "$total" || return 1
 }
 
 readonly bot_container_id="$(jq -er '.[] | select(.service == "market-maker-bot") | .containerId' \
@@ -1404,7 +1420,11 @@ wait_accounting_period() {
 wait_service_healthy() {
     local service="$1" timeout="$2" started container_id health
     started=$SECONDS
-    container_id="$("${compose[@]}" ps --all -q "$service")"
+    container_id="$("${compose[@]}" ps --all -q "$service")" || return 1
+    [[ -n "$container_id" ]] || {
+        log "ERROR: service '$service' has no Compose container"
+        return 1
+    }
     while (( SECONDS - started < timeout )); do
         health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
             "$container_id" 2>/dev/null || true)"
@@ -1431,11 +1451,12 @@ wait_bot_log_since() {
 collect_all_metrics() {
     local results='[]' response more metric_name
     for metric_name in "${metric_names[@]}"; do
-        response="$(prom_query "$metric_name")"
-        more="$(jq -c '.data.result' <<<"$response")"
-        results="$(jq -cn --argjson current "$results" --argjson more "$more" '$current + $more')"
+        response="$(prom_query "$metric_name")" || return 1
+        more="$(jq -ce '.data.result' <<<"$response")" || return 1
+        results="$(jq -cn --argjson current "$results" --argjson more "$more" '$current + $more')" ||
+            return 1
     done
-    jq -cn --argjson result "$results" '{data:{result:$result}}'
+    jq -cn --argjson result "$results" '{data:{result:$result}}' || return 1
 }
 
 mandatory_metric_requirements() {
@@ -1471,15 +1492,20 @@ mandatory_metric_requirements() {
         global("bot_pnl_fills_unknown_order_total"),
         global("bot_orders_cancelled_total")
       ]
-      + (if ($phase | IN("outage-settled","outage-hold")) then []
+      + (if ($phase | IN("outage-settled","outage-hold","reconnected-no-reference")) then []
         elif $profile == "pause-and-cancel" then [
           symbol("bot_pnl_unrealized"),
-          symbol("bot_pnl_total"),
-          symbol("bot_market_data_reference_age_seconds")
+          symbol("bot_pnl_total")
         ]
         else [
           target("bot_pnl_unrealized"),
-          target("bot_pnl_total"),
+          target("bot_pnl_total")
+        ] end)
+      + (if ($phase | IN("outage-settled","outage-hold")) then []
+        elif $profile == "pause-and-cancel" then [
+          symbol("bot_market_data_reference_age_seconds")
+        ]
+        else [
           target("bot_market_data_reference_age_seconds")
         ] end)
       + (if $profile == "inventory-skew" then [
@@ -1506,7 +1532,7 @@ mandatory_metric_requirements() {
 
 record_metric_presence() {
     local phase="$1" timestamp="$2" body="$3" requirements report rows_csv
-    requirements="$(mandatory_metric_requirements "$phase")"
+    requirements="$(mandatory_metric_requirements "$phase")" || return 1
     report="$(jq -c \
         --arg timestampUtc "$timestamp" \
         --arg phase "$phase" \
@@ -1546,14 +1572,14 @@ record_metric_presence() {
           )
         }
       ]
-    ' <<<"$body")"
-    jq -c '.[]' <<<"$report" >>"$metric_presence_jsonl"
+    ' <<<"$body")" || return 1
+    jq -c '.[]' <<<"$report" >>"$metric_presence_jsonl" || return 1
     rows_csv="$(jq -r '.[] |
       [.timestampUtc,.phase,.metric,(.symbol // ""),.required,.present,.seriesCount,(.value // "")] |
-      @csv' <<<"$report")"
-    printf '%s\n' "$rows_csv" >>"$metric_presence_csv"
+      @csv' <<<"$report")" || return 1
+    printf '%s\n' "$rows_csv" >>"$metric_presence_csv" || return 1
     if ! jq -e 'all(.[]; .present)' >/dev/null <<<"$report"; then
-        printf '%s\n' "$report" >"${artifacts_dir}/metric-presence-error.json"
+        printf '%s\n' "$report" >"${artifacts_dir}/metric-presence-error.json" || return 1
         log "ERROR: mandatory metric series missing in phase '$phase': $(jq -c '[.[] | select(.present | not) | {metric,symbol}]' <<<"$report")"
         return 1
     fi
@@ -1561,9 +1587,9 @@ record_metric_presence() {
 
 capture_metrics() {
     local phase="$1" timestamp body started normalized csv_rows current_accounting
-    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    capture_runtime_state "$phase"
-    current_accounting="$(current_accounting_period)"
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+    capture_runtime_state "$phase" || return 1
+    current_accounting="$(current_accounting_period)" || return 1
     if [[ -z "$current_accounting" ]]; then
         log "ERROR: accountingPeriodStartedAtUtc is absent while sampling phase '$phase'"
         return 1
@@ -1574,7 +1600,10 @@ capture_metrics() {
     fi
     started=$SECONDS
     while true; do
-        body="$(collect_all_metrics)"
+        body="$(collect_all_metrics)" || {
+            log "ERROR: failed to collect mandatory market-maker telemetry for phase '$phase'"
+            return 1
+        }
         if jq -e '(.data.result | length) > 0' >/dev/null <<<"$body"; then
             break
         fi
@@ -1584,7 +1613,7 @@ capture_metrics() {
         }
         sleep 1
     done
-    record_metric_presence "$phase" "$timestamp" "$body"
+    record_metric_presence "$phase" "$timestamp" "$body" || return 1
     if ! normalized="$(jq -c \
       --arg timestamp "$timestamp" \
       --arg phase "$phase" \
@@ -1600,11 +1629,11 @@ capture_metrics() {
         present: true,
         value: (.value[1] as $value | if $value == "NaN" then null else ($value | tonumber) end)
       }' <<<"$body")"; then
-        printf '%s\n' "$body" >"${artifacts_dir}/metric-normalization-error.json"
+        printf '%s\n' "$body" >"${artifacts_dir}/metric-normalization-error.json" || return 1
         log "ERROR: failed to normalize market-maker metrics for phase '$phase'"
         return 1
     fi
-    printf '%s\n' "$normalized" >>"$samples_jsonl"
+    printf '%s\n' "$normalized" >>"$samples_jsonl" || return 1
     if ! csv_rows="$(jq -r \
       --arg timestamp "$timestamp" \
       --arg phase "$phase" \
@@ -1624,11 +1653,11 @@ capture_metrics() {
         true,
         .value[1]
       ] | @csv' <<<"$body")"; then
-        printf '%s\n' "$body" >"${artifacts_dir}/metric-csv-error.json"
+        printf '%s\n' "$body" >"${artifacts_dir}/metric-csv-error.json" || return 1
         log "ERROR: failed to write market-maker metric CSV for phase '$phase'"
         return 1
     fi
-    printf '%s\n' "$csv_rows" >>"$samples_csv"
+    printf '%s\n' "$csv_rows" >>"$samples_csv" || return 1
 }
 
 wait_metric_equals() {
@@ -1637,12 +1666,12 @@ wait_metric_equals() {
     next_runtime_check=$SECONDS
     while (( SECONDS - started < timeout )); do
         if (( SECONDS >= next_runtime_check )); then
-            capture_runtime_state metric-wait
+            capture_runtime_state metric-wait || return 1
             next_runtime_check=$((SECONDS + 10))
         fi
-        sample="$(metric_observation "$query")"
-        present="$(jq -r '.present and (.value != null)' <<<"$sample")"
-        value="$(jq -r '.value // "missing"' <<<"$sample")"
+        sample="$(metric_observation "$query")" || return 1
+        present="$(jq -r '.present and (.value != null)' <<<"$sample")" || return 1
+        value="$(jq -r '.value // "missing"' <<<"$sample")" || return 1
         if [[ "$present" == "true" ]] &&
             awk -v actual="$value" -v expected="$expected" 'BEGIN { exit !(actual == expected) }'; then
             return 0
@@ -1655,19 +1684,25 @@ wait_metric_equals() {
 
 capture_outage_telemetry_snapshot() {
     local phase="$1" timestamp transitions suppressions feed_cancels submissions open_orders eligible
-    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
     transitions="$(metric_observation \
-        'sum(bot_market_data_availability_transition_total{service_name="b3-market-maker-bot",available="false"})')"
+        'sum(bot_market_data_availability_transition_total{service_name="b3-market-maker-bot",available="false"})')" ||
+        return 1
     suppressions="$(metric_observation \
-        'sum(bot_market_data_quote_suppressed_total{service_name="b3-market-maker-bot",reason="disconnected"})')"
+        'sum(bot_market_data_quote_suppressed_total{service_name="b3-market-maker-bot",reason="disconnected"})')" ||
+        return 1
     feed_cancels="$(metric_observation \
-        'sum(bot_orders_feed_unavailable_cancel_total{service_name="b3-market-maker-bot"})')"
+        'sum(bot_orders_feed_unavailable_cancel_total{service_name="b3-market-maker-bot"})')" ||
+        return 1
     submissions="$(metric_observation \
-        'sum(bot_orders_submitted_total{service_name="b3-market-maker-bot"})')"
+        'sum(bot_orders_submitted_total{service_name="b3-market-maker-bot"})')" ||
+        return 1
     open_orders="$(metric_observation \
-        'sum(bot_orders_open{service_name="b3-market-maker-bot"})')"
+        'sum(bot_orders_open{service_name="b3-market-maker-bot"})')" ||
+        return 1
     eligible="$(metric_observation \
-        'sum(bot_market_data_reference_eligible_current{service_name="b3-market-maker-bot"})')"
+        'sum(bot_market_data_reference_eligible_current{service_name="b3-market-maker-bot"})')" ||
+        return 1
     jq -cn \
         --arg timestampUtc "$timestamp" \
         --arg phase "$phase" \
@@ -1704,19 +1739,24 @@ capture_outage_telemetry_snapshot() {
           eligibleSymbols: $eligible
         }
       }
-    '
+    ' || return 1
 }
 
 stabilize_pre_outage_submissions() {
-    local started samples='[]' sample report elapsed
+    local started samples='[]' sample report report_passed elapsed
     started=$SECONDS
     while true; do
-        capture_metrics pre-outage-stabilization
-        sample="$(capture_outage_telemetry_snapshot pre-outage-stabilization)"
+        soak_run_required_phase_step pre-outage-stabilization capture-metrics \
+            capture_metrics || return 1
+        sample="$(soak_run_required_phase_step pre-outage-stabilization \
+            capture-outage-snapshot capture_outage_telemetry_snapshot)" || {
+            log "ERROR: failed to capture pre-outage stabilization telemetry snapshot"
+            return 1
+        }
         samples="$(jq -cn \
             --argjson samples "$samples" \
             --argjson sample "$sample" \
-            '$samples + [$sample]')"
+            '$samples + [$sample]')" || return 1
         report="$(jq -cn \
             --argjson requiredStableCycles "$pre_outage_stabilization_cycles" \
             --argjson intervalSeconds "$pre_outage_stabilization_interval_seconds" \
@@ -1727,16 +1767,19 @@ stabilize_pre_outage_submissions() {
               intervalSeconds: $intervalSeconds,
               timeoutSeconds: $timeoutSeconds,
               samples: $samples
-            }' | soak_evaluate_counter_stabilization)"
-        if [[ "$(jq -r '.passed' <<<"$report")" == "true" ]]; then
-            printf '%s\n' "$report" >"${artifacts_dir}/pre-outage-stabilization.json"
+            }' | soak_evaluate_counter_stabilization)" || return 1
+        report_passed="$(jq -r '.passed' <<<"$report")" || return 1
+        if [[ "$report_passed" == "true" ]]; then
+            printf '%s\n' "$report" >"${artifacts_dir}/pre-outage-stabilization.json" ||
+                return 1
             pre_outage_stabilization_report="$report"
             return 0
         fi
         elapsed=$((SECONDS - started))
         if (( elapsed + pre_outage_stabilization_interval_seconds >
             pre_outage_stabilization_timeout_seconds )); then
-            printf '%s\n' "$report" >"${artifacts_dir}/pre-outage-stabilization.json"
+            printf '%s\n' "$report" >"${artifacts_dir}/pre-outage-stabilization.json" ||
+                return 1
             pre_outage_stabilization_report="$report"
             log "ERROR: submitted-order counter did not remain stable for ${pre_outage_stabilization_cycles} consecutive full telemetry cycles within ${pre_outage_stabilization_timeout_seconds}s"
             return 1
@@ -1747,12 +1790,17 @@ stabilize_pre_outage_submissions() {
 
 capture_reconnected_no_reference_sample() {
     local snapshot
-    capture_metrics reconnected-no-reference
-    snapshot="$(capture_outage_telemetry_snapshot reconnected-no-reference)"
+    soak_run_required_phase_step reconnected-no-reference capture-metrics \
+        capture_metrics || return 1
+    snapshot="$(soak_run_required_phase_step reconnected-no-reference \
+        capture-outage-snapshot capture_outage_telemetry_snapshot)" || {
+        log "ERROR: failed to capture reconnected-without-reference telemetry snapshot"
+        return 1
+    }
     reconnected_samples="$(jq -cn \
         --argjson rows "$reconnected_samples" \
         --argjson row "$snapshot" \
-        '$rows + [$row]')"
+        '$rows + [$row]')" || return 1
     if ! jq -e \
         --argjson submitted "$pre_outage_submissions" '
           .present and

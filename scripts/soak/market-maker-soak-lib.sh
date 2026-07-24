@@ -65,6 +65,19 @@ soak_metric_sample() {
     '
 }
 
+soak_run_required_phase_step() {
+    local phase="$1" step="$2" function_name="$3" status
+    shift 3
+    if "$function_name" "$phase" "$@"; then
+        return 0
+    else
+        status=$?
+        printf 'ERROR: required soak phase step failed: phase=%s step=%s exit=%s\n' \
+            "$phase" "$step" "$status" >&2
+        return "$status"
+    fi
+}
+
 soak_evaluate_outage_telemetry() {
     jq -c '
       . as $evidence |
@@ -209,7 +222,7 @@ soak_stop_event_monitor() {
 soak_run_cleanup_steps() {
     local errors_file="$1"
     shift
-    local errors='[]' step function_name status
+    local errors='[]' step function_name status next_errors recording_failed=false
     while (($#)); do
         step="$1"
         function_name="$2"
@@ -218,21 +231,30 @@ soak_run_cleanup_steps() {
             continue
         else
             status=$?
-            errors="$(jq -cn \
+            if next_errors="$(jq -cn \
                 --argjson errors "$errors" \
                 --arg step "$step" \
                 --argjson exitCode "$status" \
-                '$errors + [{step:$step,exitCode:$exitCode}]')"
+                '$errors + [{step:$step,exitCode:$exitCode}]')"; then
+                errors="$next_errors"
+            else
+                recording_failed=true
+            fi
         fi
     done
-    printf '%s\n' "$errors" >"$errors_file"
-    [[ "$(jq 'length' <<<"$errors")" == "0" ]]
+    printf '%s\n' "$errors" >"$errors_file" || return 1
+    if $recording_failed; then
+        return 1
+    fi
+    local error_count
+    error_count="$(jq 'length' <<<"$errors")" || return 1
+    [[ "$error_count" == "0" ]]
 }
 
 soak_append_cleanup_error() {
     local errors_file="$1" step="$2" exit_code="$3"
     local errors
-    errors="$(cat "$errors_file")"
+    errors="$(cat "$errors_file")" || return 1
     jq -cn \
         --argjson errors "$errors" \
         --arg step "$step" \
