@@ -39,6 +39,10 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly Channel<string> _pricingContextSignals;
     private readonly ConcurrentDictionary<string, CancelReason> _pendingPricingContextSignals =
         new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, CancelReason> _dirtyPricingContextSignals =
+        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _pricingContextFailureRetries =
+        new(StringComparer.Ordinal);
     private readonly HashSet<string> _configuredSymbols;
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
@@ -302,7 +306,12 @@ internal sealed class MarketMakerWorker : BackgroundService
                             IsBuy: known && order.IsBuy);
                     });
                     if (transition.Known)
+                    {
                         await RequoteAsync(client, transition.Symbol!, transition.IsBuy, ct);
+                        _pricingContextFailureRetries.TryRemove(transition.Symbol!, out _);
+                        if (TryTakeDirtyPricingContext(transition.Symbol!, out var dirtyReason))
+                            SignalPricingContextChanged(transition.Symbol!, dirtyReason);
+                    }
                     break;
                 }
             case UpModels.OrderRejected r:
@@ -380,6 +389,13 @@ internal sealed class MarketMakerWorker : BackgroundService
                                 "[mm] cancel rejected for clordid={ClOrdId} trigger={CancelReason} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
                                 cancelReject.OrigClOrdId, cancelReject.CancelReason, r.Reason);
                         }
+                        var retryReason = TryTakeDirtyPricingContext(
+                            cancelReject.StuckSymbol,
+                            out var dirtyReason)
+                            ? dirtyReason
+                            : cancelReject.CancelReason;
+                        if (IsPricingContextReason(retryReason))
+                            RetryPricingContextChanged(cancelReject.StuckSymbol, retryReason);
                         break;
                     }
                     var rejection = _orderLifecycle.Synchronize(() =>
@@ -552,7 +568,12 @@ internal sealed class MarketMakerWorker : BackgroundService
     internal bool SignalPricingContextChanged(string symbol, CancelReason reason)
     {
         if (!_configuredSymbols.Contains(symbol)) return false;
+        _pricingContextFailureRetries.TryRemove(symbol, out _);
+        return EnqueuePricingContextChanged(symbol, reason);
+    }
 
+    private bool EnqueuePricingContextChanged(string symbol, CancelReason reason)
+    {
         while (true)
         {
             if (_pendingPricingContextSignals.TryAdd(symbol, reason))
@@ -572,6 +593,29 @@ internal sealed class MarketMakerWorker : BackgroundService
                 return false;
         }
     }
+
+    private bool RetryPricingContextChanged(string symbol, CancelReason reason)
+    {
+        if (!_configuredSymbols.Contains(symbol) ||
+            !_pricingContextFailureRetries.TryAdd(symbol, 0))
+        {
+            return false;
+        }
+
+        return EnqueuePricingContextChanged(symbol, reason);
+    }
+
+    private void MarkPricingContextDirty(string symbol, CancelReason reason) =>
+        _dirtyPricingContextSignals.AddOrUpdate(
+            symbol,
+            reason,
+            (_, current) => MergePricingContextReason(current, reason));
+
+    private bool TryTakeDirtyPricingContext(string symbol, out CancelReason reason) =>
+        _dirtyPricingContextSignals.TryRemove(symbol, out reason);
+
+    private static bool IsPricingContextReason(CancelReason reason) =>
+        reason is CancelReason.PriceDrift or CancelReason.InventoryStrategy or CancelReason.FeedUnavailable;
 
     private static CancelReason MergePricingContextReason(CancelReason current, CancelReason incoming) =>
         PricingContextPriority(incoming) > PricingContextPriority(current) ? incoming : current;
@@ -629,7 +673,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     internal Task ReactToBookChangeAsync(IEntryPointClient client, string symbol, CancellationToken ct) =>
         ReactToPricingContextChangeAsync(client, symbol, CancelReason.PriceDrift, ct);
 
-    private async Task ReactToPricingContextChangeAsync(
+    internal async Task ReactToPricingContextChangeAsync(
         IEntryPointClient client,
         string symbol,
         CancelReason reason,
@@ -646,10 +690,15 @@ internal sealed class MarketMakerWorker : BackgroundService
         foreach (var isBuy in new[] { true, false })
         {
             if (!_tracker.TryGetActiveSideOrder(symbol, isBuy, out var resting)) continue;
-            if (resting.PendingCancelClOrdId is not null) continue;
+            if (resting.PendingCancelClOrdId is not null)
+            {
+                MarkPricingContextDirty(symbol, reason);
+                continue;
+            }
             var decision = BuildQuoteDecision(instr, isBuy);
-            if (!decision.ShouldQuote || decision.Price is not { } target) continue;
-            if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
+            var isSuppressed = !decision.ShouldQuote || decision.Price is null;
+            var target = decision.Price;
+            if (!isSuppressed && Math.Abs(resting.Price - target!.Value) <= maxDeviation) continue;
 
             // Fast-path skip only — the authoritative throttle check runs
             // INSIDE SubmitCancelAsync's atomic registration below (see
@@ -688,6 +737,12 @@ internal sealed class MarketMakerWorker : BackgroundService
                         "[mm] book-driven requote: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} resting={Resting} target={Target}",
                         resting.ClOrdId, symbol, isBuy ? "buy" : "sell", resting.Price, target);
                 }
+                else if (isSuppressed)
+                {
+                    _log.LogWarning(
+                        "[mm] pricing-context suppression: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} trigger={CancelReason} suppression={SuppressionReason}",
+                        resting.ClOrdId, symbol, isBuy ? "buy" : "sell", reason, decision.SuppressionReason);
+                }
                 else
                 {
                     _log.LogInformation(
@@ -700,7 +755,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         if (retryAfter is { } delay)
         {
             await Task.Delay(delay, ct);
-            SignalPricingContextChanged(symbol, reason);
+            EnqueuePricingContextChanged(symbol, reason);
         }
     }
 
@@ -761,6 +816,8 @@ internal sealed class MarketMakerWorker : BackgroundService
             _tracker.ClearPendingCancelIfMatches(o.ClOrdId, cancelClOrdId);
             recordSubmitFailed(o.Symbol);
             _log.LogWarning(ex, "[mm] failed to cancel clordid={ClOrdId} symbol={Symbol}", o.ClOrdId, o.Symbol);
+            if (IsPricingContextReason(reason))
+                RetryPricingContextChanged(o.Symbol, reason);
             return false;
         }
     }

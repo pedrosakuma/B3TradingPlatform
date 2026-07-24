@@ -82,6 +82,7 @@ spec:
             {{- end }}
             # ── Instruments (must match matching's instruments-eqt.json) ─
             {{- range $i, $instrument := .Values.instruments }}
+            {{- $inventorySkew := default (dict) $instrument.inventorySkew }}
             - name: {{ printf "MarketMaker__Instruments__%d__Symbol" $i }}
               value: {{ $instrument.symbol | quote }}
             - name: {{ printf "MarketMaker__Instruments__%d__SecurityId" $i }}
@@ -97,11 +98,11 @@ spec:
             - name: {{ printf "MarketMaker__Instruments__%d__SpreadTicks" $i }}
               value: {{ $instrument.spreadTicks | quote }}
             - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__Enabled" $i }}
-              value: {{ $instrument.inventorySkew.enabled | quote }}
+              value: {{ dig "enabled" false $inventorySkew | quote }}
             - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__FullSkewAtLots" $i }}
-              value: {{ $instrument.inventorySkew.fullSkewAtLots | quote }}
+              value: {{ dig "fullSkewAtLots" 10 $inventorySkew | quote }}
             - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__MaxSkewTicks" $i }}
-              value: {{ $instrument.inventorySkew.maxSkewTicks | quote }}
+              value: {{ dig "maxSkewTicks" 5 $inventorySkew | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

@@ -249,6 +249,156 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task ReactToPricingContextChangeAsync_SuppressedDecision_CancelsWithoutReplacementUntilValid()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options =>
+            {
+                EnableInventorySkew(options);
+                options.Instruments[0].RefPrice = 0.10m;
+                options.Instruments[0].InventorySkew.MaxSkewTicks = 10m;
+            },
+            out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var original = Assert.Single(client.SubmittedOrders);
+        Assert.Equal(0.05m, original.Price);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            900, 900, instrument.Symbol, true, 100, 0.10m, 100, 100, 0, true)).Status);
+
+        var suppressed = worker.BuildQuoteDecision(instrument, isBuy: true);
+        Assert.False(suppressed.ShouldQuote);
+        await worker.ReactToPricingContextChangeAsync(
+            client,
+            instrument.Symbol,
+            CancelReason.InventoryStrategy,
+            CancellationToken.None);
+
+        var cancel = Assert.Single(client.SubmittedCancels);
+        Assert.Equal(original.ClOrdID.Value, cancel.OrigClOrdID.Value);
+        await worker.HandleEventAsync(client, new OrderCancelled
+        {
+            ClOrdID = cancel.ClOrdID,
+            OrigClOrdID = cancel.OrigClOrdID,
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.Single(client.SubmittedOrders);
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            901, 901, instrument.Symbol, false, 100, 0.10m, 100, 100, 0, true)).Status);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.Equal(0.05m, client.SubmittedOrders[^1].Price);
+    }
+
+    [Fact]
+    public async Task CancelReject_ReplaysInventoryContextThatArrivedWhileCancelWasPending()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, priceTracker) = CreateWorker(
+            clock,
+            EnableInventorySkew,
+            out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 31m);
+        await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
+        var firstCancel = Assert.Single(client.SubmittedCancels);
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            900, 900, instrument.Symbol, true, 50, 30m, 50, 50, 0, true)).Status);
+        await worker.ReactToPricingContextChangeAsync(
+            client,
+            instrument.Symbol,
+            CancelReason.InventoryStrategy,
+            CancellationToken.None);
+
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 2)
+                retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        await worker.HandleEventAsync(client, new OrderRejected
+        {
+            ClOrdID = firstCancel.ClOrdID,
+            OrderId = 0,
+            RejectCode = 1,
+            Reason = "test reject",
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+        await reactionLoop;
+
+        Assert.Equal(2, client.SubmittedCancels.Count);
+        Assert.All(client.SubmittedCancels,
+            cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+        Assert.True(tracker.TryResolveCancelAttempt(
+            client.SubmittedCancels[^1].ClOrdID.Value,
+            out _,
+            out var reason));
+        Assert.Equal(CancelReason.InventoryStrategy, reason);
+    }
+
+    [Fact]
+    public async Task CancelSubmitFailure_ReplaysInventoryContextOnceAndRegistersRetry()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            EnableInventorySkew,
+            out var ledger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        Assert.Equal(FillApplyStatus.Applied, ledger.Apply(new OwnFill(
+            900, 900, instrument.Symbol, true, 50, 30m, 50, 50, 0, true)).Status);
+
+        var attempt = 0;
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (Interlocked.Increment(ref attempt) == 1)
+                throw new InvalidOperationException("test transport failure");
+            retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+
+        await worker.ReactToPricingContextChangeAsync(
+            client,
+            instrument.Symbol,
+            CancelReason.InventoryStrategy,
+            CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+        await reactionLoop;
+
+        Assert.Equal(2, client.SubmittedCancels.Count);
+        Assert.All(client.SubmittedCancels,
+            cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+        Assert.True(tracker.TryResolveCancelAttempt(
+            client.SubmittedCancels[^1].ClOrdID.Value,
+            out _,
+            out var reason));
+        Assert.Equal(CancelReason.InventoryStrategy, reason);
+    }
+
+    [Fact]
     public async Task HandleEventAsync_OrderAccepted_NullLeavesQty_DoesNotFreeReservation()
     {
         // Regression test for #707: the real venue's OrderAccepted
