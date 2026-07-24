@@ -21,9 +21,14 @@ services:
     container_name: ${MM_SOAK_PROJECT_NAME}-trading-host
     environment:
       # The helper drives the existing local-login sandbox API directly.
-      # Make the compatibility intent explicit instead of inheriting an empty
-      # AUTH_LOCAL_LOGIN_ENABLED value from an operator shell.
+      # Pin both settings so an operator shell with AUTH_MODE=Entra cannot
+      # silently produce a stack that the workload cannot authenticate to.
+      Trading__Auth__Mode: Local
       Trading__Auth__LocalLoginEnabled: "true"
+      # The feed-recovery workload prints end-client crosses for all symbols.
+      # Match the existing real-conformance sandbox policy; this is isolated
+      # test-account configuration, not a market-maker strategy change.
+      Trading__Risk__PerEndClient__bob__AllowShortSell: "true"
 
   frontend:
     container_name: ${MM_SOAK_PROJECT_NAME}-frontend
@@ -77,3 +82,6 @@ volumes:
 networks:
   b3-net:
     name: ${MM_SOAK_PROJECT_NAME}-net
+    ipam:
+      config:
+        - subnet: ${MM_SOAK_SUBNET:-192.168.64.0/24}

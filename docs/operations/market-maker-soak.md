@@ -25,7 +25,17 @@ Evidence is closure-eligible only when **each** profile has:
 - warmup at least 600 seconds;
 - evidence duration at least 7,200 seconds (two hours);
 - sample interval at most 30 seconds;
-- the same commit, images, symbol, quantity, prices, and workload interval.
+- a clean checkout at the recorded commit;
+- `SOAK_SUITE_MANIFEST` set to one shared path below `soak-artifacts/`;
+- the same timing, workload controls, rendered common configuration, configured
+  symbols, and actual runtime image IDs as the suite manifest.
+
+The helper creates the suite manifest on the first qualifying profile and
+compares every later profile byte-for-byte against its compatibility section.
+It sets a profile's `acceptanceEligible` only after that run passes. It sets
+`suiteAcceptanceEligible` only after all four expected profiles have passed.
+An isolated run without the manifest is always a smoke, even if it runs for two
+hours.
 
 Do not label a short run or CI conformance run as the required multi-hour
 baseline. Capture the baseline after #716 and before making any P&L-improvement
@@ -40,11 +50,12 @@ claim about #717/#718.
   required Compose values exported by the operator;
 - `SOAK_TRADING_PASSWORD` exported in the invoking shell. The helper never
   writes it to evidence;
-- the exact commit/image digests recorded before comparing profiles.
+- a clean exact checkout; the helper records both its commit and dirty state.
 
 The soak overlay replaces fixed container, network, and volume names with
 `MM_SOAK_PROJECT_NAME`-prefixed names. It also uses dedicated default host
-ports. Give every run a unique project name:
+ports and a dedicated `192.168.64.0/24` subnet to avoid dependence on Docker's
+finite automatic address pools. Give every run a unique project name:
 
 ```bash
 export SOAK_PROJECT_NAME=b3tp-719-baseline-01
@@ -52,7 +63,9 @@ export SOAK_TRADING_PASSWORD
 ```
 
 Change `SOAK_*_PORT` variables if the defaults conflict. Never point this
-sandbox at production credentials or a production venue.
+sandbox at production credentials or a production venue. Set `SOAK_SUBNET` to
+another unused CIDR if the default overlaps an operator network; keep it
+identical across a comparison suite.
 
 ## Canonical Compose model
 
@@ -74,6 +87,10 @@ Do not add `docker-compose.demo.yml`: it switches the host to the mock gateway.
 The soak overlay:
 
 - routes `b3-market-maker-bot` by OTLP/gRPC to the bundled Collector;
+- pins `Trading__Auth__Mode=Local` and local login for this sandbox workload,
+  even if the operator shell exports `AUTH_MODE=Entra`;
+- enables short selling only for the isolated `bob` counterparty used to print
+  recovery crosses, matching the existing real-conformance test policy;
 - leaves Azure exporters and credentials out of this repository;
 - parameterizes the strategy/feed profile;
 - isolates containers, network, trading/matching/bot state, and observability
@@ -95,8 +112,10 @@ The helper reuses the same real-stack sandbox seam as
 
 1. log in as the configured end client;
 2. use sandbox-only `POST /api/balance/deposit`;
-3. submit one-lot PETR4 marketable limits through `POST /api/orders`;
-4. wait for each order to fill against the bot before sending the next.
+3. complete one buy/sell bootstrap round trip so the process-local ledger has a
+   position entry and emits its accounting-period timestamp;
+4. submit one-lot PETR4 marketable limits through `POST /api/orders`;
+5. wait for each order to fill against the bot before sending the next.
 
 Alternating `Buy @ 32.80` and `Sell @ 29.30` consumes the bot's own resting
 quotes. Each fill prints a real matching-engine trade into UMDF, moves the live
@@ -106,9 +125,15 @@ samples. No external price generator or synthetic ER injector is introduced.
 The inventory profile first makes the bot long by 12 lots, records positive
 skew saturation, then reverses it through flat to 12 lots short and records
 negative saturation. The feed profile stops only the isolated `marketdata`
-service. After restart it prints an alice/bob end-client cross at `30.00`, the
-existing real-stack technique for supplying a fresh current-epoch trade before
-asserting quote recovery.
+service. Because strict mode cannot quote without a current-epoch reference,
+the helper crosses all three symbols once before the initial quote assertion.
+After restart it repeats alice/bob end-client crosses at each rendered
+reference price. This existing real-stack technique makes every configured
+symbol prove fresh eligibility and exactly two recovered quotes. A restarted
+UMDF consumer may discard the first post-gap event while healing sequence
+state, so the helper emits three recorded cross rounds, ten seconds apart, for
+all symbols. Only a fresh `<15s` last-trade reference plus two quotes for all
+symbols inside the single recovery timeout passes.
 
 ## Run the four profiles
 
@@ -131,26 +156,38 @@ export SOAK_WARMUP_SECONDS=900
 export SOAK_DURATION_SECONDS=7200
 export SOAK_SAMPLE_INTERVAL_SECONDS=15
 export SOAK_WORKLOAD_INTERVAL_SECONDS=1
+export SOAK_OUTAGE_SECONDS=60
 image_tag="$(git rev-parse --short=12 HEAD)"
+suite_id="b3tp-719-${image_tag}-01"
+export SOAK_SUITE_MANIFEST="soak-artifacts/${suite_id}/suite-manifest.json"
 export SOAK_TRADING_IMAGE="b3tp-719-trading-host:${image_tag}"
 export SOAK_MARKET_MAKER_BOT_IMAGE="b3tp-719-market-maker-bot:${image_tag}"
 export SOAK_ALERT_RECEIVER_IMAGE="b3tp-719-alert-receiver:${image_tag}"
 
 # Build the exact checkout once.
 SOAK_PROJECT_NAME=b3tp-719-baseline-01 \
+SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/baseline" \
   scripts/soak/run-market-maker-soak.sh --profile baseline
 
-# Reuse the same image IDs for every comparison.
+# Reuse the same images. The helper compares actual sha256 image IDs, not tags.
 SOAK_PROJECT_NAME=b3tp-719-inventory-01 \
+SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/inventory-skew" \
   scripts/soak/run-market-maker-soak.sh --profile inventory-skew --no-build
 
 SOAK_PROJECT_NAME=b3tp-719-volatility-01 \
+SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/volatility-spread" \
   scripts/soak/run-market-maker-soak.sh --profile volatility-spread --no-build
 
 SOAK_PROJECT_NAME=b3tp-719-feed-01 \
-SOAK_OUTAGE_SECONDS=60 \
+SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/pause-and-cancel" \
   scripts/soak/run-market-maker-soak.sh --profile pause-and-cancel --no-build
 ```
+
+The configured tags are labels only and may be mutable. Acceptance is pinned to
+the `sha256:` IDs obtained from the running containers. If `latest` or any
+other tag resolves to a different image between profiles, the helper fails the
+suite compatibility check. Do not rebuild, pull, or retag suite images between
+profiles.
 
 Useful controls:
 
@@ -162,17 +199,29 @@ Useful controls:
 | `SOAK_WORKLOAD_INTERVAL_SECONDS` | `1` | Delay after each completed order |
 | `SOAK_OUTAGE_SECONDS` | `20` | Feed hold-down after cancellation proof |
 | `SOAK_RECOVERY_TIMEOUT_SECONDS` | `90` | Cancellation/fresh-recovery deadline |
+| `SOAK_RECOVERY_CROSS_ATTEMPTS` | `3` | Recorded post-gap crosses per symbol |
+| `SOAK_RECOVERY_CROSS_INTERVAL_SECONDS` | `10` | Delay between post-gap cross rounds |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
+| `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
+| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Marketable workload buy limit |
+| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Marketable workload sell limit |
+| `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
+| `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |
+| `SOAK_COUNTERPARTY_DEPOSIT_AMOUNT` | `0` | Counterparty sandbox deposit |
 | `SOAK_ARTIFACTS_DIR` | `soak-artifacts/<run-id>` | Ignored evidence directory |
+| `SOAK_SUITE_MANIFEST` | unset | Shared closure-suite manifest; required for acceptance |
 | `SOAK_KEEP_STACK` | `false` | Keep isolated containers/volumes for inspection |
 | `SOAK_BUILD_IMAGES` | `true` | Build the host, bot, and local alert receiver from the checked-out commit |
+| `SOAK_WITH_GRAFANA` | `false` | Include Grafana; value is suite-comparable |
+| `SOAK_SUBNET` | `192.168.64.0/24` | Isolated Compose subnet; suite-comparable |
 | `SOAK_TRADING_IMAGE` | project-local tag | Host image/tag to build or reuse |
 | `SOAK_MARKET_MAKER_BOT_IMAGE` | project-local tag | Bot image/tag to build or reuse |
 | `SOAK_ALERT_RECEIVER_IMAGE` | project-local tag | Local receiver image/tag to build or reuse |
 
 The helper exits nonzero on a failed check, captures logs, and tears down its
 isolated project and volumes unless `--keep-stack`/`SOAK_KEEP_STACK=true` is
-set. Manual cleanup is:
+set. It refuses a non-empty artifact directory so stale evidence cannot be
+mixed into a rerun. Manual cleanup is:
 
 ```bash
 MM_SOAK_PROJECT_NAME="$SOAK_PROJECT_NAME" docker compose \
@@ -216,19 +265,28 @@ inspect the complete time series against these unambiguous thresholds:
 
 ### Common
 
-- `bot.orders.open <= 2` for every configured symbol and total `<= 6`; PETR4
-  has exactly two open quotes in at least 90% of sampled eligible time and at
-  the end of the profile.
+- `bot.orders.open <= 2` for every configured symbol and total `<= 6` during
+  the run; PETR4 has exactly two open quotes in at least 90% of sampled
+  eligible time.
+- Successful completion requires exactly two open quotes for each of PETR4,
+  VALE3, and ITUB4, exactly six total. The strict `PauseAndCancel` profile also
+  requires exported eligibility `1` for all three after recovery. Static
+  profiles intentionally do not export the strict-policy eligibility gauge.
 - Every submitted workload order fills within 20 seconds.
 - `bot.fills.received == bot.pnl.fills_applied > 0`.
 - Unknown, duplicate, invalid, inconsistent, and fill-delta-mismatch counters
   all remain zero.
 - Safety-cap hits, quote submit failures, quote rejects, and cancel
   reject/submit-failure counters remain zero.
-- Containers have no unexpected restart loop; `compose-ps.json` and
-  `compose.log` identify any restart/fault.
-- P&L snapshots share one `accountingPeriodStartedAtUtc` per process and never
-  report stale/missing unrealized P&L as numeric zero.
+- Every sampled runtime row retains the initial container ID and image ID and
+  `restartCount=0`; the bot's `StartedAt` also remains unchanged. All runtime
+  services are running at final capture.
+- Every metric sample contains the same non-empty
+  `accountingPeriodStartedAtUtc`. A changed bot process/ledger fails the run.
+- Every tracked `*_total` series is monotonically non-decreasing across all
+  warmup, profile-event, duration, and final samples. A reset cannot erase an
+  earlier reject, cancellation error, or accounting-corruption event.
+- P&L never reports stale/missing unrealized P&L as numeric zero.
 
 ### Baseline
 
@@ -261,15 +319,21 @@ inspect the complete time series against these unambiguous thresholds:
 
 ### `PauseAndCancel`
 
-- On feed stop, eligibility becomes `0` and all PETR4 bot quotes reach
-  `open=0` within 90 seconds.
+- On feed stop, eligibility and open orders reach `0` for all three configured
+  symbols within 90 seconds.
 - No new quote is submitted while ineligible; suppression/feed-cancel counters
   increase without cancel errors or accounting corruption.
-- Restart alone is not accepted as recovery. After the fresh current-epoch
-  trade, eligibility becomes `1`, `reference_age_seconds{source="trade"}`
-  appears, and PETR4 returns to `open=2` within 90 seconds.
+- Restart alone is not accepted as recovery. After fresh current-epoch trades,
+  eligibility becomes `1`, a
+  `reference_age_seconds{exported_source="last_trade_price"} < 15` sample
+  appears, and every configured symbol returns to `open=2` within 90 seconds.
 - `reference_age_seconds` resets to a fresh value and `[mm-feed]` records
   source plus the unavailable-to-available transition.
+
+The bundled Prometheus scrape target already uses a `source` label, so its
+translation renames the instrument's bounded OTel `source` attribute to
+`exported_source`. The helper normalizes `exported_source` back into the
+`source` CSV column while retaining both raw labels in JSONL.
 
 ## OTLP, Collector, and Azure Monitor contract
 
@@ -326,31 +390,66 @@ exception text as dimensions.
 The helper writes only under ignored `soak-artifacts/`:
 
 - `run.json` — immutable inputs and classification;
-- `samples.csv` / `samples.jsonl` — normalized metric samples;
+- `rendered-config.json` — allow-listed, secret-free rendered auth/strategy configuration;
+- `runtime-images.json` — configured references, actual image IDs, and available repo digests;
+- `compatibility.json` — exact cross-profile comparison input;
+- `runtime.csv` / `runtime.jsonl` — container IDs, image IDs, start time, restart count, and state;
+- `samples.csv` / `samples.jsonl` — normalized metric samples with accounting-period identity;
 - `workload.csv` — order/fill latency evidence;
+- `counter-monotonicity.json` — any decreasing tracked counter series;
+- `open-order-bounds.json` — per-symbol and total maxima across all samples;
 - `summary.json` — machine-readable checks;
 - `compose-ps.json` and `compose.log` — runtime state and diagnostics.
+
+The shared `suite-manifest.json` pins the first profile's compatibility object
+and adds one accepted run per profile. Neither the rendered projection nor any
+other artifact contains passwords, tokens, signing keys, password hashes,
+salts, or the bot access key.
 
 Use this summary shape (generated values only; never fabricate results):
 
 ```json
 {
-  "schemaVersion": "1",
+  "schemaVersion": "2",
   "runId": "20260724T180000Z-baseline",
   "profile": "baseline",
   "gitSha": "<40-hex commit>",
+  "gitDirty": false,
+  "configuredSymbols": ["PETR4", "VALE3", "ITUB4"],
   "images": {
-    "tradingHost": "<image@sha256:digest>",
-    "marketMakerBot": "<image@sha256:digest>",
-    "matching": "<image@sha256:digest>",
-    "marketData": "<image@sha256:digest>"
+    "trading-host": "sha256:<actual-runtime-image-id>",
+    "market-maker-bot": "sha256:<actual-runtime-image-id>",
+    "matching-platform": "sha256:<actual-runtime-image-id>",
+    "marketdata": "sha256:<actual-runtime-image-id>"
   },
   "startedAtUtc": "<ISO-8601>",
   "finishedAtUtc": "<ISO-8601>",
   "settings": {
     "warmupSeconds": 900,
     "durationSeconds": 7200,
-    "sampleIntervalSeconds": 15
+    "sampleIntervalSeconds": 15,
+    "workloadIntervalSeconds": 1,
+    "fillTimeoutSeconds": 20,
+    "outageSeconds": 60,
+    "recoveryTimeoutSeconds": 90,
+    "recoveryCrossAttempts": 3,
+    "recoveryCrossIntervalSeconds": 10,
+    "withGrafana": false
+  },
+  "execution": {"buildImages": true, "keepStack": false},
+  "workload": {
+    "symbol": "PETR4",
+    "quantity": 100,
+    "marketableBuyPrice": 32.8,
+    "marketableSellPrice": 29.3,
+    "referenceCrossPrice": 30,
+    "inventoryBiasLots": 12,
+    "deposits": {"tradingUser": 100000, "counterpartyUser": 0},
+    "recoveryCrosses": [
+      {"symbol": "PETR4", "quantity": 100, "referencePrice": 30},
+      {"symbol": "VALE3", "quantity": 100, "referencePrice": 70},
+      {"symbol": "ITUB4", "quantity": 100, "referencePrice": 32}
+    ]
   },
   "accountingPeriodStartedAtUtc": "<ISO-8601 from mm-pnl>",
   "checks": [
@@ -361,14 +460,43 @@ Use this summary shape (generated values only; never fabricate results):
       "observed": "0"
     }
   ],
-  "passed": true
+  "passed": true,
+  "acceptanceEligible": true,
+  "evidenceClass": "acceptance-profile"
 }
 ```
 
-For every profile, post a Markdown table with run ID, commit, image digests,
-duration, artifact location/checksum, and every threshold result. Attach the
-non-secret JSON/CSV/log bundle through the GitHub UI or link the retained
-operator artifact. Then add the same evidence link to both issues:
+Suite manifest completion shape:
+
+```json
+{
+  "schemaVersion": "1",
+  "suiteId": "b3tp-719-<commit>-01",
+  "expectedProfiles": [
+    "baseline",
+    "inventory-skew",
+    "volatility-spread",
+    "pause-and-cancel"
+  ],
+  "compatibility": {
+    "gitSha": "<40-hex commit>",
+    "settings": "<identical timing controls>",
+    "workload": "<identical workload controls>",
+    "configuredSymbols": ["PETR4", "VALE3", "ITUB4"],
+    "commonRenderedConfiguration": "<secret-free projection>",
+    "runtimeImageIds": {"<service>": "sha256:<actual image ID>"}
+  },
+  "runs": {"<profile>": "<accepted run record>"},
+  "suiteAcceptanceEligible": true
+}
+```
+
+For every profile, post a Markdown table with run ID, commit, actual image IDs
+and repo digests, controls, duration, artifact location/checksum, and every
+threshold result. Include the final suite manifest and require
+`suiteAcceptanceEligible=true`. Attach the non-secret JSON/CSV/log bundle
+through the GitHub UI or link the retained operator artifact. Then add the same
+evidence link to both issues:
 
 ```bash
 gh issue comment 719 --body-file soak-artifacts/<run-id>/issue-comment.md

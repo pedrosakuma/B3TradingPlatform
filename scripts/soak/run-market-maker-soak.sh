@@ -9,6 +9,7 @@ profile=""
 dry_run=false
 keep_stack="${SOAK_KEEP_STACK:-false}"
 build_images="${SOAK_BUILD_IMAGES:-true}"
+with_grafana="${SOAK_WITH_GRAFANA:-false}"
 stack_started=false
 
 usage() {
@@ -39,7 +40,10 @@ Operator controls:
   SOAK_ARTIFACTS_DIR=soak-artifacts/<run-id>
   SOAK_OUTAGE_SECONDS=20
   SOAK_RECOVERY_TIMEOUT_SECONDS=90
+  SOAK_RECOVERY_CROSS_ATTEMPTS=3
+  SOAK_RECOVERY_CROSS_INTERVAL_SECONDS=10
   SOAK_INVENTORY_BIAS_LOTS=12
+  SOAK_SUITE_MANIFEST=soak-artifacts/<suite-id>/suite-manifest.json
 EOF
 }
 
@@ -75,6 +79,14 @@ require_uint() {
     }
 }
 
+require_bool() {
+    local name="$1" value="$2"
+    [[ "$value" == "true" || "$value" == "false" ]] || {
+        echo "ERROR: $name must be true or false, got '$value'" >&2
+        exit 3
+    }
+}
+
 require_cmd docker
 require_cmd curl
 require_cmd jq
@@ -86,6 +98,8 @@ readonly sample_interval_seconds="${SOAK_SAMPLE_INTERVAL_SECONDS:-15}"
 readonly workload_interval_seconds="${SOAK_WORKLOAD_INTERVAL_SECONDS:-1}"
 readonly outage_seconds="${SOAK_OUTAGE_SECONDS:-20}"
 readonly recovery_timeout_seconds="${SOAK_RECOVERY_TIMEOUT_SECONDS:-90}"
+readonly recovery_cross_attempts="${SOAK_RECOVERY_CROSS_ATTEMPTS:-3}"
+readonly recovery_cross_interval_seconds="${SOAK_RECOVERY_CROSS_INTERVAL_SECONDS:-10}"
 readonly inventory_bias_lots="${SOAK_INVENTORY_BIAS_LOTS:-12}"
 readonly fill_timeout_seconds="${SOAK_FILL_TIMEOUT_SECONDS:-20}"
 readonly trading_user="${SOAK_TRADING_USER:-alice}"
@@ -96,16 +110,28 @@ readonly marketable_buy_price="${SOAK_MARKETABLE_BUY_PRICE:-32.80}"
 readonly marketable_sell_price="${SOAK_MARKETABLE_SELL_PRICE:-29.30}"
 readonly reference_cross_price="${SOAK_REFERENCE_CROSS_PRICE:-30.00}"
 readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-100000.00}"
+readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-0}"
 
 require_uint SOAK_WARMUP_SECONDS "$warmup_seconds"
 require_uint SOAK_DURATION_SECONDS "$duration_seconds"
 require_uint SOAK_SAMPLE_INTERVAL_SECONDS "$sample_interval_seconds"
 require_uint SOAK_OUTAGE_SECONDS "$outage_seconds"
 require_uint SOAK_RECOVERY_TIMEOUT_SECONDS "$recovery_timeout_seconds"
+require_uint SOAK_RECOVERY_CROSS_ATTEMPTS "$recovery_cross_attempts"
+require_uint SOAK_RECOVERY_CROSS_INTERVAL_SECONDS "$recovery_cross_interval_seconds"
 require_uint SOAK_INVENTORY_BIAS_LOTS "$inventory_bias_lots"
 require_uint SOAK_FILL_TIMEOUT_SECONDS "$fill_timeout_seconds"
+require_bool SOAK_KEEP_STACK "$keep_stack"
+require_bool SOAK_BUILD_IMAGES "$build_images"
+require_bool SOAK_WITH_GRAFANA "$with_grafana"
 (( sample_interval_seconds > 0 )) || { echo "ERROR: sample interval must be positive" >&2; exit 3; }
 (( duration_seconds > 0 )) || { echo "ERROR: duration must be positive" >&2; exit 3; }
+(( recovery_cross_attempts > 0 )) || { echo "ERROR: recovery cross attempts must be positive" >&2; exit 3; }
+(( recovery_cross_interval_seconds > 0 )) || { echo "ERROR: recovery cross interval must be positive" >&2; exit 3; }
+(( (recovery_cross_attempts - 1) * recovery_cross_interval_seconds < recovery_timeout_seconds )) || {
+    echo "ERROR: recovery cross rounds consume the entire recovery timeout" >&2
+    exit 3
+}
 
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-${profile}"
 readonly project_name="${SOAK_PROJECT_NAME:-b3tp-soak-${run_id,,}}"
@@ -124,6 +150,7 @@ export PROMETHEUS_PORT="${SOAK_PROMETHEUS_PORT:-19090}"
 export ALERTMANAGER_PORT="${SOAK_ALERTMANAGER_PORT:-19093}"
 export ALERT_RECEIVER_PORT="${SOAK_ALERT_RECEIVER_PORT:-18093}"
 export GRAFANA_PORT="${SOAK_GRAFANA_PORT:-13000}"
+export MM_SOAK_SUBNET="${SOAK_SUBNET:-192.168.64.0/24}"
 if $build_images; then
     export TRADING_IMAGE="${SOAK_TRADING_IMAGE:-${project_name}-trading-host:dev}"
     export MARKET_MAKER_BOT_IMAGE="${SOAK_MARKET_MAKER_BOT_IMAGE:-${project_name}-market-maker-bot:dev}"
@@ -172,9 +199,90 @@ readonly compose=(
 )
 
 echo "Validating Compose profile '$profile' (project '$project_name')..."
-"${compose[@]}" config --quiet
+rendered_compose="$("${compose[@]}" config --format json)"
+if ! jq -e \
+    --arg inventorySkew "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
+    --arg volatilitySpread "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" \
+    --arg feedLossPolicy "$MM_SOAK_FEED_LOSS_POLICY" '
+      .services["trading-host"].environment.Trading__Auth__Mode == "Local" and
+      .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled == "true" and
+      .services["trading-host"].environment.Trading__Risk__PerEndClient__bob__AllowShortSell == "true" and
+      .services["market-maker-bot"].environment.MarketMaker__MarketData__FeedLossPolicy == $feedLossPolicy and
+      ([.services["market-maker-bot"].environment
+          | to_entries[]
+          | select(.key | test("^MarketMaker__Instruments__[0-9]+__InventorySkew__Enabled$"))
+          | .value] | length > 0 and all(. == $inventorySkew)) and
+      ([.services["market-maker-bot"].environment
+          | to_entries[]
+          | select(.key | test("^MarketMaker__Instruments__[0-9]+__VolatilitySpread__Enabled$"))
+          | .value] | length > 0 and all(. == $volatilitySpread))
+    ' >/dev/null <<<"$rendered_compose"; then
+    echo "ERROR: rendered Compose profile does not pin Local auth or the requested strategy settings" >&2
+    exit 3
+fi
+
+sanitized_rendered_config="$(jq '{
+  services: {
+    tradingHost: {
+      image: .services["trading-host"].image,
+      auth: {
+        mode: .services["trading-host"].environment.Trading__Auth__Mode,
+        localLoginEnabled: .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled
+      },
+      workloadRisk: {
+        counterparty: "bob",
+        allowShortSell: .services["trading-host"].environment.Trading__Risk__PerEndClient__bob__AllowShortSell
+      }
+    },
+    marketMakerBot: {
+      image: .services["market-maker-bot"].image,
+      configuration: (
+        .services["market-maker-bot"].environment
+        | with_entries(select(
+            (.key | startswith("MarketMaker__Instruments__")) or
+            (.key | startswith("MarketMaker__MarketData__")) or
+            (.key | startswith("MarketMaker__Telemetry__"))
+          ))
+      )
+    },
+    matchingPlatform: {image: .services["matching-platform"].image},
+    marketData: {image: .services.marketdata.image},
+    otelCollector: {image: .services["otel-collector"].image},
+    prometheus: {image: .services.prometheus.image}
+  },
+  network: {
+    name: .networks["b3-net"].name,
+    ipam: .networks["b3-net"].ipam.config
+  }
+}' <<<"$rendered_compose")"
+
+mapfile -t configured_symbols < <(jq -r '
+  .services.marketMakerBot.configuration
+  | to_entries
+  | map(select(.key | test("^MarketMaker__Instruments__[0-9]+__Symbol$")))
+  | sort_by(.key)
+  | .[].value
+' <<<"$sanitized_rendered_config")
+configured_instruments_json="$(jq --arg targetSymbol "$symbol" --argjson targetPrice "$reference_cross_price" '
+  .services.marketMakerBot.configuration as $config |
+  [range(0; 3) as $index |
+   ($config["MarketMaker__Instruments__" + ($index | tostring) + "__Symbol"]) as $symbol | {
+    symbol: $symbol,
+    quantity: ($config["MarketMaker__Instruments__" + ($index | tostring) + "__LotSize"] | tonumber),
+    referencePrice: (
+      if $symbol == $targetSymbol then $targetPrice
+      else ($config["MarketMaker__Instruments__" + ($index | tostring) + "__RefPrice"] | tonumber)
+      end
+    )
+  }]
+' <<<"$sanitized_rendered_config")"
+if [[ "${#configured_symbols[@]}" -ne 3 ]] ||
+    ! jq -e --arg symbol "$symbol" 'any(.symbol == $symbol)' >/dev/null <<<"$configured_instruments_json"; then
+    echo "ERROR: rendered profile must contain PETR4/target plus exactly three configured symbols" >&2
+    exit 3
+fi
 if $dry_run; then
-    printf 'PASS: profile=%s project=%s inventorySkew=%s volatilitySpread=%s feedLossPolicy=%s\n' \
+    printf 'PASS: profile=%s project=%s authMode=Local inventorySkew=%s volatilitySpread=%s feedLossPolicy=%s\n' \
         "$profile" "$project_name" "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
         "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" "$MM_SOAK_FEED_LOSS_POLICY"
     exit 0
@@ -189,15 +297,32 @@ readonly counterparty_password="${SOAK_COUNTERPARTY_PASSWORD:-$SOAK_TRADING_PASS
 readonly base_url="http://127.0.0.1:${TRADING_HOST_PORT}"
 readonly prometheus_url="http://127.0.0.1:${PROMETHEUS_PORT}"
 readonly artifacts_dir="${SOAK_ARTIFACTS_DIR:-soak-artifacts/${run_id}}"
+readonly suite_manifest="${SOAK_SUITE_MANIFEST:-}"
+if [[ -n "$suite_manifest" && "$suite_manifest" != soak-artifacts/* ]]; then
+    echo "ERROR: SOAK_SUITE_MANIFEST must be a relative path below ignored soak-artifacts/" >&2
+    exit 3
+fi
+if [[ -d "$artifacts_dir" && -n "$(ls -A "$artifacts_dir")" ]]; then
+    echo "ERROR: SOAK_ARTIFACTS_DIR already contains files: $artifacts_dir" >&2
+    exit 3
+fi
 mkdir -p "$artifacts_dir"
+if [[ -n "$suite_manifest" ]]; then
+    mkdir -p "$(dirname "$suite_manifest")"
+fi
 readonly samples_jsonl="${artifacts_dir}/samples.jsonl"
 readonly samples_csv="${artifacts_dir}/samples.csv"
 readonly workload_csv="${artifacts_dir}/workload.csv"
+readonly runtime_jsonl="${artifacts_dir}/runtime.jsonl"
+readonly runtime_csv="${artifacts_dir}/runtime.csv"
 readonly checks_tsv="${artifacts_dir}/checks.tsv"
-printf 'timestamp_utc,phase,metric,symbol,side,reason,available,source,value\n' >"$samples_csv"
+printf 'timestamp_utc,phase,accountingPeriodStartedAtUtc,metric,symbol,side,reason,available,source,value\n' >"$samples_csv"
 printf 'timestamp_utc,phase,user,side,clOrdId,fillLatencySeconds\n' >"$workload_csv"
+printf 'timestamp_utc,phase,service,containerId,imageId,startedAtUtc,restartCount,status\n' >"$runtime_csv"
 : >"$samples_jsonl"
+: >"$runtime_jsonl"
 : >"$checks_tsv"
+printf '%s\n' "$sanitized_rendered_config" >"${artifacts_dir}/rendered-config.json"
 
 log() {
     printf '%s [mm-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
@@ -228,12 +353,22 @@ cleanup() {
 trap cleanup EXIT
 
 git_sha="$(git rev-parse HEAD)"
+git_dirty=false
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    git_dirty=true
+fi
+timing_eligible=false
+if (( warmup_seconds >= 600 && duration_seconds >= 7200 && sample_interval_seconds <= 30 )); then
+    timing_eligible=true
+fi
+configured_symbols_json="$(printf '%s\n' "${configured_symbols[@]}" | jq -R . | jq -s .)"
 jq -n \
-    --arg schemaVersion "1" \
+    --arg schemaVersion "2" \
     --arg runId "$run_id" \
     --arg profile "$profile" \
     --arg projectName "$project_name" \
     --arg gitSha "$git_sha" \
+    --argjson gitDirty "$git_dirty" \
     --arg symbol "$symbol" \
     --arg inventorySkew "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
     --arg volatilitySpread "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" \
@@ -241,33 +376,78 @@ jq -n \
     --argjson warmupSeconds "$warmup_seconds" \
     --argjson durationSeconds "$duration_seconds" \
     --argjson sampleIntervalSeconds "$sample_interval_seconds" \
+    --argjson workloadIntervalSeconds "$workload_interval_seconds" \
+    --argjson outageSeconds "$outage_seconds" \
+    --argjson recoveryTimeoutSeconds "$recovery_timeout_seconds" \
+    --argjson recoveryCrossAttempts "$recovery_cross_attempts" \
+    --argjson recoveryCrossIntervalSeconds "$recovery_cross_interval_seconds" \
+    --argjson inventoryBiasLots "$inventory_bias_lots" \
+    --argjson fillTimeoutSeconds "$fill_timeout_seconds" \
+    --argjson quantity "$quantity" \
+    --argjson marketableBuyPrice "$marketable_buy_price" \
+    --argjson marketableSellPrice "$marketable_sell_price" \
+    --argjson referenceCrossPrice "$reference_cross_price" \
+    --argjson depositAmount "$deposit_amount" \
+    --argjson counterpartyDepositAmount "$counterparty_deposit_amount" \
+    --argjson configuredSymbols "$configured_symbols_json" \
+    --argjson configuredInstruments "$configured_instruments_json" \
+    --argjson timingEligible "$timing_eligible" \
+    --argjson buildImages "$build_images" \
+    --argjson keepStack "$keep_stack" \
+    --argjson withGrafana "$with_grafana" \
+    --arg suiteManifest "$suite_manifest" \
     '{
       schemaVersion: $schemaVersion,
       runId: $runId,
       profile: $profile,
       projectName: $projectName,
       gitSha: $gitSha,
+      gitDirty: $gitDirty,
       symbol: $symbol,
+      configuredSymbols: $configuredSymbols,
       startedAtUtc: (now | todateiso8601),
       settings: {
+        warmupSeconds: $warmupSeconds,
+        durationSeconds: $durationSeconds,
+        sampleIntervalSeconds: $sampleIntervalSeconds,
+        workloadIntervalSeconds: $workloadIntervalSeconds,
+        fillTimeoutSeconds: $fillTimeoutSeconds,
+        outageSeconds: $outageSeconds,
+        recoveryTimeoutSeconds: $recoveryTimeoutSeconds,
+        recoveryCrossAttempts: $recoveryCrossAttempts,
+        recoveryCrossIntervalSeconds: $recoveryCrossIntervalSeconds,
+        withGrafana: $withGrafana
+      },
+      workload: {
+        symbol: $symbol,
+        quantity: $quantity,
+        marketableBuyPrice: $marketableBuyPrice,
+        marketableSellPrice: $marketableSellPrice,
+        referenceCrossPrice: $referenceCrossPrice,
+        inventoryBiasLots: $inventoryBiasLots,
+        deposits: {
+          tradingUser: $depositAmount,
+          counterpartyUser: $counterpartyDepositAmount
+        },
+        accountingBootstrapRoundTrip: true,
+        recoveryCrosses: $configuredInstruments
+      },
+      profileConfiguration: {
         inventorySkewEnabled: ($inventorySkew == "true"),
         volatilitySpreadEnabled: ($volatilitySpread == "true"),
         feedLossPolicy: $feedLossPolicy,
-        warmupSeconds: $warmupSeconds,
-        durationSeconds: $durationSeconds,
-        sampleIntervalSeconds: $sampleIntervalSeconds
+        initialReferenceCrosses: ($feedLossPolicy == "PauseAndCancel")
       },
-      acceptanceEligible: (
-        $warmupSeconds >= 600 and
-        $durationSeconds >= 7200 and
-        $sampleIntervalSeconds <= 30
-      ),
-      evidenceClass: (
-        if ($warmupSeconds >= 600 and $durationSeconds >= 7200 and $sampleIntervalSeconds <= 30)
-        then "acceptance"
-        else "smoke"
-        end
-      )
+      renderedConfigArtifact: "rendered-config.json",
+      execution: {
+        buildImages: $buildImages,
+        keepStack: $keepStack
+      },
+      suiteManifest: (if $suiteManifest == "" then null else $suiteManifest end),
+      timingEligible: $timingEligible,
+      acceptanceEligible: false,
+      evidenceClass: "smoke",
+      eligibilityReasons: ["runtime images and suite compatibility have not been verified"]
     }' >"${artifacts_dir}/run.json"
 
 "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
@@ -277,31 +457,192 @@ if $build_images; then
 fi
 
 services=(trading-host market-maker-bot prometheus)
-if [[ "${SOAK_WITH_GRAFANA:-false}" == "true" ]]; then
+if $with_grafana; then
     services+=(grafana)
 fi
 log "starting isolated real stack"
 stack_started=true
 "${compose[@]}" up -d --no-build --wait "${services[@]}"
 
-image_id() {
-    local container_id
-    container_id="$("${compose[@]}" ps -q "$1")"
-    docker inspect -f '{{.Image}}' "$container_id"
+capture_runtime_images() {
+    local runtime_images='[]' container_id inspect_json service configured_image image_id started_at repo_digests row
+    local container_ids=()
+    mapfile -t container_ids < <("${compose[@]}" ps --all -q)
+    ((${#container_ids[@]} > 0)) || {
+        log "ERROR: Compose reported no runtime containers"
+        return 1
+    }
+    for container_id in "${container_ids[@]}"; do
+        inspect_json="$(docker inspect "$container_id" | jq '.[0]')"
+        service="$(jq -er '.Config.Labels["com.docker.compose.service"]' <<<"$inspect_json")"
+        configured_image="$(jq -er '.Config.Image' <<<"$inspect_json")"
+        image_id="$(jq -er '.Image' <<<"$inspect_json")"
+        started_at="$(jq -er '.State.StartedAt' <<<"$inspect_json")"
+        repo_digests="$(docker image inspect "$image_id" | jq '.[0].RepoDigests // []')"
+        row="$(jq -cn \
+            --arg service "$service" \
+            --arg containerId "$container_id" \
+            --arg configuredImage "$configured_image" \
+            --arg imageId "$image_id" \
+            --arg startedAtUtc "$started_at" \
+            --argjson repoDigests "$repo_digests" \
+            '{
+              service: $service,
+              containerId: $containerId,
+              configuredImage: $configuredImage,
+              imageId: $imageId,
+              startedAtUtc: $startedAtUtc,
+              repoDigests: $repoDigests
+            }')"
+        runtime_images="$(jq -cn --argjson rows "$runtime_images" --argjson row "$row" '$rows + [$row]')"
+    done
+    jq -e '
+      length > 0 and
+      (map(.service) | unique | length) == length and
+      all(.imageId | test("^sha256:[0-9a-f]{64}$"))
+    ' >/dev/null <<<"$runtime_images" || {
+        log "ERROR: runtime image evidence is incomplete or does not contain immutable image IDs"
+        return 1
+    }
+    jq 'sort_by(.service)' <<<"$runtime_images" >"${artifacts_dir}/runtime-images.json"
 }
 
+capture_runtime_images
+runtime_image_ids="$(jq 'map({key: .service, value: .imageId}) | from_entries' \
+    "${artifacts_dir}/runtime-images.json")"
+
 jq \
-    --arg tradingHost "$(image_id trading-host)" \
-    --arg marketMakerBot "$(image_id market-maker-bot)" \
-    --arg matching "$(image_id matching-platform)" \
-    --arg marketData "$(image_id marketdata)" \
-    '.images = {
-      tradingHost: $tradingHost,
-      marketMakerBot: $marketMakerBot,
-      matching: $matching,
-      marketData: $marketData
-    }' "${artifacts_dir}/run.json" >"${artifacts_dir}/run.json.next"
+    --argjson images "$runtime_image_ids" \
+    '.images = $images | .runtimeImagesArtifact = "runtime-images.json"' \
+    "${artifacts_dir}/run.json" >"${artifacts_dir}/run.json.next"
 mv "${artifacts_dir}/run.json.next" "${artifacts_dir}/run.json"
+
+runtime_stable=true
+runtime_violation_logged=false
+capture_runtime_state() {
+    local phase="$1" timestamp service expected_id expected_image expected_started current_id state restart_count status started_at row
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    while IFS=$'\t' read -r service expected_id expected_image expected_started; do
+        current_id="$("${compose[@]}" ps --all -q "$service")"
+        restart_count=-1
+        status=missing
+        started_at=missing
+        if [[ "$current_id" == "$expected_id" ]] && state="$(docker inspect "$current_id" 2>/dev/null | jq '.[0]')"; then
+            restart_count="$(jq -er '.RestartCount' <<<"$state")"
+            status="$(jq -er '.State.Status' <<<"$state")"
+            started_at="$(jq -er '.State.StartedAt' <<<"$state")"
+            if [[ "$(jq -er '.Image' <<<"$state")" != "$expected_image" ]]; then
+                runtime_stable=false
+            fi
+            if [[ "$service" == "market-maker-bot" && "$started_at" != "$expected_started" ]]; then
+                runtime_stable=false
+            fi
+        else
+            runtime_stable=false
+            status=replaced-or-missing
+        fi
+        if (( restart_count != 0 )); then
+            runtime_stable=false
+        fi
+        row="$(jq -cn \
+            --arg timestamp "$timestamp" \
+            --arg phase "$phase" \
+            --arg service "$service" \
+            --arg containerId "${current_id:-missing}" \
+            --arg imageId "$expected_image" \
+            --arg startedAtUtc "$started_at" \
+            --argjson restartCount "$restart_count" \
+            --arg status "$status" \
+            '{
+              timestampUtc: $timestamp,
+              phase: $phase,
+              service: $service,
+              containerId: $containerId,
+              imageId: $imageId,
+              startedAtUtc: $startedAtUtc,
+              restartCount: $restartCount,
+              status: $status
+            }')"
+        printf '%s\n' "$row" >>"$runtime_jsonl"
+        jq -r '[.timestampUtc,.phase,.service,.containerId,.imageId,.startedAtUtc,.restartCount,.status] | @csv' \
+            <<<"$row" >>"$runtime_csv"
+    done < <(jq -r '.[] | [.service,.containerId,.imageId,.startedAtUtc] | @tsv' \
+        "${artifacts_dir}/runtime-images.json")
+    if ! $runtime_stable && ! $runtime_violation_logged; then
+        log "ERROR: runtime container identity, image ID, or restart count changed; this run cannot pass"
+        runtime_violation_logged=true
+    fi
+}
+
+capture_runtime_state initial
+
+compatibility_json="$(jq -n \
+    --slurpfile run "${artifacts_dir}/run.json" \
+    --slurpfile rendered "${artifacts_dir}/rendered-config.json" \
+    --slurpfile runtimeImages "${artifacts_dir}/runtime-images.json" '
+    {
+      gitSha: $run[0].gitSha,
+      settings: $run[0].settings,
+      workload: $run[0].workload,
+      configuredSymbols: $run[0].configuredSymbols,
+      commonRenderedConfiguration: {
+        auth: $rendered[0].services.tradingHost.auth,
+        workloadRisk: $rendered[0].services.tradingHost.workloadRisk,
+        networkIpam: $rendered[0].network.ipam,
+        marketMakerBot: (
+          $rendered[0].services.marketMakerBot.configuration
+          | with_entries(select(
+              (.key | test("__InventorySkew__Enabled$|__VolatilitySpread__Enabled$|MarketData__FeedLossPolicy$")) | not
+            ))
+        )
+      },
+      runtimeImageIds: (
+        $runtimeImages[0] | map({key: .service, value: .imageId}) | from_entries
+      )
+    }')"
+printf '%s\n' "$compatibility_json" >"${artifacts_dir}/compatibility.json"
+
+suite_compatible=false
+if [[ -n "$suite_manifest" ]]; then
+    $timing_eligible || {
+        log "ERROR: SOAK_SUITE_MANIFEST is only valid with acceptance timing (warmup>=600, duration>=7200, sample<=30)"
+        exit 3
+    }
+    ! $git_dirty || {
+        log "ERROR: acceptance evidence requires a clean checkout"
+        exit 3
+    }
+    suite_id="$(basename "$(dirname "$suite_manifest")")"
+    if [[ -e "$suite_manifest" ]]; then
+        if ! jq -e \
+            --argjson compatibility "$compatibility_json" '
+              .schemaVersion == "1" and
+              .expectedProfiles == ["baseline","inventory-skew","volatility-spread","pause-and-cancel"] and
+              .compatibility == $compatibility
+            ' >/dev/null "$suite_manifest"; then
+            printf '%s\n' "$compatibility_json" >"${artifacts_dir}/compatibility-observed.json"
+            log "ERROR: suite compatibility mismatch; compare $suite_manifest with ${artifacts_dir}/compatibility-observed.json"
+            exit 1
+        fi
+        if jq -e --arg profile "$profile" '.runs[$profile] != null' >/dev/null "$suite_manifest"; then
+            log "ERROR: suite manifest already contains profile '$profile'; use a new suite"
+            exit 3
+        fi
+    else
+        jq -n \
+            --arg suiteId "$suite_id" \
+            --argjson compatibility "$compatibility_json" '{
+              schemaVersion: "1",
+              suiteId: $suiteId,
+              createdAtUtc: (now | todateiso8601),
+              expectedProfiles: ["baseline","inventory-skew","volatility-spread","pause-and-cancel"],
+              compatibility: $compatibility,
+              runs: {},
+              suiteAcceptanceEligible: false
+            }' >"$suite_manifest"
+    fi
+    suite_compatible=true
+fi
 
 wait_http() {
     local url="$1" timeout="$2" started
@@ -332,20 +673,27 @@ readonly trading_token
 counterparty_token="$(login "$counterparty_user" "$counterparty_password")"
 readonly counterparty_token
 
-curl -fsS --max-time 10 \
-    -H "$(auth_header "$trading_token")" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --argjson amount "$deposit_amount" '{amount:$amount}')" \
-    "${base_url}/api/balance/deposit" >/dev/null
+deposit() {
+    local token="$1" amount="$2"
+    awk -v amount="$amount" 'BEGIN { exit !(amount > 0) }' || return 0
+    curl -fsS --max-time 10 \
+        -H "$(auth_header "$token")" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -cn --argjson amount "$amount" '{amount:$amount}')" \
+        "${base_url}/api/balance/deposit" >/dev/null
+}
+
+deposit "$trading_token" "$deposit_amount"
+deposit "$counterparty_token" "$counterparty_deposit_amount"
 
 wait_order_filled() {
-    local token="$1" clordid="$2" started orders status cum
+    local token="$1" clordid="$2" expected_quantity="${3:-$quantity}" started orders status cum
     started=$SECONDS
     while (( SECONDS - started < fill_timeout_seconds )); do
         orders="$(curl -fsS --max-time 10 -H "$(auth_header "$token")" "${base_url}/api/orders")"
         status="$(jq -r --arg id "$clordid" '.[] | select((.clOrdId|tostring)==$id) | .status' <<<"$orders" | tail -n1)"
         cum="$(jq -r --arg id "$clordid" '.[] | select((.clOrdId|tostring)==$id) | .cumulativeQuantity' <<<"$orders" | tail -n1)"
-        if [[ "$status" == "Filled" && "$cum" == "$quantity" ]]; then
+        if [[ "$status" == "Filled" && "$cum" == "$expected_quantity" ]]; then
             printf '%s\n' "$((SECONDS - started))"
             return 0
         fi
@@ -381,6 +729,45 @@ submit_order() {
     printf '%s,%s,%s,%s,%s,%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase" "$user" "$side" "$clordid" "$latency" \
         >>"$workload_csv"
+}
+
+submit_recovery_cross() {
+    local cross_symbol="$1" cross_quantity="$2" cross_price="$3" phase="${4:-feed-recovery-cross}"
+    local sell_response buy_response sell_id buy_id latency
+    sell_response="$(curl -fsS --max-time 10 \
+        -H "$(auth_header "$counterparty_token")" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -cn \
+            --arg symbol "$cross_symbol" \
+            --argjson quantity "$cross_quantity" \
+            --argjson price "$cross_price" \
+            '{symbol:$symbol,side:"Sell",type:"Limit",quantity:$quantity,price:$price}')" \
+        "${base_url}/api/orders")"
+    [[ "$(jq -r '.status // ""' <<<"$sell_response")" != "Rejected" ]] || {
+        log "ERROR: recovery-cross sell for $cross_symbol was rejected: $sell_response"
+        return 1
+    }
+    sell_id="$(jq -er '.clOrdId | tostring' <<<"$sell_response")"
+
+    buy_response="$(curl -fsS --max-time 10 \
+        -H "$(auth_header "$trading_token")" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -cn \
+            --arg symbol "$cross_symbol" \
+            --argjson quantity "$cross_quantity" \
+            --argjson price "$cross_price" \
+            '{symbol:$symbol,side:"Buy",type:"Limit",quantity:$quantity,price:$price}')" \
+        "${base_url}/api/orders")"
+    [[ "$(jq -r '.status // ""' <<<"$buy_response")" != "Rejected" ]] || {
+        log "ERROR: recovery-cross buy for $cross_symbol was rejected: $buy_response"
+        return 1
+    }
+    buy_id="$(jq -er '.clOrdId | tostring' <<<"$buy_response")"
+    latency="$(wait_order_filled "$trading_token" "$buy_id" "$cross_quantity")"
+    wait_order_filled "$counterparty_token" "$sell_id" "$cross_quantity" >/dev/null
+    printf '%s,%s,%s,%s,%s,%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase-$cross_symbol" \
+        "$trading_user" Buy "$buy_id" "$latency" >>"$workload_csv"
 }
 
 prom_query() {
@@ -451,6 +838,59 @@ sum_metric_values() {
     printf '%s\n' "$total"
 }
 
+readonly bot_container_id="$(jq -er '.[] | select(.service == "market-maker-bot") | .containerId' \
+    "${artifacts_dir}/runtime-images.json")"
+accounting_stable=true
+accounting_period_started_at_utc=""
+
+current_accounting_period() {
+    docker logs --tail 500 "$bot_container_id" 2>&1 |
+        sed -n 's/.*accountingPeriodStartedAtUtc=\(.*\) symbol=.*/\1/p' |
+        tail -n1
+}
+
+wait_accounting_period() {
+    local started current
+    started=$SECONDS
+    while (( SECONDS - started < 60 )); do
+        current="$(current_accounting_period)"
+        if [[ -n "$current" ]]; then
+            accounting_period_started_at_utc="$current"
+            return 0
+        fi
+        sleep 1
+    done
+    log "ERROR: no [mm-pnl] accountingPeriodStartedAtUtc was observed within 60 seconds"
+    return 1
+}
+
+wait_service_healthy() {
+    local service="$1" timeout="$2" started container_id health
+    started=$SECONDS
+    container_id="$("${compose[@]}" ps --all -q "$service")"
+    while (( SECONDS - started < timeout )); do
+        health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+            "$container_id" 2>/dev/null || true)"
+        [[ "$health" == "healthy" || "$health" == "running" ]] && return 0
+        sleep 1
+    done
+    log "ERROR: service '$service' did not become healthy within ${timeout}s (last=${health:-missing})"
+    return 1
+}
+
+wait_bot_log_since() {
+    local since="$1" pattern="$2" timeout="$3" started
+    started=$SECONDS
+    while (( SECONDS - started < timeout )); do
+        if docker logs --since "$since" "$bot_container_id" 2>&1 | grep -Fq "$pattern"; then
+            return 0
+        fi
+        sleep 1
+    done
+    log "ERROR: market-maker bot did not log '$pattern' within ${timeout}s"
+    return 1
+}
+
 collect_all_metrics() {
     local results='[]' response more metric_name
     for metric_name in "${metric_names[@]}"; do
@@ -462,8 +902,18 @@ collect_all_metrics() {
 }
 
 capture_metrics() {
-    local phase="$1" timestamp body started normalized csv_rows
+    local phase="$1" timestamp body started normalized csv_rows current_accounting
     timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    capture_runtime_state "$phase"
+    current_accounting="$(current_accounting_period)"
+    if [[ -z "$current_accounting" ]]; then
+        log "ERROR: accountingPeriodStartedAtUtc is absent while sampling phase '$phase'"
+        return 1
+    fi
+    if [[ "$current_accounting" != "$accounting_period_started_at_utc" ]]; then
+        accounting_stable=false
+        log "ERROR: accountingPeriodStartedAtUtc changed from '$accounting_period_started_at_utc' to '$current_accounting'"
+    fi
     started=$SECONDS
     while true; do
         body="$(collect_all_metrics)"
@@ -476,11 +926,15 @@ capture_metrics() {
         }
         sleep 1
     done
-    if ! normalized="$(jq -c --arg timestamp "$timestamp" --arg phase "$phase" '
+    if ! normalized="$(jq -c \
+      --arg timestamp "$timestamp" \
+      --arg phase "$phase" \
+      --arg accountingPeriodStartedAtUtc "$current_accounting" '
       .data.result[] |
       {
         timestamp_utc: $timestamp,
         phase: $phase,
+        accountingPeriodStartedAtUtc: $accountingPeriodStartedAtUtc,
         metric: .metric.__name__,
         labels: (.metric | del(.__name__)),
         value: (.value[1] as $value | if $value == "NaN" then null else ($value | tonumber) end)
@@ -490,17 +944,21 @@ capture_metrics() {
         return 1
     fi
     printf '%s\n' "$normalized" >>"$samples_jsonl"
-    if ! csv_rows="$(jq -r --arg timestamp "$timestamp" --arg phase "$phase" '
+    if ! csv_rows="$(jq -r \
+      --arg timestamp "$timestamp" \
+      --arg phase "$phase" \
+      --arg accountingPeriodStartedAtUtc "$current_accounting" '
       .data.result[] |
       [
         $timestamp,
         $phase,
+        $accountingPeriodStartedAtUtc,
         .metric.__name__,
         (.metric.symbol // ""),
         (.metric.side // ""),
         (.metric.reason // ""),
         (.metric.available // ""),
-        (.metric.source // ""),
+        (.metric.exported_source // .metric.source // ""),
         .value[1]
       ] | @csv' <<<"$body")"; then
         printf '%s\n' "$body" >"${artifacts_dir}/metric-csv-error.json"
@@ -511,9 +969,14 @@ capture_metrics() {
 }
 
 wait_metric_equals() {
-    local query="$1" expected="$2" timeout="$3" started value
+    local query="$1" expected="$2" timeout="$3" started value next_runtime_check
     started=$SECONDS
+    next_runtime_check=$SECONDS
     while (( SECONDS - started < timeout )); do
+        if (( SECONDS >= next_runtime_check )); then
+            capture_runtime_state metric-wait
+            next_runtime_check=$((SECONDS + 10))
+        fi
         value="$(metric_value "$query")"
         if awk -v actual="$value" -v expected="$expected" 'BEGIN { exit !(actual == expected) }'; then
             return 0
@@ -551,10 +1014,22 @@ run_window() {
     fi
 }
 
+if [[ "$profile" == "pause-and-cancel" ]]; then
+    log "printing initial current-epoch trades for every strict-policy symbol"
+    while IFS=$'\t' read -r recovery_symbol recovery_quantity recovery_price; do
+        submit_recovery_cross "$recovery_symbol" "$recovery_quantity" "$recovery_price" "initial-reference-cross"
+    done < <(jq -r '.[] | [.symbol,.quantity,.referencePrice] | @tsv' <<<"$configured_instruments_json")
+fi
+
 log "waiting for initial two-sided PETR4 quotes"
 wait_metric_equals \
     "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
     2 60
+log "executing a two-fill bootstrap round trip so the P&L ledger emits snapshots"
+submit_order "$trading_token" "$trading_user" Buy "$marketable_buy_price" "accounting-bootstrap"
+submit_order "$trading_token" "$trading_user" Sell "$marketable_sell_price" "accounting-bootstrap"
+wait_accounting_period
+capture_metrics initial
 
 inventory_long_pass=true
 inventory_short_pass=true
@@ -583,64 +1058,117 @@ if [[ "$profile" == "inventory-skew" ]]; then
 fi
 
 log "warmup for ${warmup_seconds}s"
-run_window "$warmup_seconds" warmup false
+run_window "$warmup_seconds" warmup true
 capture_metrics warmup-complete
 
 pause_outage_pass=true
 pause_recovery_pass=true
 if [[ "$profile" == "pause-and-cancel" ]]; then
     log "stopping marketdata to exercise PauseAndCancel"
+    outage_check_started_seconds=$SECONDS
+    outage_deadline=$((SECONDS + recovery_timeout_seconds))
     "${compose[@]}" stop marketdata
-    if ! wait_metric_equals \
-        "bot_market_data_reference_eligible{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
-        0 "$recovery_timeout_seconds"; then
+    outage_remaining=$((outage_deadline - SECONDS))
+    if (( outage_remaining <= 0 )); then
         pause_outage_pass=false
+        outage_remaining=1
     fi
     if ! wait_metric_equals \
-        "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
-        0 "$recovery_timeout_seconds"; then
+        'count(bot_market_data_reference_eligible{service_name="b3-market-maker-bot",reason="disconnected"} == 0)' \
+        3 "$outage_remaining"; then
+        pause_outage_pass=false
+    fi
+    outage_remaining=$((outage_deadline - SECONDS))
+    if (( outage_remaining <= 0 )); then
+        pause_outage_pass=false
+        outage_remaining=1
+    fi
+    if ! wait_metric_equals \
+        'sum(bot_orders_open{service_name="b3-market-maker-bot"})' \
+        0 "$outage_remaining"; then
+        pause_outage_pass=false
+    fi
+    outage_cancellation_elapsed_seconds=$((SECONDS - outage_check_started_seconds))
+    if (( outage_cancellation_elapsed_seconds > recovery_timeout_seconds )); then
         pause_outage_pass=false
     fi
     capture_metrics outage
-    sleep "$outage_seconds"
+    outage_started=$SECONDS
+    while (( SECONDS - outage_started < outage_seconds )); do
+        sleep "$((outage_seconds - (SECONDS - outage_started) < 10 ? outage_seconds - (SECONDS - outage_started) : 10))"
+        capture_runtime_state outage-hold
+    done
 
-    log "starting marketdata and printing an end-client cross to supply a fresh current-epoch trade"
+    log "starting marketdata and waiting for the bot to reconnect"
+    recovery_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    recovery_started_seconds=$SECONDS
+    recovery_deadline=$((SECONDS + recovery_timeout_seconds))
     "${compose[@]}" start marketdata
-    sleep 3
-    sell_response="$(curl -fsS --max-time 10 \
-        -H "$(printf 'Authorization: Bearer %s' "$counterparty_token")" \
-        -H 'Content-Type: application/json' \
-        -d "$(jq -cn --arg symbol "$symbol" --argjson quantity "$quantity" --argjson price "$reference_cross_price" \
-            '{symbol:$symbol,side:"Sell",type:"Limit",quantity:$quantity,price:$price}')" \
-        "${base_url}/api/orders")"
-    [[ "$(jq -r '.status // ""' <<<"$sell_response")" != "Rejected" ]] || {
-        log "ERROR: recovery-cross sell order was rejected: $sell_response"
-        exit 1
-    }
-    sell_id="$(jq -er '.clOrdId | tostring' <<<"$sell_response")"
-    submit_order "$trading_token" "$trading_user" Buy "$reference_cross_price" "feed-recovery-cross"
-    wait_order_filled "$counterparty_token" "$sell_id" >/dev/null
+    recovery_remaining=$((recovery_deadline - SECONDS))
+    if (( recovery_remaining <= 0 )) ||
+        ! wait_service_healthy marketdata "$recovery_remaining"; then
+        pause_recovery_pass=false
+    fi
+    recovery_remaining=$((recovery_deadline - SECONDS))
+    if (( recovery_remaining <= 0 )) ||
+        ! wait_bot_log_since "$recovery_started_at" "MarketData connection state: Connected" "$recovery_remaining"; then
+        pause_recovery_pass=false
+    fi
+    if $pause_recovery_pass; then
+        log "printing ${recovery_cross_attempts} post-gap cross rounds for every configured symbol"
+        for ((attempt = 1; attempt <= recovery_cross_attempts; attempt++)); do
+            while IFS=$'\t' read -r recovery_symbol recovery_quantity recovery_price; do
+                submit_recovery_cross "$recovery_symbol" "$recovery_quantity" "$recovery_price" \
+                    "feed-recovery-cross-${attempt}"
+            done < <(jq -r '.[] | [.symbol,.quantity,.referencePrice] | @tsv' <<<"$configured_instruments_json")
+            if (( attempt < recovery_cross_attempts )); then
+                sleep "$recovery_cross_interval_seconds"
+            fi
+        done
 
-    if ! wait_metric_equals \
-        "bot_market_data_reference_eligible{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
-        1 "$recovery_timeout_seconds"; then
+        for recovery_symbol in "${configured_symbols[@]}"; do
+            recovery_remaining=$((recovery_deadline - SECONDS))
+            if (( recovery_remaining <= 0 )) ||
+                ! wait_metric_equals \
+                    "count(bot_market_data_reference_age_seconds{service_name=\"b3-market-maker-bot\",symbol=\"$recovery_symbol\",exported_source=\"last_trade_price\"} < 15)" \
+                    1 "$recovery_remaining"; then
+                pause_recovery_pass=false
+                continue
+            fi
+            recovery_remaining=$((recovery_deadline - SECONDS))
+            if (( recovery_remaining <= 0 )) ||
+                ! wait_metric_equals \
+                    "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$recovery_symbol\"}" \
+                    2 "$recovery_remaining"; then
+                pause_recovery_pass=false
+            fi
+        done
+    fi
+    recovery_elapsed_seconds=$((SECONDS - recovery_started_seconds))
+    if (( recovery_elapsed_seconds > recovery_timeout_seconds )); then
         pause_recovery_pass=false
     fi
-    if ! wait_metric_equals \
-        "count(bot_market_data_reference_age_seconds{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\",source=\"trade\"})" \
-        1 "$recovery_timeout_seconds"; then
-        pause_recovery_pass=false
-    fi
-    if ! wait_metric_equals \
-        "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
-        2 "$recovery_timeout_seconds"; then
-        pause_recovery_pass=false
+    if ! $pause_recovery_pass; then
+        log "ERROR: fresh three-symbol recovery did not complete within ${recovery_timeout_seconds}s"
     fi
     capture_metrics recovered
 fi
 
 log "evidence window for ${duration_seconds}s"
 run_window "$duration_seconds" duration true
+log "waiting for exact final quote state"
+for configured_symbol in "${configured_symbols[@]}"; do
+    if [[ "$profile" == "pause-and-cancel" ]]; then
+        wait_metric_equals \
+            "bot_market_data_reference_eligible{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}" \
+            1 "$recovery_timeout_seconds" || true
+    fi
+    wait_metric_equals \
+        "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}" \
+        2 "$recovery_timeout_seconds" || true
+done
+wait_metric_equals 'sum(bot_orders_open{service_name="b3-market-maker-bot"})' \
+    6 "$recovery_timeout_seconds" || true
 capture_metrics final
 "${compose[@]}" ps --format json >"${artifacts_dir}/compose-ps.json"
 
@@ -656,6 +1184,25 @@ numeric_test() {
 
 final_open_symbol="$(metric_value "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
 final_open_total="$(metric_value 'sum(bot_orders_open{service_name="b3-market-maker-bot"})')"
+final_quotes_exact=true
+final_quote_state='[]'
+for configured_symbol in "${configured_symbols[@]}"; do
+    symbol_open="$(metric_value "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}")"
+    symbol_eligible=null
+    if [[ "$profile" == "pause-and-cancel" ]]; then
+        symbol_eligible="$(metric_value "bot_market_data_reference_eligible{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}")"
+    fi
+    final_quote_state="$(jq -cn \
+        --argjson rows "$final_quote_state" \
+        --arg symbol "$configured_symbol" \
+        --argjson openOrders "$symbol_open" \
+        --argjson eligible "$symbol_eligible" \
+        '$rows + [{symbol:$symbol,openOrders:$openOrders,eligible:$eligible}]')"
+    if ! numeric_test "$symbol_open == 2" ||
+        [[ "$profile" == "pause-and-cancel" && "$symbol_eligible" != "1" ]]; then
+        final_quotes_exact=false
+    fi
+done
 corruption_total="$(sum_metric_values \
     bot_pnl_fills_unknown_order_total \
     bot_pnl_fills_duplicate_total \
@@ -679,16 +1226,66 @@ continuity="$(jq -s --arg symbol "$symbol" '
     if ($rows | length) == 0 then 0
     else (([$rows[] | select(.value == 2)] | length) / ($rows | length))
     end' "$samples_jsonl")"
+open_order_bounds_report="$(jq -s '
+  [.[] | select(.metric == "bot_orders_open")] as $rows |
+  {
+    perSymbol: (
+      $rows
+      | group_by(.labels.symbol)
+      | map({symbol: .[0].labels.symbol, maxOpenOrders: (map(.value) | max)})
+    ),
+    maxTotal: (
+      $rows
+      | group_by(.timestamp_utc + "|" + .phase)
+      | map(map(.value) | add)
+      | max
+    )
+  }
+' "$samples_jsonl")"
+open_orders_bounded="$(jq -r '
+  (.perSymbol | length) == 3 and
+  all(.perSymbol[]; .maxOpenOrders <= 2) and
+  .maxTotal <= 6
+' <<<"$open_order_bounds_report")"
+printf '%s\n' "$open_order_bounds_report" >"${artifacts_dir}/open-order-bounds.json"
+accounting_period_count="$(jq -s '[.[].accountingPeriodStartedAtUtc] | unique | length' "$samples_jsonl")"
+counter_monotonic_report="$(jq -s '
+  reduce (.[] | select(.metric | endswith("_total"))) as $row (
+    {last: {}, violations: []};
+    ($row.metric + "|" + ($row.labels | tojson)) as $key |
+    (if (.last | has($key)) and $row.value < .last[$key] then
+       .violations += [{
+         metric: $row.metric,
+         labels: $row.labels,
+         previous: .last[$key],
+         current: $row.value,
+         phase: $row.phase,
+         timestampUtc: $row.timestamp_utc
+       }]
+     else . end) |
+    .last[$key] = $row.value
+  )
+' "$samples_jsonl")"
+counter_monotonic="$(jq -r '.violations | length == 0' <<<"$counter_monotonic_report")"
+printf '%s\n' "$counter_monotonic_report" >"${artifacts_dir}/counter-monotonicity.json"
+runtime_final_running="$(jq -s '
+  [.[] | select(.phase == "final")] as $rows |
+  ($rows | length) > 0 and all($rows[]; .status == "running" and .restartCount == 0)
+' "$runtime_jsonl")"
+max_restart_count="$(jq -s '[.[].restartCount] | max' "$runtime_jsonl")"
 
-record_check "open-orders-per-symbol" \
-    "$(numeric_test "$final_open_symbol <= 2" && echo true || echo false)" \
-    "<=2" "$final_open_symbol"
+record_check "final-quotes-per-eligible-symbol" "$final_quotes_exact" \
+    "exactly 2 open quotes per configured symbol; strict-profile eligibility=1" \
+    "$(jq -c . <<<"$final_quote_state")"
 record_check "open-orders-total" \
-    "$(numeric_test "$final_open_total <= 6" && echo true || echo false)" \
-    "<=6" "$final_open_total"
+    "$(numeric_test "$final_open_total == 6" && echo true || echo false)" \
+    "exactly 6 at successful completion" "$final_open_total"
 record_check "quote-continuity" \
     "$(numeric_test "$continuity >= 0.90" && echo true || echo false)" \
     ">=90% duration samples have two PETR4 quotes" "$continuity"
+record_check "open-orders-bounded-during-run" "$open_orders_bounded" \
+    "every sampled symbol<=2 and sampled total<=6" \
+    "$(jq -c . <<<"$open_order_bounds_report")"
 record_check "accounting-corruption-counters" \
     "$(numeric_test "$corruption_total == 0" && echo true || echo false)" \
     "0" "$corruption_total"
@@ -701,6 +1298,17 @@ record_check "own-fills-accounted" \
 record_check "operational-error-counters" \
     "$(numeric_test "$operational_errors == 0" && echo true || echo false)" \
     "0 submit/reject/cancel error events" "$operational_errors"
+record_check "runtime-containers-stable" \
+    "$($runtime_stable && [[ "$runtime_final_running" == "true" ]] && echo true || echo false)" \
+    "same container/image IDs, restartCount=0 throughout, all services running at final" \
+    "stable=$runtime_stable finalRunning=$runtime_final_running maxRestartCount=$max_restart_count"
+record_check "accounting-period-stable" \
+    "$($accounting_stable && [[ "$accounting_period_count" == "1" ]] && echo true || echo false)" \
+    "one non-empty accountingPeriodStartedAtUtc across every sample" \
+    "stable=$accounting_stable distinct=$accounting_period_count value=$accounting_period_started_at_utc"
+record_check "tracked-counters-monotonic" "$counter_monotonic" \
+    "every tracked *_total series is monotonically non-decreasing" \
+    "violations=$(jq -c '.violations' <<<"$counter_monotonic_report")"
 
 configured_spread="$(metric_value "bot_strategy_configured_half_spread_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
 effective_spread="$(metric_value "bot_strategy_effective_half_spread_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
@@ -729,11 +1337,44 @@ case "$profile" in
         ;;
     pause-and-cancel)
         record_check "pause-and-cancel-outage" "$pause_outage_pass" \
-            "eligibility=0 and openOrders=0 during outage" "passed=$pause_outage_pass"
+            "eligibility=0 and openOrders=0 for every configured symbol within timeout" \
+            "passed=$pause_outage_pass elapsedSeconds=$outage_cancellation_elapsed_seconds"
         record_check "pause-and-cancel-recovery" "$pause_recovery_pass" \
-            "fresh current-epoch trade, eligibility=1, openOrders=2" "passed=$pause_recovery_pass"
+            "fresh current-epoch trade, eligibility=1, openOrders=2 for every configured symbol within timeout" \
+            "passed=$pause_recovery_pass elapsedSeconds=$recovery_elapsed_seconds"
         ;;
 esac
+
+acceptance_candidate=false
+eligibility_reasons='[]'
+if ! $timing_eligible; then
+    eligibility_reasons="$(jq -cn --argjson rows "$eligibility_reasons" \
+        '$rows + ["timing below acceptance minimum"]')"
+fi
+if $git_dirty; then
+    eligibility_reasons="$(jq -cn --argjson rows "$eligibility_reasons" \
+        '$rows + ["checkout contains tracked changes"]')"
+fi
+if [[ -z "$suite_manifest" ]]; then
+    eligibility_reasons="$(jq -cn --argjson rows "$eligibility_reasons" \
+        '$rows + ["SOAK_SUITE_MANIFEST was not provided"]')"
+elif ! $suite_compatible; then
+    eligibility_reasons="$(jq -cn --argjson rows "$eligibility_reasons" \
+        '$rows + ["suite compatibility was not verified"]')"
+fi
+if $timing_eligible && ! $git_dirty && $suite_compatible; then
+    acceptance_candidate=true
+fi
+
+jq \
+    --arg accountingPeriodStartedAtUtc "$accounting_period_started_at_utc" \
+    --argjson acceptanceCandidate "$acceptance_candidate" \
+    --argjson eligibilityReasons "$eligibility_reasons" '
+      .accountingPeriodStartedAtUtc = $accountingPeriodStartedAtUtc |
+      .acceptanceCandidate = $acceptanceCandidate |
+      .eligibilityReasons = $eligibilityReasons
+    ' "${artifacts_dir}/run.json" >"${artifacts_dir}/run.json.next"
+mv "${artifacts_dir}/run.json.next" "${artifacts_dir}/run.json"
 
 jq -Rn \
     --slurpfile run "${artifacts_dir}/run.json" '
@@ -746,8 +1387,51 @@ jq -Rn \
     $run[0] + {
       finishedAtUtc: (now | todateiso8601),
       checks: $checks,
-      passed: ($checks | all(.passed))
+      passed: ($checks | all(.passed)),
+      acceptanceEligible: ($run[0].acceptanceCandidate and ($checks | all(.passed))),
+      evidenceClass: (
+        if $run[0].acceptanceCandidate and ($checks | all(.passed))
+        then "acceptance-profile"
+        else "smoke"
+        end
+      )
     }' <"$checks_tsv" >"${artifacts_dir}/summary.json"
+
+jq \
+    --slurpfile summary "${artifacts_dir}/summary.json" '
+      .acceptanceEligible = $summary[0].acceptanceEligible |
+      .evidenceClass = $summary[0].evidenceClass |
+      .finishedAtUtc = $summary[0].finishedAtUtc
+    ' "${artifacts_dir}/run.json" >"${artifacts_dir}/run.json.next"
+mv "${artifacts_dir}/run.json.next" "${artifacts_dir}/run.json"
+
+if jq -e '.passed and .acceptanceEligible' >/dev/null "${artifacts_dir}/summary.json"; then
+    suite_manifest_next="${suite_manifest}.next"
+    jq \
+        --arg profile "$profile" \
+        --arg artifactDirectory "$artifacts_dir" \
+        --slurpfile summary "${artifacts_dir}/summary.json" '
+          .runs[$profile] = {
+            runId: $summary[0].runId,
+            artifactDirectory: $artifactDirectory,
+            gitSha: $summary[0].gitSha,
+            runtimeImageIds: $summary[0].images,
+            settings: $summary[0].settings,
+            workload: $summary[0].workload,
+            profileConfiguration: $summary[0].profileConfiguration,
+            accountingPeriodStartedAtUtc: $summary[0].accountingPeriodStartedAtUtc,
+            acceptanceEligible: true,
+            passed: true,
+            finishedAtUtc: $summary[0].finishedAtUtc
+          } |
+          .updatedAtUtc = (now | todateiso8601) |
+          .suiteAcceptanceEligible = (
+            [.expectedProfiles[] as $expectedProfile |
+              .runs[$expectedProfile].acceptanceEligible == true] | all
+          )
+        ' "$suite_manifest" >"$suite_manifest_next"
+    mv "$suite_manifest_next" "$suite_manifest"
+fi
 
 capture_logs
 if ! jq -e '.passed' "${artifacts_dir}/summary.json" >/dev/null; then

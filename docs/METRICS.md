@@ -103,6 +103,14 @@ Other bounded diagnostic records used by the strategy soak are:
   `connected`, `previousAdditionalTicks`, `additionalTicks`;
 - `[mm-feed]`: `symbol`, `available`, `reason`, `epoch`, `age`, `source`,
   and suppressed-decision `side`;
+
+The soak helper copies the current `accountingPeriodStartedAtUtc` into every
+metric sample and fails if it changes. It also verifies every collected
+counter (`*_total` after Prometheus translation) is monotonically
+non-decreasing, so a bot restart cannot erase earlier integrity/error evidence.
+In the bundled Prometheus view, the scrape target's `source` label causes the
+instrument's reference-source attribute to appear as `exported_source`; the
+helper normalizes that bounded value into its CSV `source` column.
 - `[mm-pnl]` fill diagnostics: `symbol`, `clordid`, `tradeId`, quantities,
   prices, and a bounded reason;
 - `[mm] safety cap hit`: `OpenCount`, `MaxOpenOrders`, `symbol`, `side`.

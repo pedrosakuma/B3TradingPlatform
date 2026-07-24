@@ -404,12 +404,16 @@ jobs:
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.conformance.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.market-maker.yml config --quiet
-          MM_SOAK_PROJECT_NAME=validate-mm-soak docker compose \
+          AUTH_MODE=Entra MM_SOAK_PROJECT_NAME=validate-mm-soak docker compose \
             -f docker/docker-compose.yml \
             -f docker/docker-compose.market-maker.yml \
             -f docker/docker-compose.observability.yml \
             -f docker/docker-compose.market-maker-soak.yml \
-            config --quiet
+            config --format json |
+            jq -e '
+              .services["trading-host"].environment.Trading__Auth__Mode == "Local" and
+              .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled == "true"
+            ' >/dev/null
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.real.yml -f docker/docker-compose.market-maker.yml -f docker/docker-compose.conformance.yml -f docker/docker-compose.market-maker-conformance.yml config --quiet
 
       - name: docker compose auth mode wiring smoke
