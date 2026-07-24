@@ -385,6 +385,121 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task DelistedCancelSubmitFailure_RetriesAfterNonzeroThrottle()
+    {
+        var minRequoteInterval = TimeSpan.FromMilliseconds(50);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            TimeProvider.System,
+            options => options.MinRequoteInterval = minRequoteInterval,
+            out _,
+            out var marketData);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        Assert.True(tracker.TryGet(originalClOrdId, out var resting));
+        resting.SubmittedAtUtc = tracker.UtcNow - TimeSpan.FromSeconds(1);
+
+        var attempt = 0;
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (Interlocked.Increment(ref attempt) == 1)
+                throw new InvalidOperationException("test transport failure");
+            retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        marketData.SymbolAvailabilityChanged += worker.OnSymbolAvailabilityChanged;
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        try
+        {
+            marketData.NotifySymbolDelisted(instrument.Symbol);
+            await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(2, client.SubmittedCancels.Count);
+            Assert.All(client.SubmittedCancels,
+                cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+            Assert.True(tracker.TryResolveCancelAttempt(
+                client.SubmittedCancels[^1].ClOrdID.Value,
+                out _,
+                out var reason));
+            Assert.Equal(CancelReason.FeedUnavailable, reason);
+        }
+        finally
+        {
+            marketData.SymbolAvailabilityChanged -= worker.OnSymbolAvailabilityChanged;
+            cts.Cancel();
+            await reactionLoop;
+        }
+    }
+
+    [Fact]
+    public async Task DelistedCancelReject_RetriesAfterNonzeroThrottleWithoutHotLoop()
+    {
+        var minRequoteInterval = TimeSpan.FromMilliseconds(50);
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            TimeProvider.System,
+            options => options.MinRequoteInterval = minRequoteInterval,
+            out _,
+            out var marketData);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        Assert.True(tracker.TryGet(originalClOrdId, out var resting));
+        resting.SubmittedAtUtc = tracker.UtcNow - TimeSpan.FromSeconds(1);
+
+        var firstSubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retrySubmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 1)
+                firstSubmitted.TrySetResult(true);
+            else if (client.SubmittedCancels.Count == 2)
+                retrySubmitted.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        marketData.SymbolAvailabilityChanged += worker.OnSymbolAvailabilityChanged;
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        try
+        {
+            marketData.NotifySymbolDelisted(instrument.Symbol);
+            await firstSubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var firstCancel = client.SubmittedCancels[0];
+            await worker.HandleEventAsync(client, new OrderRejected
+            {
+                ClOrdID = firstCancel.ClOrdID,
+                OrderId = 0,
+                RejectCode = 1,
+                Reason = "test reject",
+                SeqNum = 1,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, CancellationToken.None);
+
+            await retrySubmitted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var retryCancel = client.SubmittedCancels[1];
+            await worker.HandleEventAsync(client, new OrderRejected
+            {
+                ClOrdID = retryCancel.ClOrdID,
+                OrderId = 0,
+                RejectCode = 1,
+                Reason = "test retry reject",
+                SeqNum = 2,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, CancellationToken.None);
+            await Task.Delay(minRequoteInterval * 2);
+
+            Assert.Equal(2, client.SubmittedCancels.Count);
+            Assert.All(client.SubmittedCancels,
+                cancel => Assert.Equal(originalClOrdId, cancel.OrigClOrdID.Value));
+        }
+        finally
+        {
+            marketData.SymbolAvailabilityChanged -= worker.OnSymbolAvailabilityChanged;
+            cts.Cancel();
+            await reactionLoop;
+        }
+    }
+
+    [Fact]
     public async Task CancelReject_ReplaysInventoryContextThatArrivedWhileCancelWasPending()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);

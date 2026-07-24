@@ -719,7 +719,9 @@ internal sealed class MarketMakerWorker : BackgroundService
             var elapsed = now - lastActivity;
             if (elapsed < _options.MinRequoteInterval)
             {
-                if (reason == CancelReason.InventoryStrategy)
+                if (reason == CancelReason.InventoryStrategy ||
+                    reason == CancelReason.FeedUnavailable ||
+                    isSuppressed)
                 {
                     var remaining = _options.MinRequoteInterval - elapsed;
                     retryAfter = retryAfter is null || remaining < retryAfter
