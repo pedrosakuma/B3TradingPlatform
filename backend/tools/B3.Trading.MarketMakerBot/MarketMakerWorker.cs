@@ -124,6 +124,7 @@ internal sealed class MarketMakerWorker : BackgroundService
 
         _client = new EntryPointClient(clientOpts);
         _marketData.BookOrderChanged += OnBookOrderChanged;
+        _marketData.SymbolAvailabilityChanged += OnSymbolAvailabilityChanged;
         try
         {
             _log.LogInformation("[mm] connecting to {Endpoint} session={Session} verId={VerId}",
@@ -161,6 +162,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         finally
         {
             _marketData.BookOrderChanged -= OnBookOrderChanged;
+            _marketData.SymbolAvailabilityChanged -= OnSymbolAvailabilityChanged;
             _pricingContextSignals.Writer.TryComplete();
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
             await _marketData.DisposeAsync();
@@ -560,6 +562,9 @@ internal sealed class MarketMakerWorker : BackgroundService
         SignalPricingContextChanged(symbol, CancelReason.PriceDrift);
     }
 
+    internal void OnSymbolAvailabilityChanged(string symbol) =>
+        SignalPricingContextChanged(symbol, CancelReason.FeedUnavailable);
+
     /// <summary>
     /// Coalesces a pricing-context change for one configured symbol. A signal
     /// arriving while that symbol is already queued is folded into the queued
@@ -689,13 +694,18 @@ internal sealed class MarketMakerWorker : BackgroundService
 
         foreach (var isBuy in new[] { true, false })
         {
-            if (!_tracker.TryGetActiveSideOrder(symbol, isBuy, out var resting)) continue;
+            var decision = BuildQuoteDecision(instr, isBuy);
+            if (!_tracker.TryGetActiveSideOrder(symbol, isBuy, out var resting))
+            {
+                if (decision.ShouldQuote)
+                    await QuoteSideAsync(client, instr, isBuy, ct);
+                continue;
+            }
             if (resting.PendingCancelClOrdId is not null)
             {
                 MarkPricingContextDirty(symbol, reason);
                 continue;
             }
-            var decision = BuildQuoteDecision(instr, isBuy);
             var isSuppressed = !decision.ShouldQuote || decision.Price is null;
             var target = decision.Price;
             if (!isSuppressed && Math.Abs(resting.Price - target!.Value) <= maxDeviation) continue;

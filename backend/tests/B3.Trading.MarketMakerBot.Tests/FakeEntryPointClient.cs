@@ -21,12 +21,15 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
 {
     public List<NewOrderRequest> SubmittedOrders { get; } = new();
     public List<CancelOrderRequest> SubmittedCancels { get; } = new();
+    public Func<NewOrderRequest, CancellationToken, Task>? SubmitHandler { get; set; }
     public Func<CancelOrderRequest, CancellationToken, Task>? CancelHandler { get; set; }
 
-    public Task<ClOrdID> SubmitAsync(NewOrderRequest request, CancellationToken ct)
+    public async Task<ClOrdID> SubmitAsync(NewOrderRequest request, CancellationToken ct)
     {
         SubmittedOrders.Add(request);
-        return Task.FromResult(request.ClOrdID);
+        if (SubmitHandler is not null)
+            await SubmitHandler(request, ct);
+        return request.ClOrdID;
     }
 
     public async Task CancelAsync(CancelOrderRequest request, CancellationToken ct)
