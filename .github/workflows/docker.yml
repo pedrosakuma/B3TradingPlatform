@@ -423,6 +423,9 @@ jobs:
       - name: docker compose auth mode wiring smoke
         run: python3 docker/test/compose-auth-config-smoke.py
 
+      - name: market-maker soak helper self-tests
+        run: scripts/soak/test-market-maker-soak-lib.sh
+
       - name: docker compose config (Hybrid auth mapping)
         env:
           TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa

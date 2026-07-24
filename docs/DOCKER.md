@@ -341,8 +341,11 @@ manifest and compares actual runtime `sha256:` image IDs across profiles;
 mutable tags alone are not accepted. It also proves container/image/start/restart
 continuity for all six critical services, allowing only the explicitly recorded
 marketdata stop/start in the outage profile. Evidence paths are restricted to
-the checkout's ignored `soak-artifacts/` tree. Multi-hour evidence is
-operator-run and is not part of normal CI.
+the checkout's ignored `soak-artifacts/` tree. Missing Prometheus series are
+recorded as absent and fail rather than being treated as zero. Pre-run teardown
+is mandatory, and final teardown failures invalidate the result while retaining
+aggregated cleanup evidence. Multi-hour evidence is operator-run and is not
+part of normal CI.
 
 ### Out of scope
 

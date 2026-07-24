@@ -1856,6 +1856,7 @@ public class MarketMakerWorkerTests : IDisposable
             SeqNum = 1,
             SendingTime = DateTimeOffset.UtcNow,
         }, CancellationToken.None);
+        listener.RecordObservableInstruments();
 
         Assert.Contains(expectedMetric, measurements);
         var unexpectedMetric = cancelReason == CancelReason.StaleOrder

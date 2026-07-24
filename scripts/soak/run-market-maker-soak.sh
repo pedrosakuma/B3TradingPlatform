@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
+source "$ROOT/scripts/soak/market-maker-soak-lib.sh"
 
 profile=""
 dry_run=false
@@ -204,6 +205,10 @@ case "$profile" in
         exit 3
         ;;
 esac
+if [[ "$profile" == "pause-and-cancel" ]] && (( outage_seconds == 0 )); then
+    echo "ERROR: SOAK_OUTAGE_SECONDS must be positive for pause-and-cancel" >&2
+    exit 3
+fi
 
 readonly compose=(
     docker compose
@@ -436,15 +441,20 @@ if [[ -n "$suite_manifest" ]]; then
 fi
 readonly samples_jsonl="${artifacts_dir}/samples.jsonl"
 readonly samples_csv="${artifacts_dir}/samples.csv"
+readonly metric_presence_jsonl="${artifacts_dir}/metric-presence.jsonl"
+readonly metric_presence_csv="${artifacts_dir}/metric-presence.csv"
 readonly workload_csv="${artifacts_dir}/workload.csv"
 readonly runtime_jsonl="${artifacts_dir}/runtime.jsonl"
 readonly runtime_csv="${artifacts_dir}/runtime.csv"
 readonly runtime_events_jsonl="${artifacts_dir}/runtime-events.jsonl"
 readonly checks_tsv="${artifacts_dir}/checks.tsv"
-printf 'timestamp_utc,phase,accountingPeriodStartedAtUtc,metric,symbol,side,reason,available,source,value\n' >"$samples_csv"
+readonly cleanup_errors_file="${artifacts_dir}/cleanup-errors.json"
+printf 'timestamp_utc,phase,accountingPeriodPresent,accountingPeriodStartedAtUtc,metric,symbol,side,reason,available,source,present,value\n' >"$samples_csv"
+printf 'timestamp_utc,phase,metric,symbol,required,present,seriesCount,value\n' >"$metric_presence_csv"
 printf 'timestamp_utc,phase,user,side,clOrdId,fillLatencySeconds\n' >"$workload_csv"
 printf 'timestamp_utc,phase,service,containerId,imageId,startedAtUtc,restartCount,status\n' >"$runtime_csv"
 : >"$samples_jsonl"
+: >"$metric_presence_jsonl"
 : >"$runtime_jsonl"
 : >"$runtime_events_jsonl"
 : >"$checks_tsv"
@@ -458,28 +468,131 @@ capture_logs() {
     $stack_started || return 0
     "${compose[@]}" logs --no-color --timestamps \
         matching-platform marketdata trading-host market-maker-bot otel-collector prometheus \
-        >"${artifacts_dir}/compose.log" 2>&1 || true
+        >"${artifacts_dir}/compose.log" 2>&1
+}
+
+stop_runtime_event_monitor_for_cleanup() {
+    local wait_status
+    [[ -n "${runtime_event_monitor_pid:-}" ]] || return 0
+    kill -0 "$runtime_event_monitor_pid" 2>/dev/null || return 0
+    kill "$runtime_event_monitor_pid" 2>/dev/null || return $?
+    wait "$runtime_event_monitor_pid" 2>/dev/null || {
+        wait_status=$?
+        [[ "$wait_status" == "130" || "$wait_status" == "143" ]]
+    }
+}
+
+teardown_stack_for_cleanup() {
+    $stack_started || return 0
+    $keep_stack && return 0
+    "${compose[@]}" down -v --remove-orphans >"${artifacts_dir}/cleanup-compose-down.log" 2>&1
+}
+
+register_accepted_suite_run() {
+    local suite_manifest_next
+    [[ -n "${suite_manifest:-}" ]] || return 0
+    [[ -f "${artifacts_dir}/summary.json" ]] || return 0
+    jq -e '.passed and .acceptanceEligible' >/dev/null "${artifacts_dir}/summary.json" || return 0
+    suite_manifest_next="${suite_manifest}.next"
+    jq \
+        --arg profile "$profile" \
+        --arg artifactDirectory "$artifacts_dir_relative" \
+        --slurpfile summary "${artifacts_dir}/summary.json" '
+          .runs[$profile] = {
+            runId: $summary[0].runId,
+            artifactDirectory: $artifactDirectory,
+            gitSha: $summary[0].gitSha,
+            runtimeImageIds: $summary[0].images,
+            settings: $summary[0].settings,
+            workload: $summary[0].workload,
+            profileConfiguration: $summary[0].profileConfiguration,
+            accountingPeriodStartedAtUtc: $summary[0].accountingPeriodStartedAtUtc,
+            acceptanceEligible: true,
+            passed: true,
+            finishedAtUtc: $summary[0].finishedAtUtc
+          } |
+          .updatedAtUtc = (now | todateiso8601) |
+          .suiteAcceptanceEligible = (
+            [.expectedProfiles[] as $expectedProfile |
+              .runs[$expectedProfile].acceptanceEligible == true] | all
+          )
+        ' "$suite_manifest" >"$suite_manifest_next" &&
+        mv "$suite_manifest_next" "$suite_manifest"
+}
+
+write_cleanup_evidence() {
+    cleanup_json="$(jq -cn \
+        --argjson originalExitCode "$original_status" \
+        --argjson cleanupExitCode "$cleanup_status" \
+        --slurpfile errors "$cleanup_errors_file" \
+        '{
+          passed: ($cleanupExitCode == 0),
+          originalExitCode: $originalExitCode,
+          cleanupExitCode: $cleanupExitCode,
+          errors: $errors[0]
+        }')"
+    printf '%s\n' "$cleanup_json" >"${artifacts_dir}/cleanup.json"
+    if [[ -f "${artifacts_dir}/summary.json" ]]; then
+        soak_apply_cleanup_to_summary "${artifacts_dir}/summary.json" "$cleanup_json"
+    fi
 }
 
 cleanup() {
-    local status=$?
-    if [[ -n "${runtime_event_monitor_pid:-}" ]] &&
-        kill -0 "$runtime_event_monitor_pid" 2>/dev/null; then
-        kill "$runtime_event_monitor_pid" 2>/dev/null || true
-        wait "$runtime_event_monitor_pid" 2>/dev/null || true
+    original_status=$?
+    cleanup_status=0
+    local final_status evidence_status registration_status
+    trap - EXIT
+    if ! soak_run_cleanup_steps "$cleanup_errors_file" \
+        stop-runtime-event-monitor stop_runtime_event_monitor_for_cleanup \
+        capture-compose-logs capture_logs \
+        compose-down teardown_stack_for_cleanup; then
+        cleanup_status=1
     fi
-    capture_logs
-    if $stack_started && ! $keep_stack; then
-        "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+
+    if write_cleanup_evidence; then
+        :
+    else
+        evidence_status=$?
+        cleanup_status=1
+        if ! soak_append_cleanup_error \
+            "$cleanup_errors_file" record-cleanup-evidence "$evidence_status"; then
+            log "ERROR: failed to append cleanup-evidence recording error"
+        fi
+        if ! write_cleanup_evidence; then
+            log "ERROR: failed to record failed cleanup status in evidence"
+        fi
     fi
-    if (( status != 0 )); then
-        log "FAILED (exit $status); evidence retained in $artifacts_dir_relative"
+
+    if (( original_status == 0 && cleanup_status == 0 )); then
+        if register_accepted_suite_run; then
+            :
+        else
+            registration_status=$?
+            cleanup_status=1
+            if ! soak_append_cleanup_error \
+                "$cleanup_errors_file" register-suite-manifest "$registration_status"; then
+                log "ERROR: failed to append suite-registration cleanup error"
+            fi
+            if ! write_cleanup_evidence; then
+                log "ERROR: failed to record suite-registration failure in evidence"
+            fi
+        fi
+    fi
+
+    final_status="$(soak_cleanup_exit_status "$original_status" "$cleanup_status")"
+    if (( original_status != 0 )); then
+        log "FAILED (exit $original_status); evidence retained in $artifacts_dir_relative"
+    elif (( cleanup_status != 0 )); then
+        log "FAILED during cleanup; evidence retained in $artifacts_dir_relative"
     elif $keep_stack; then
         log "PASS; stack retained for project $project_name and evidence is in $artifacts_dir_relative"
     else
         log "PASS; isolated stack removed and evidence is in $artifacts_dir_relative"
     fi
-    exit "$status"
+    if (( cleanup_status != 0 )); then
+        log "cleanup errors: $(jq -c . "$cleanup_errors_file")"
+    fi
+    exit "$final_status"
 }
 trap cleanup EXIT
 
@@ -497,7 +610,7 @@ if (( warmup_seconds >= 600 && duration_seconds >= 7200 && sample_interval_secon
 fi
 configured_symbols_json="$(printf '%s\n' "${configured_symbols[@]}" | jq -R . | jq -s .)"
 jq -n \
-    --arg schemaVersion "3" \
+    --arg schemaVersion "4" \
     --arg runId "$run_id" \
     --arg profile "$profile" \
     --arg projectName "$project_name" \
@@ -588,7 +701,10 @@ jq -n \
       eligibilityReasons: ["runtime images and suite compatibility have not been verified"]
     }' >"${artifacts_dir}/run.json"
 
-"${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+if ! "${compose[@]}" down -v --remove-orphans >"${artifacts_dir}/pre-run-compose-down.log" 2>&1; then
+    log "ERROR: pre-run isolation teardown failed; refusing to start project '$project_name'"
+    exit 1
+fi
 if $build_images; then
     log "building trading-host, market-maker-bot, and local alert receiver"
     "${compose[@]}" build trading-host market-maker-bot alert-receiver
@@ -1048,17 +1164,28 @@ metric_names=(
     bot_market_data_quote_suppressed_total
     bot_market_data_reference_age_seconds
     bot_market_data_reference_eligible
+    bot_market_data_reference_eligible_current
     bot_orders_feed_unavailable_cancel_total
     bot_orders_feed_unavailable_cancel_rejected_total
     bot_orders_feed_unavailable_cancel_submit_failed_total
     bot_orders_feed_unavailable_cancel_retry_total
     bot_orders_cancel_ack_expired_total
 )
-metric_value() {
+metric_observation() {
     local query="$1" body
     body="$(prom_query "$query")"
-    jq -r 'if (.data.result | length) == 0 then "0" else ([.data.result[].value[1] | tonumber] | add | tostring) end' \
-        <<<"$body"
+    soak_metric_sample <<<"$body"
+}
+
+metric_value() {
+    local query="$1" sample
+    sample="$(metric_observation "$query")"
+    if [[ "$(jq -r '.present' <<<"$sample")" != "true" ||
+        "$(jq -r '.value' <<<"$sample")" == "null" ]]; then
+        log "ERROR: mandatory Prometheus series is absent or non-numeric: $query"
+        return 1
+    fi
+    jq -r '.value' <<<"$sample"
 }
 
 sum_metric_values() {
@@ -1133,6 +1260,127 @@ collect_all_metrics() {
     jq -cn --argjson result "$results" '{data:{result:$result}}'
 }
 
+mandatory_metric_requirements() {
+    local phase="$1"
+    jq -cn \
+        --arg profile "$profile" \
+        --arg phase "$phase" '
+      def symbol($metric): {metric:$metric,scope:"symbol"};
+      def target($metric): {metric:$metric,scope:"target"};
+      def global($metric): {metric:$metric,scope:"global"};
+      [
+        symbol("bot_position_net_quantity"),
+        symbol("bot_position_average_entry_price"),
+        symbol("bot_orders_open"),
+        symbol("bot_strategy_configured_half_spread_ticks"),
+        symbol("bot_strategy_effective_half_spread_ticks"),
+        symbol("bot_pnl_realized"),
+        symbol("bot_orders_submitted_total"),
+        symbol("bot_orders_submit_failed_total"),
+        symbol("bot_fills_received_total"),
+        symbol("bot_pnl_fills_applied_total"),
+        symbol("bot_pnl_fills_duplicate_total"),
+        symbol("bot_pnl_fills_invalid_total"),
+        symbol("bot_pnl_fills_inconsistent_total"),
+        symbol("bot_pnl_fill_delta_mismatch_total"),
+        symbol("bot_orders_rejected_total"),
+        symbol("bot_orders_stale_cancel_rejected_total"),
+        symbol("bot_orders_stale_cancel_submit_failed_total"),
+        symbol("bot_orders_safety_cap_hit_total"),
+        symbol("bot_orders_book_driven_requote_submit_failed_total"),
+        symbol("bot_orders_book_driven_requote_cancel_rejected_total"),
+        symbol("bot_orders_cancel_ack_expired_total"),
+        global("bot_pnl_fills_unknown_order_total"),
+        global("bot_orders_cancelled_total")
+      ]
+      + (if ($phase | IN("outage-settled","outage-hold")) then []
+        elif $profile == "pause-and-cancel" then [
+          symbol("bot_pnl_unrealized"),
+          symbol("bot_pnl_total"),
+          symbol("bot_market_data_reference_age_seconds")
+        ]
+        else [
+          target("bot_pnl_unrealized"),
+          target("bot_pnl_total"),
+          target("bot_market_data_reference_age_seconds")
+        ] end)
+      + (if $profile == "inventory-skew" then [
+          symbol("bot_strategy_inventory_skew_ticks")
+        ] else [] end)
+      + (if $profile == "volatility-spread" then
+          [symbol("bot_strategy_volatility_additional_half_spread_ticks")]
+          + (if ($phase | IN("warmup-complete","duration","final")) then
+              [target("bot_strategy_volatility_move_estimate_ticks")]
+            else [] end)
+        else [] end)
+      + (if $profile == "pause-and-cancel" then [
+          symbol("bot_market_data_reference_eligible"),
+          symbol("bot_market_data_reference_eligible_current"),
+          symbol("bot_market_data_availability_transition_total"),
+          symbol("bot_market_data_quote_suppressed_total"),
+          symbol("bot_orders_feed_unavailable_cancel_total"),
+          symbol("bot_orders_feed_unavailable_cancel_rejected_total"),
+          symbol("bot_orders_feed_unavailable_cancel_submit_failed_total"),
+          symbol("bot_orders_feed_unavailable_cancel_retry_total")
+        ] else [] end)
+    '
+}
+
+record_metric_presence() {
+    local phase="$1" timestamp="$2" body="$3" requirements report rows_csv
+    requirements="$(mandatory_metric_requirements "$phase")"
+    report="$(jq -c \
+        --arg timestampUtc "$timestamp" \
+        --arg phase "$phase" \
+        --arg serviceName "b3-market-maker-bot" \
+        --arg targetSymbol "$symbol" \
+        --argjson symbols "$configured_symbols_json" \
+        --argjson requirements "$requirements" '
+      .data.result as $results |
+      [
+        $requirements[] as $requirement |
+        (if $requirement.scope == "symbol" then $symbols[]
+         elif $requirement.scope == "target" then $targetSymbol
+         else null end) as $symbol |
+        [
+          $results[] |
+          select(.metric.__name__ == $requirement.metric) |
+          select((.metric.service_name // "") == $serviceName) |
+          select($symbol == null or (.metric.symbol // "") == $symbol)
+        ] as $rows |
+        ([
+          $rows[].value[1] |
+          if . == "NaN" or . == "+Inf" or . == "-Inf" then null else tonumber end
+        ]) as $values |
+        {
+          timestampUtc: $timestampUtc,
+          phase: $phase,
+          metric: $requirement.metric,
+          symbol: $symbol,
+          required: true,
+          present: (($rows | length) > 0 and all($values[]; . != null)),
+          seriesCount: ($rows | length),
+          value: (
+            if ($rows | length) == 0 or any($values[]; . == null)
+            then null
+            else ($values | add)
+            end
+          )
+        }
+      ]
+    ' <<<"$body")"
+    jq -c '.[]' <<<"$report" >>"$metric_presence_jsonl"
+    rows_csv="$(jq -r '.[] |
+      [.timestampUtc,.phase,.metric,(.symbol // ""),.required,.present,.seriesCount,(.value // "")] |
+      @csv' <<<"$report")"
+    printf '%s\n' "$rows_csv" >>"$metric_presence_csv"
+    if ! jq -e 'all(.[]; .present)' >/dev/null <<<"$report"; then
+        printf '%s\n' "$report" >"${artifacts_dir}/metric-presence-error.json"
+        log "ERROR: mandatory metric series missing in phase '$phase': $(jq -c '[.[] | select(.present | not) | {metric,symbol}]' <<<"$report")"
+        return 1
+    fi
+}
+
 capture_metrics() {
     local phase="$1" timestamp body started normalized csv_rows current_accounting
     timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1158,6 +1406,7 @@ capture_metrics() {
         }
         sleep 1
     done
+    record_metric_presence "$phase" "$timestamp" "$body"
     if ! normalized="$(jq -c \
       --arg timestamp "$timestamp" \
       --arg phase "$phase" \
@@ -1166,9 +1415,11 @@ capture_metrics() {
       {
         timestamp_utc: $timestamp,
         phase: $phase,
+        accountingPeriodPresent: true,
         accountingPeriodStartedAtUtc: $accountingPeriodStartedAtUtc,
         metric: .metric.__name__,
         labels: (.metric | del(.__name__)),
+        present: true,
         value: (.value[1] as $value | if $value == "NaN" then null else ($value | tonumber) end)
       }' <<<"$body")"; then
         printf '%s\n' "$body" >"${artifacts_dir}/metric-normalization-error.json"
@@ -1184,6 +1435,7 @@ capture_metrics() {
       [
         $timestamp,
         $phase,
+        true,
         $accountingPeriodStartedAtUtc,
         .metric.__name__,
         (.metric.symbol // ""),
@@ -1191,6 +1443,7 @@ capture_metrics() {
         (.metric.reason // ""),
         (.metric.available // ""),
         (.metric.exported_source // .metric.source // ""),
+        true,
         .value[1]
       ] | @csv' <<<"$body")"; then
         printf '%s\n' "$body" >"${artifacts_dir}/metric-csv-error.json"
@@ -1201,7 +1454,7 @@ capture_metrics() {
 }
 
 wait_metric_equals() {
-    local query="$1" expected="$2" timeout="$3" started value next_runtime_check
+    local query="$1" expected="$2" timeout="$3" started value next_runtime_check sample present
     started=$SECONDS
     next_runtime_check=$SECONDS
     while (( SECONDS - started < timeout )); do
@@ -1209,14 +1462,71 @@ wait_metric_equals() {
             capture_runtime_state metric-wait
             next_runtime_check=$((SECONDS + 10))
         fi
-        value="$(metric_value "$query")"
-        if awk -v actual="$value" -v expected="$expected" 'BEGIN { exit !(actual == expected) }'; then
+        sample="$(metric_observation "$query")"
+        present="$(jq -r '.present and (.value != null)' <<<"$sample")"
+        value="$(jq -r '.value // "missing"' <<<"$sample")"
+        if [[ "$present" == "true" ]] &&
+            awk -v actual="$value" -v expected="$expected" 'BEGIN { exit !(actual == expected) }'; then
             return 0
         fi
         sleep 1
     done
-    log "ERROR: metric did not reach $expected: $query (last=${value:-missing})"
+    log "ERROR: metric did not reach $expected with a present series: $query (last=${value:-missing}, present=${present:-false})"
     return 1
+}
+
+capture_outage_telemetry_snapshot() {
+    local phase="$1" timestamp transitions suppressions feed_cancels submissions open_orders eligible
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    transitions="$(metric_observation \
+        'sum(bot_market_data_availability_transition_total{service_name="b3-market-maker-bot",available="false"})')"
+    suppressions="$(metric_observation \
+        'sum(bot_market_data_quote_suppressed_total{service_name="b3-market-maker-bot",reason="disconnected"})')"
+    feed_cancels="$(metric_observation \
+        'sum(bot_orders_feed_unavailable_cancel_total{service_name="b3-market-maker-bot"})')"
+    submissions="$(metric_observation \
+        'sum(bot_orders_submitted_total{service_name="b3-market-maker-bot"})')"
+    open_orders="$(metric_observation \
+        'sum(bot_orders_open{service_name="b3-market-maker-bot"})')"
+    eligible="$(metric_observation \
+        'sum(bot_market_data_reference_eligible_current{service_name="b3-market-maker-bot"})')"
+    jq -cn \
+        --arg timestampUtc "$timestamp" \
+        --arg phase "$phase" \
+        --argjson transitions "$transitions" \
+        --argjson suppressions "$suppressions" \
+        --argjson feedCancels "$feed_cancels" \
+        --argjson submissions "$submissions" \
+        --argjson openOrders "$open_orders" \
+        --argjson eligible "$eligible" '
+      {
+        timestampUtc: $timestampUtc,
+        phase: $phase,
+        present: all(
+          $transitions,
+          $suppressions,
+          $feedCancels,
+          $submissions,
+          $openOrders,
+          $eligible;
+          .present and .value != null
+        ),
+        feedIneligibleTransitions: $transitions.value,
+        quoteSuppressions: $suppressions.value,
+        feedUnavailableCancels: $feedCancels.value,
+        ordersSubmitted: $submissions.value,
+        openOrders: $openOrders.value,
+        eligibleSymbols: $eligible.value,
+        observations: {
+          feedIneligibleTransitions: $transitions,
+          quoteSuppressions: $suppressions,
+          feedUnavailableCancels: $feedCancels,
+          ordersSubmitted: $submissions,
+          openOrders: $openOrders,
+          eligibleSymbols: $eligible
+        }
+      }
+    '
 }
 
 next_side=Buy
@@ -1295,9 +1605,13 @@ capture_metrics warmup-complete
 
 pause_outage_pass=true
 pause_recovery_pass=true
+outage_telemetry_pass=true
+outage_telemetry_evidence=null
 marketdata_transition_pass=true
 marketdata_transition_evidence=null
 if [[ "$profile" == "pause-and-cancel" ]]; then
+    capture_metrics pre-outage
+    outage_pre_snapshot="$(capture_outage_telemetry_snapshot pre-outage)"
     log "stopping marketdata to exercise PauseAndCancel"
     marketdata_before_snapshot="$(capture_service_runtime_snapshot marketdata before-intentional-stop)"
     outage_check_started_seconds=$SECONDS
@@ -1312,8 +1626,8 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
         outage_remaining=1
     fi
     if ! wait_metric_equals \
-        'count(bot_market_data_reference_eligible{service_name="b3-market-maker-bot",reason="disconnected"} == 0)' \
-        3 "$outage_remaining"; then
+        'sum(bot_market_data_reference_eligible_current{service_name="b3-market-maker-bot"})' \
+        0 "$outage_remaining"; then
         pause_outage_pass=false
     fi
     outage_remaining=$((outage_deadline - SECONDS))
@@ -1330,11 +1644,29 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
     if (( outage_cancellation_elapsed_seconds > recovery_timeout_seconds )); then
         pause_outage_pass=false
     fi
-    capture_metrics outage
+    capture_metrics outage-settled
+    outage_settled_snapshot="$(capture_outage_telemetry_snapshot outage-settled)"
+    outage_hold_samples='[]'
     outage_started=$SECONDS
+    capture_metrics outage-hold
+    outage_hold_snapshot="$(capture_outage_telemetry_snapshot outage-hold)"
+    outage_hold_samples="$(jq -cn \
+        --argjson rows "$outage_hold_samples" \
+        --argjson row "$outage_hold_snapshot" \
+        '$rows + [$row]')"
     while (( SECONDS - outage_started < outage_seconds )); do
-        sleep "$((outage_seconds - (SECONDS - outage_started) < 10 ? outage_seconds - (SECONDS - outage_started) : 10))"
-        capture_runtime_state outage-hold
+        outage_hold_remaining=$((outage_seconds - (SECONDS - outage_started)))
+        outage_hold_sleep=$((outage_hold_remaining < sample_interval_seconds
+            ? outage_hold_remaining
+            : sample_interval_seconds))
+        (( outage_hold_sleep > 0 )) || break
+        sleep "$outage_hold_sleep"
+        capture_metrics outage-hold
+        outage_hold_snapshot="$(capture_outage_telemetry_snapshot outage-hold)"
+        outage_hold_samples="$(jq -cn \
+            --argjson rows "$outage_hold_samples" \
+            --argjson row "$outage_hold_snapshot" \
+            '$rows + [$row]')"
     done
 
     log "starting marketdata and waiting for the bot to reconnect"
@@ -1421,6 +1753,33 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
         log "ERROR: fresh three-symbol recovery did not complete within ${recovery_timeout_seconds}s"
     fi
     capture_metrics recovered
+    outage_post_snapshot="$(capture_outage_telemetry_snapshot recovered)"
+    outage_telemetry_evidence="$(jq -cn \
+        --argjson expectedSymbolCount "${#configured_symbols[@]}" \
+        --argjson pre "$outage_pre_snapshot" \
+        --argjson settled "$outage_settled_snapshot" \
+        --argjson holdSamples "$outage_hold_samples" \
+        --argjson post "$outage_post_snapshot" \
+        '{
+          expectedSymbolCount: $expectedSymbolCount,
+          phaseBoundaries: {
+            pre: "captured immediately before the intentional marketdata stop",
+            settled: "captured after eligibility=0 and all asynchronous quote cancellations reached open=0",
+            hold: "samples collected after the settled boundary and before marketdata restart",
+            post: "captured only after fresh references and exact two-sided quotes recovered"
+          },
+          pre: $pre,
+          settled: $settled,
+          holdSamples: $holdSamples,
+          post: $post
+        }')"
+    outage_telemetry_report="$(soak_evaluate_outage_telemetry <<<"$outage_telemetry_evidence")"
+    outage_telemetry_pass="$(jq -r '.passed' <<<"$outage_telemetry_report")"
+    printf '%s\n' "$outage_telemetry_report" >"${artifacts_dir}/outage-telemetry.json"
+    if [[ "$outage_telemetry_pass" != "true" ]]; then
+        pause_outage_pass=false
+        log "ERROR: PauseAndCancel telemetry contract failed: $(jq -c '.observed' <<<"$outage_telemetry_report")"
+    fi
 fi
 
 log "evidence window for ${duration_seconds}s"
@@ -1429,7 +1788,7 @@ log "waiting for exact final quote state"
 for configured_symbol in "${configured_symbols[@]}"; do
     if [[ "$profile" == "pause-and-cancel" ]]; then
         wait_metric_equals \
-            "bot_market_data_reference_eligible{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}" \
+            "bot_market_data_reference_eligible_current{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}" \
             1 "$recovery_timeout_seconds" || true
     fi
     wait_metric_equals \
@@ -1439,10 +1798,7 @@ done
 wait_metric_equals 'sum(bot_orders_open{service_name="b3-market-maker-bot"})' \
     6 "$recovery_timeout_seconds" || true
 capture_metrics final
-if kill -0 "$runtime_event_monitor_pid" 2>/dev/null; then
-    kill "$runtime_event_monitor_pid"
-    wait "$runtime_event_monitor_pid" 2>/dev/null || true
-else
+if ! stop_runtime_event_monitor_for_cleanup; then
     runtime_event_monitor_stable=false
     runtime_stable=false
 fi
@@ -1467,7 +1823,7 @@ for configured_symbol in "${configured_symbols[@]}"; do
     symbol_open="$(metric_value "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}")"
     symbol_eligible=null
     if [[ "$profile" == "pause-and-cancel" ]]; then
-        symbol_eligible="$(metric_value "bot_market_data_reference_eligible{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}")"
+        symbol_eligible="$(metric_value "bot_market_data_reference_eligible_current{service_name=\"b3-market-maker-bot\",symbol=\"$configured_symbol\"}")"
     fi
     final_quote_state="$(jq -cn \
         --argjson rows "$final_quote_state" \
@@ -1681,14 +2037,13 @@ record_check "tracked-counters-monotonic" "$counter_monotonic" \
 
 configured_spread="$(metric_value "bot_strategy_configured_half_spread_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
 effective_spread="$(metric_value "bot_strategy_effective_half_spread_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
-additional_spread="$(metric_value "bot_strategy_volatility_additional_half_spread_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
 
 case "$profile" in
     baseline)
         record_check "default-static-spread" \
-            "$(numeric_test "$effective_spread == $configured_spread && $additional_spread == 0" && echo true || echo false)" \
-            "effective=configured and additional=0" \
-            "configured=$configured_spread effective=$effective_spread additional=$additional_spread"
+            "$(numeric_test "$effective_spread == $configured_spread" && echo true || echo false)" \
+            "effective=configured; disabled volatility series is not required" \
+            "configured=$configured_spread effective=$effective_spread"
         ;;
     inventory-skew)
         net_quantity="$(metric_value "bot_position_net_quantity{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
@@ -1699,6 +2054,7 @@ case "$profile" in
             "longPassed=$inventory_long_pass shortPassed=$inventory_short_pass finalNetQuantity=$net_quantity finalSkewTicks=$skew_ticks"
         ;;
     volatility-spread)
+        additional_spread="$(metric_value "bot_strategy_volatility_additional_half_spread_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
         record_check "adaptive-spread-floor-cap-response" \
             "$(numeric_test "$additional_spread > 0 && $additional_spread <= 20 && $effective_spread == $configured_spread + $additional_spread" && echo true || echo false)" \
             "0<additional<=20 and effective=configured+additional" \
@@ -1706,8 +2062,11 @@ case "$profile" in
         ;;
     pause-and-cancel)
         record_check "pause-and-cancel-outage" "$pause_outage_pass" \
-            "eligibility=0 and openOrders=0 for every configured symbol within timeout" \
-            "passed=$pause_outage_pass elapsedSeconds=$outage_cancellation_elapsed_seconds"
+            "settled eligibility/openOrders=0, required outage counters increase, submissions remain unchanged from pre-outage and quotes stay zero throughout hold" \
+            "passed=$pause_outage_pass telemetry=$outage_telemetry_pass elapsedSeconds=$outage_cancellation_elapsed_seconds artifact=outage-telemetry.json"
+        record_check "pause-and-cancel-outage-telemetry" "$outage_telemetry_pass" \
+            "ineligible/suppression/feed-cancel activity increases; submissions stay unchanged from pre-outage through hold and open quotes remain zero" \
+            "artifact=outage-telemetry.json"
         record_check "pause-and-cancel-recovery" "$pause_recovery_pass" \
             "fresh current-epoch trade, eligibility=1, openOrders=2 for every configured symbol within timeout" \
             "passed=$pause_recovery_pass elapsedSeconds=$recovery_elapsed_seconds"
@@ -1774,35 +2133,6 @@ jq \
     ' "${artifacts_dir}/run.json" >"${artifacts_dir}/run.json.next"
 mv "${artifacts_dir}/run.json.next" "${artifacts_dir}/run.json"
 
-if jq -e '.passed and .acceptanceEligible' >/dev/null "${artifacts_dir}/summary.json"; then
-    suite_manifest_next="${suite_manifest}.next"
-    jq \
-        --arg profile "$profile" \
-        --arg artifactDirectory "$artifacts_dir_relative" \
-        --slurpfile summary "${artifacts_dir}/summary.json" '
-          .runs[$profile] = {
-            runId: $summary[0].runId,
-            artifactDirectory: $artifactDirectory,
-            gitSha: $summary[0].gitSha,
-            runtimeImageIds: $summary[0].images,
-            settings: $summary[0].settings,
-            workload: $summary[0].workload,
-            profileConfiguration: $summary[0].profileConfiguration,
-            accountingPeriodStartedAtUtc: $summary[0].accountingPeriodStartedAtUtc,
-            acceptanceEligible: true,
-            passed: true,
-            finishedAtUtc: $summary[0].finishedAtUtc
-          } |
-          .updatedAtUtc = (now | todateiso8601) |
-          .suiteAcceptanceEligible = (
-            [.expectedProfiles[] as $expectedProfile |
-              .runs[$expectedProfile].acceptanceEligible == true] | all
-          )
-        ' "$suite_manifest" >"$suite_manifest_next"
-    mv "$suite_manifest_next" "$suite_manifest"
-fi
-
-capture_logs
 if ! jq -e '.passed' "${artifacts_dir}/summary.json" >/dev/null; then
     jq '.checks[] | select(.passed == false)' "${artifacts_dir}/summary.json" >&2
     exit 1

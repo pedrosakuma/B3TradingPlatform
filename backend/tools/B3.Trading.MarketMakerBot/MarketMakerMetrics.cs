@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 
 namespace B3.Trading.MarketMakerBot;
@@ -22,31 +23,31 @@ public sealed class MarketMakerMetrics : IDisposable
     private readonly TimeSpan _maxReferenceAge;
     private readonly FeedLossPolicy _feedLossPolicy;
     private readonly Meter _meter;
-    private readonly Counter<long> _ordersSubmitted;
-    private readonly Counter<long> _ordersSubmitFailed;
-    private readonly Counter<long> _fillsReceived;
-    private readonly Counter<long> _fillsApplied;
-    private readonly Counter<long> _fillsUnknownOrder;
-    private readonly Counter<long> _fillsDuplicate;
-    private readonly Counter<long> _fillsInvalid;
-    private readonly Counter<long> _fillsInconsistent;
-    private readonly Counter<long> _fillDeltaMismatch;
-    private readonly Counter<long> _rejects;
-    private readonly Counter<long> _cancelled;
-    private readonly Counter<long> _staleOrdersCancelled;
-    private readonly Counter<long> _staleCancelRejected;
-    private readonly Counter<long> _staleCancelSubmitFailed;
-    private readonly Counter<long> _safetyCapHits;
-    private readonly Counter<long> _bookDrivenRequotes;
-    private readonly Counter<long> _bookDrivenRequoteSubmitFailed;
-    private readonly Counter<long> _bookDrivenRequoteCancelRejected;
-    private readonly Counter<long> _feedAvailabilityTransitions;
-    private readonly Counter<long> _feedSuppressedDecisions;
-    private readonly Counter<long> _feedCancels;
-    private readonly Counter<long> _feedCancelRejected;
-    private readonly Counter<long> _feedCancelSubmitFailed;
-    private readonly Counter<long> _feedCancelRetries;
-    private readonly Counter<long> _cancelAcknowledgementsExpired;
+    private readonly ObservableMetricCounter _ordersSubmitted;
+    private readonly ObservableMetricCounter _ordersSubmitFailed;
+    private readonly ObservableMetricCounter _fillsReceived;
+    private readonly ObservableMetricCounter _fillsApplied;
+    private readonly ObservableMetricCounter _fillsUnknownOrder;
+    private readonly ObservableMetricCounter _fillsDuplicate;
+    private readonly ObservableMetricCounter _fillsInvalid;
+    private readonly ObservableMetricCounter _fillsInconsistent;
+    private readonly ObservableMetricCounter _fillDeltaMismatch;
+    private readonly ObservableMetricCounter _rejects;
+    private readonly ObservableMetricCounter _cancelled;
+    private readonly ObservableMetricCounter _staleOrdersCancelled;
+    private readonly ObservableMetricCounter _staleCancelRejected;
+    private readonly ObservableMetricCounter _staleCancelSubmitFailed;
+    private readonly ObservableMetricCounter _safetyCapHits;
+    private readonly ObservableMetricCounter _bookDrivenRequotes;
+    private readonly ObservableMetricCounter _bookDrivenRequoteSubmitFailed;
+    private readonly ObservableMetricCounter _bookDrivenRequoteCancelRejected;
+    private readonly ObservableMetricCounter _feedAvailabilityTransitions;
+    private readonly ObservableMetricCounter _feedSuppressedDecisions;
+    private readonly ObservableMetricCounter _feedCancels;
+    private readonly ObservableMetricCounter _feedCancelRejected;
+    private readonly ObservableMetricCounter _feedCancelSubmitFailed;
+    private readonly ObservableMetricCounter _feedCancelRetries;
+    private readonly ObservableMetricCounter _cancelAcknowledgementsExpired;
 
     public MarketMakerMetrics(
         MarketMakerPnlLedger ledger,
@@ -64,39 +65,40 @@ public sealed class MarketMakerMetrics : IDisposable
         _maxReferenceAge = options.Value.MarketData.MaxReferenceAge;
         _feedLossPolicy = options.Value.MarketData.FeedLossPolicy;
         _meter = new Meter(MeterName, "1.0.0");
-        _ordersSubmitted = _meter.CreateCounter<long>("bot.orders.submitted");
-        _ordersSubmitFailed = _meter.CreateCounter<long>("bot.orders.submit_failed");
-        _fillsReceived = _meter.CreateCounter<long>("bot.fills.received");
-        _fillsApplied = _meter.CreateCounter<long>("bot.pnl.fills_applied");
-        _fillsUnknownOrder = _meter.CreateCounter<long>("bot.pnl.fills_unknown_order");
-        _fillsDuplicate = _meter.CreateCounter<long>("bot.pnl.fills_duplicate");
-        _fillsInvalid = _meter.CreateCounter<long>("bot.pnl.fills_invalid");
-        _fillsInconsistent = _meter.CreateCounter<long>("bot.pnl.fills_inconsistent");
-        _fillDeltaMismatch = _meter.CreateCounter<long>("bot.pnl.fill_delta_mismatch");
-        _rejects = _meter.CreateCounter<long>("bot.orders.rejected");
-        _cancelled = _meter.CreateCounter<long>("bot.orders.cancelled");
-        _staleOrdersCancelled = _meter.CreateCounter<long>("bot.orders.stale_cancelled");
-        _staleCancelRejected = _meter.CreateCounter<long>("bot.orders.stale_cancel_rejected");
-        _staleCancelSubmitFailed = _meter.CreateCounter<long>("bot.orders.stale_cancel_submit_failed");
-        _safetyCapHits = _meter.CreateCounter<long>("bot.orders.safety_cap_hit");
-        _bookDrivenRequotes = _meter.CreateCounter<long>("bot.orders.book_driven_requote");
+        _ordersSubmitted = new(_meter, "bot.orders.submitted");
+        _ordersSubmitFailed = new(_meter, "bot.orders.submit_failed");
+        _fillsReceived = new(_meter, "bot.fills.received");
+        _fillsApplied = new(_meter, "bot.pnl.fills_applied");
+        _fillsUnknownOrder = new(_meter, "bot.pnl.fills_unknown_order");
+        _fillsDuplicate = new(_meter, "bot.pnl.fills_duplicate");
+        _fillsInvalid = new(_meter, "bot.pnl.fills_invalid");
+        _fillsInconsistent = new(_meter, "bot.pnl.fills_inconsistent");
+        _fillDeltaMismatch = new(_meter, "bot.pnl.fill_delta_mismatch");
+        _rejects = new(_meter, "bot.orders.rejected");
+        _cancelled = new(_meter, "bot.orders.cancelled");
+        _staleOrdersCancelled = new(_meter, "bot.orders.stale_cancelled");
+        _staleCancelRejected = new(_meter, "bot.orders.stale_cancel_rejected");
+        _staleCancelSubmitFailed = new(_meter, "bot.orders.stale_cancel_submit_failed");
+        _safetyCapHits = new(_meter, "bot.orders.safety_cap_hit");
+        _bookDrivenRequotes = new(_meter, "bot.orders.book_driven_requote");
         _bookDrivenRequoteSubmitFailed =
-            _meter.CreateCounter<long>("bot.orders.book_driven_requote_submit_failed");
+            new(_meter, "bot.orders.book_driven_requote_submit_failed");
         _bookDrivenRequoteCancelRejected =
-            _meter.CreateCounter<long>("bot.orders.book_driven_requote_cancel_rejected");
+            new(_meter, "bot.orders.book_driven_requote_cancel_rejected");
         _feedAvailabilityTransitions =
-            _meter.CreateCounter<long>("bot.market_data.availability_transition");
+            new(_meter, "bot.market_data.availability_transition");
         _feedSuppressedDecisions =
-            _meter.CreateCounter<long>("bot.market_data.quote_suppressed");
-        _feedCancels = _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel");
+            new(_meter, "bot.market_data.quote_suppressed");
+        _feedCancels = new(_meter, "bot.orders.feed_unavailable_cancel");
         _feedCancelRejected =
-            _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_rejected");
+            new(_meter, "bot.orders.feed_unavailable_cancel_rejected");
         _feedCancelSubmitFailed =
-            _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_submit_failed");
+            new(_meter, "bot.orders.feed_unavailable_cancel_submit_failed");
         _feedCancelRetries =
-            _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_retry");
+            new(_meter, "bot.orders.feed_unavailable_cancel_retry");
         _cancelAcknowledgementsExpired =
-            _meter.CreateCounter<long>("bot.orders.cancel_ack_expired");
+            new(_meter, "bot.orders.cancel_ack_expired");
+        InitializeCounterSeries();
 
         _meter.CreateObservableGauge("bot.position.net_quantity", ObservePositions);
         _meter.CreateObservableGauge("bot.position.average_entry_price", ObserveAverageCosts);
@@ -117,6 +119,9 @@ public sealed class MarketMakerMetrics : IDisposable
         _meter.CreateObservableGauge("bot.pnl.total", ObserveTotalPnl);
         _meter.CreateObservableGauge("bot.market_data.reference_age_seconds", ObserveReferenceAge);
         _meter.CreateObservableGauge("bot.market_data.reference_eligible", ObserveReferenceEligibility);
+        _meter.CreateObservableGauge(
+            "bot.market_data.reference_eligible_current",
+            ObserveCurrentReferenceEligibility);
     }
 
     public void RecordOrderSubmitted(string symbol, bool isBuy) =>
@@ -191,13 +196,69 @@ public sealed class MarketMakerMetrics : IDisposable
 
     internal Meter Meter => _meter;
 
+    private void InitializeCounterSeries()
+    {
+        _fillsUnknownOrder.Add(0, SymbolTag(null));
+        _cancelled.Add(0);
+
+        foreach (var instrument in _instruments)
+        {
+            var symbol = SymbolTag(instrument.Symbol);
+            foreach (var isBuy in new[] { true, false })
+            {
+                var side = SideTag(isBuy);
+                _ordersSubmitted.Add(0, symbol, side);
+                _bookDrivenRequotes.Add(0, symbol, side);
+                _feedCancels.Add(0, symbol, side);
+                _feedSuppressedDecisions.Add(
+                    0,
+                    symbol,
+                    side,
+                    new("reason", FeedReason(FeedUnavailableReason.Disconnected)));
+            }
+
+            _ordersSubmitFailed.Add(0, symbol);
+            _fillsReceived.Add(0, symbol);
+            _fillsApplied.Add(0, symbol);
+            _fillsDuplicate.Add(0, symbol);
+            _fillsInvalid.Add(0, symbol);
+            _fillsInconsistent.Add(0, symbol);
+            _fillDeltaMismatch.Add(0, symbol);
+            _rejects.Add(0, symbol);
+            _staleOrdersCancelled.Add(0, symbol);
+            _staleCancelRejected.Add(0, symbol);
+            _staleCancelSubmitFailed.Add(0, symbol);
+            _safetyCapHits.Add(0, symbol);
+            _bookDrivenRequoteSubmitFailed.Add(0, symbol);
+            _bookDrivenRequoteCancelRejected.Add(0, symbol);
+            _feedAvailabilityTransitions.Add(
+                0,
+                symbol,
+                new("available", false),
+                new("reason", FeedReason(FeedUnavailableReason.Disconnected)));
+            _feedCancelRejected.Add(0, symbol);
+            _feedCancelSubmitFailed.Add(0, symbol);
+            _feedCancelRetries.Add(0, symbol);
+            _cancelAcknowledgementsExpired.Add(
+                0,
+                symbol,
+                new("reason", CancelReasonName(CancelReason.FeedUnavailable)));
+        }
+    }
+
     private IEnumerable<Measurement<long>> ObservePositions() =>
-        _ledger.SnapshotAll().Select(snapshot =>
-            new Measurement<long>(snapshot.Position, SymbolTag(snapshot.Symbol)));
+        ObservePositionSymbols().Select(symbol =>
+            new Measurement<long>(
+                _ledger.TryGetSnapshot(symbol, out var snapshot) ? snapshot.Position : 0L,
+                SymbolTag(symbol)));
 
     private IEnumerable<Measurement<double>> ObserveAverageCosts() =>
-        _ledger.SnapshotAll().Select(snapshot =>
-            new Measurement<double>((double)snapshot.AverageCost, SymbolTag(snapshot.Symbol)));
+        ObservePositionSymbols().Select(symbol =>
+            new Measurement<double>(
+                _ledger.TryGetSnapshot(symbol, out var snapshot)
+                    ? (double)snapshot.AverageCost
+                    : 0d,
+                SymbolTag(symbol)));
 
     private IEnumerable<Measurement<long>> ObserveOpenOrders() =>
         _instruments.Select(instrument =>
@@ -262,34 +323,49 @@ public sealed class MarketMakerMetrics : IDisposable
     }
 
     private IEnumerable<Measurement<double>> ObserveRealizedPnl() =>
-        _ledger.SnapshotAll().Select(snapshot =>
-            new Measurement<double>((double)snapshot.RealizedPnl, SymbolTag(snapshot.Symbol)));
+        ObservePositionSymbols().Select(symbol =>
+            new Measurement<double>(
+                _ledger.TryGetSnapshot(symbol, out var snapshot)
+                    ? (double)snapshot.RealizedPnl
+                    : 0d,
+                SymbolTag(symbol)));
 
     private IEnumerable<Measurement<double>> ObserveUnrealizedPnl()
     {
-        foreach (var snapshot in _ledger.SnapshotAll())
+        foreach (var symbol in ObservePositionSymbols())
         {
-            if (_prices.TryGetFreshMark(snapshot.Symbol, _markMaxAge, out var mark))
+            if (_prices.TryGetFreshMark(symbol, _markMaxAge, out var mark))
             {
+                var value = _ledger.TryGetSnapshot(symbol, out var snapshot)
+                    ? (double)snapshot.UnrealizedPnl(mark.Price)
+                    : 0d;
                 yield return new Measurement<double>(
-                    (double)snapshot.UnrealizedPnl(mark.Price),
-                    SymbolTag(snapshot.Symbol));
+                    value,
+                    SymbolTag(symbol));
             }
         }
     }
 
     private IEnumerable<Measurement<double>> ObserveTotalPnl()
     {
-        foreach (var snapshot in _ledger.SnapshotAll())
+        foreach (var symbol in ObservePositionSymbols())
         {
-            if (_prices.TryGetFreshMark(snapshot.Symbol, _markMaxAge, out var mark))
+            if (_prices.TryGetFreshMark(symbol, _markMaxAge, out var mark))
             {
+                var value = _ledger.TryGetSnapshot(symbol, out var snapshot)
+                    ? (double)snapshot.TotalPnl(mark.Price)
+                    : 0d;
                 yield return new Measurement<double>(
-                    (double)snapshot.TotalPnl(mark.Price),
-                    SymbolTag(snapshot.Symbol));
+                    value,
+                    SymbolTag(symbol));
             }
         }
     }
+
+    private IEnumerable<string> ObservePositionSymbols() =>
+        _instruments.Select(instrument => instrument.Symbol)
+            .Concat(_ledger.SnapshotAll().Select(snapshot => snapshot.Symbol))
+            .Distinct(StringComparer.Ordinal);
 
     private IEnumerable<Measurement<double>> ObserveReferenceAge()
     {
@@ -319,6 +395,19 @@ public sealed class MarketMakerMetrics : IDisposable
                 availability.IsEligible ? 1 : 0,
                 SymbolTag(instrument.Symbol),
                 new("reason", FeedReason(availability.UnavailableReason)));
+        }
+    }
+
+    private IEnumerable<Measurement<long>> ObserveCurrentReferenceEligibility()
+    {
+        if (_feedLossPolicy != FeedLossPolicy.PauseAndCancel)
+            yield break;
+        foreach (var instrument in _instruments)
+        {
+            var availability = _prices.GetAvailability(instrument.Symbol, _maxReferenceAge);
+            yield return new Measurement<long>(
+                availability.IsEligible ? 1 : 0,
+                SymbolTag(instrument.Symbol));
         }
     }
 
@@ -355,4 +444,33 @@ public sealed class MarketMakerMetrics : IDisposable
         ReferencePriceSource.LastTradePrice => "last_trade_price",
         _ => "unknown",
     };
+
+    private sealed class ObservableMetricCounter
+    {
+        private readonly ConcurrentDictionary<string, CounterState> _series = new(StringComparer.Ordinal);
+
+        public ObservableMetricCounter(Meter meter, string name)
+        {
+            meter.CreateObservableCounter(name, Observe);
+        }
+
+        public void Add(long delta, params KeyValuePair<string, object?>[] tags)
+        {
+            var key = string.Join(
+                '\u001f',
+                tags.Select(tag => $"{tag.Key}={tag.Value}"));
+            var state = _series.GetOrAdd(key, _ => new CounterState(tags));
+            Interlocked.Add(ref state.Value, delta);
+        }
+
+        private IEnumerable<Measurement<long>> Observe() =>
+            _series.Values.Select(state =>
+                new Measurement<long>(Volatile.Read(ref state.Value), state.Tags));
+
+        private sealed class CounterState(KeyValuePair<string, object?>[] tags)
+        {
+            public KeyValuePair<string, object?>[] Tags { get; } = tags;
+            public long Value;
+        }
+    }
 }

@@ -80,11 +80,19 @@ metadata, never accumulated position or P&L.
 | `bot.market_data.quote_suppressed` | Counter | `symbol`, `side`, `reason` | Quote decisions suppressed by `PauseAndCancel` |
 | `bot.market_data.reference_age_seconds` | Observable Gauge | `symbol`, `source` | Age of the last valid live reference |
 | `bot.market_data.reference_eligible` | Observable Gauge | `symbol`, `reason` | `1` only when the current connection epoch has a fresh valid reference; emitted only for `PauseAndCancel` |
+| `bot.market_data.reference_eligible_current` | Observable Gauge | `symbol` | Stable-label current eligibility (`1`/`0`) for state checks; avoids stale Prometheus series when the diagnostic `reason` label changes |
 | `bot.orders.feed_unavailable_cancel` | Counter | `symbol`, `side` | Active quote cancelled because the feed became ineligible |
 | `bot.orders.feed_unavailable_cancel_rejected` | Counter | `symbol` | Feed-loss cancel rejects |
 | `bot.orders.feed_unavailable_cancel_submit_failed` | Counter | `symbol` | Feed-loss cancel transmission failures |
 | `bot.orders.feed_unavailable_cancel_retry` | Counter | `symbol` | Guarded feed-loss cancel retries |
 | `bot.orders.cancel_ack_expired` | Counter | `symbol`, `reason` | Pending cancel exceeded `MarketMaker:CancelAckTimeout`; marker expired and guarded retry was enabled |
+
+Configured-symbol counters publish bounded zero baselines when the metric
+publisher starts. Position, average-entry, and realized-P&L gauges likewise
+emit `0` for a configured symbol with no ledger entry. This makes a healthy
+zero distinguishable from an absent exporter/series. Unrealized and total P&L
+still require a fresh mark: no fresh mark means no series, never a fabricated
+numeric zero.
 
 Structured snapshots use the same ledger and mark-freshness gate at
 `MarketMaker:Telemetry:SnapshotInterval`. A missing/stale mark is logged as
@@ -105,7 +113,9 @@ Other bounded diagnostic records used by the strategy soak are:
   and suppressed-decision `side`;
 
 The soak helper copies the current `accountingPeriodStartedAtUtc` into every
-metric sample and fails if it changes. It also verifies every collected
+metric sample and fails if it changes. Separate presence evidence requires
+mandatory symbol/profile series to exist before their numeric values are used;
+Prometheus absence is never coerced to zero. The helper also verifies every collected
 counter (`*_total` after Prometheus translation) is monotonically
 non-decreasing, so a bot restart cannot erase earlier integrity/error evidence.
 In the bundled Prometheus view, the scrape target's `source` label causes the

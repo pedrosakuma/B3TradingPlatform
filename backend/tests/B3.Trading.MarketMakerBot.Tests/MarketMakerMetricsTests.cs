@@ -8,6 +8,62 @@ namespace B3.Trading.MarketMakerBot.Tests;
 public class MarketMakerMetricsTests
 {
     [Fact]
+    public void MandatoryMetricSeries_ExposePresentZeroValuesForConfiguredSymbols()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var prices = new MarketPriceTracker(clock);
+        var options = Options.Create(new MarketMakerBotOptions
+        {
+            MarketData = new MarketDataOptions { FeedLossPolicy = FeedLossPolicy.PauseAndCancel },
+            Instruments =
+            [
+                new InstrumentConfig { Symbol = "PETR4" },
+                new InstrumentConfig { Symbol = "VALE3" },
+            ],
+        });
+        using var listener = new MeterListener();
+        var longs = new ConcurrentBag<(string Name, long Value, string Symbol)>();
+        var doubles = new ConcurrentBag<(string Name, double Value, string Symbol)>();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (instrument.Meter.Name == MarketMakerMetrics.MeterName)
+                meterListener.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) =>
+            longs.Add((instrument.Name, value, GetSymbol(tags))));
+        listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) =>
+            doubles.Add((instrument.Name, value, GetSymbol(tags))));
+        listener.Start();
+
+        var volatility = new VolatilitySpreadEstimator(options, clock);
+        using var metrics = new MarketMakerMetrics(
+            new MarketMakerPnlLedger(clock),
+            new OrderTracker(clock),
+            prices,
+            volatility,
+            options);
+        prices.SetConnected(true);
+        prices.OnInfoSnapshot("PETR4", 30m, null);
+        prices.OnInfoSnapshot("VALE3", 70m, null);
+        listener.RecordObservableInstruments();
+
+        foreach (var symbol in new[] { "PETR4", "VALE3" })
+        {
+            Assert.Contains(("bot.orders.submit_failed", 0L, symbol), longs);
+            Assert.Contains(("bot.pnl.fills_duplicate", 0L, symbol), longs);
+            Assert.Contains(("bot.orders.safety_cap_hit", 0L, symbol), longs);
+            Assert.Contains(("bot.orders.feed_unavailable_cancel", 0L, symbol), longs);
+            Assert.Contains(("bot.market_data.reference_eligible_current", 1L, symbol), longs);
+            Assert.Contains(("bot.position.net_quantity", 0L, symbol), longs);
+            Assert.Contains(("bot.position.average_entry_price", 0d, symbol), doubles);
+            Assert.Contains(("bot.pnl.realized", 0d, symbol), doubles);
+            Assert.Contains(("bot.pnl.unrealized", 0d, symbol), doubles);
+            Assert.Contains(("bot.pnl.total", 0d, symbol), doubles);
+        }
+        Assert.Contains(("bot.pnl.fills_unknown_order", 0L, "unknown"), longs);
+    }
+
+    [Fact]
     public void FillOutcomeCounters_UseBoundedSymbolTags()
     {
         var ledger = new MarketMakerPnlLedger();
@@ -32,8 +88,9 @@ public class MarketMakerMetricsTests
         metrics.RecordFillResult("PETR4", new(FillApplyStatus.Inconsistent, null));
         metrics.RecordFillResult("PETR4", new(FillApplyStatus.Applied, null, 100, QuantityMismatch: true));
         metrics.RecordUnknownOrderFill();
+        listener.RecordObservableInstruments();
 
-        Assert.Contains(("bot.pnl.fills_applied", 1, "PETR4"), measurements);
+        Assert.Contains(("bot.pnl.fills_applied", 2, "PETR4"), measurements);
         Assert.Contains(("bot.pnl.fills_duplicate", 1, "PETR4"), measurements);
         Assert.Contains(("bot.pnl.fills_invalid", 1, "PETR4"), measurements);
         Assert.Contains(("bot.pnl.fills_inconsistent", 1, "PETR4"), measurements);

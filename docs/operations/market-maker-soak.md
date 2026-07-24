@@ -104,6 +104,7 @@ The soak overlay:
 Render without starting anything:
 
 ```bash
+scripts/soak/test-market-maker-soak-lib.sh
 scripts/soak/run-market-maker-soak.sh --profile baseline --dry-run
 scripts/soak/run-market-maker-soak.sh --profile inventory-skew --dry-run
 scripts/soak/run-market-maker-soak.sh --profile volatility-spread --dry-run
@@ -233,6 +234,15 @@ isolated project and volumes unless `--keep-stack`/`SOAK_KEEP_STACK=true` is
 set. It refuses a non-empty artifact directory so stale evidence cannot be
 mixed into a rerun.
 
+The pre-run `docker compose down -v --remove-orphans` is a required isolation
+barrier: failure aborts before build/start. Final cleanup attempts event-monitor
+shutdown, log capture, and Compose teardown even if an earlier cleanup step
+fails. `cleanup.json`/`cleanup-errors.json` retain every failure. A teardown
+failure changes an otherwise passing `summary.json` to `passed=false`,
+`acceptanceEligible=false`, exits nonzero, and prevents suite-manifest
+registration. When the workload already failed, its original exit status is
+preserved while cleanup failures remain in evidence.
+
 Both evidence path controls are canonicalized before any directory or file is
 created. They must resolve under this checkout's ignored `soak-artifacts/`
 directory. The helper rejects `..` traversal, external absolute paths, symlink
@@ -259,6 +269,15 @@ The authoritative instrument catalog is
 The helper records the OTel-to-Prometheus translated names (`.` becomes `_`;
 counters add `_total`) in `samples.csv` and `samples.jsonl`.
 
+Prometheus absence is never interpreted as numeric zero. Every sample also
+writes `metric-presence.csv`/`.jsonl`, with separate `present`, `seriesCount`,
+and `value` fields for each mandatory metric/symbol/phase. A present series with
+value `0` is valid; an absent or non-numeric series fails immediately. The bot
+publishes bounded zero baselines for configured-symbol counters and zero
+position/realized-P&L gauges so integrity checks can distinguish healthy zero
+from missing telemetry. Unrealized/total P&L still remain absent when no fresh
+mark exists.
+
 Required comparison fields:
 
 | Evidence | Source |
@@ -269,7 +288,7 @@ Required comparison fields:
 | Configured/effective spread | `bot.strategy.configured_half_spread_ticks`, `bot.strategy.effective_half_spread_ticks` |
 | Volatility estimate/addition | `bot.strategy.volatility_move_estimate_ticks`, `bot.strategy.volatility_additional_half_spread_ticks`; `[mm-volatility]` |
 | Inventory skew | `bot.strategy.inventory_skew_ticks` |
-| Feed eligibility/age/source | `bot.market_data.reference_eligible`, `bot.market_data.reference_age_seconds`; `[mm-feed]` |
+| Feed eligibility/age/source | `bot.market_data.reference_eligible_current` for stable state checks, `bot.market_data.reference_eligible` for bounded reason diagnostics, `bot.market_data.reference_age_seconds`; `[mm-feed]` |
 | Fills/rejects/cancels | `bot.fills.received`, `bot.pnl.fills_applied`, `bot.orders.rejected`, `bot.orders.cancelled` |
 | Accounting corruption | unknown, duplicate, invalid, inconsistent, and delta-mismatch P&L counters |
 | Open orders/safety | `bot.orders.open`, `bot.orders.safety_cap_hit`, cancel/requote error counters |
@@ -294,9 +313,13 @@ inspect the complete time series against these unambiguous thresholds:
 - Every submitted workload order fills within 20 seconds.
 - `bot.fills.received == bot.pnl.fills_applied > 0`.
 - Unknown, duplicate, invalid, inconsistent, and fill-delta-mismatch counters
-  all remain zero.
+  are present for every required scope and all remain zero.
 - Safety-cap hits, quote submit failures, quote rejects, and cancel
-  reject/submit-failure counters remain zero.
+  reject/submit-failure counters are present and remain zero.
+- Every phase contains all mandatory open-order, spread, position,
+  P&L/accounting, corruption/safety, and profile-specific feed/strategy series
+  for every configured symbol. Missing telemetry fails even when zero would
+  otherwise satisfy a numeric threshold.
 - Every sampled critical service (`trading-host`, `matching-platform`,
   `marketdata`, `market-maker-bot`, `otel-collector`, and `prometheus`) retains
   its initial container ID and image ID with `restartCount=0`. `StartedAt`
@@ -347,10 +370,17 @@ inspect the complete time series against these unambiguous thresholds:
 
 ### `PauseAndCancel`
 
-- On feed stop, eligibility and open orders reach `0` for all three configured
-  symbols within 90 seconds.
-- No new quote is submitted while ineligible; suppression/feed-cancel counters
-  increase without cancel errors or accounting corruption.
+- The helper captures explicit `pre-outage`, `outage-settled`, `outage-hold`,
+  and `recovered` telemetry boundaries. `outage-settled` begins only after
+  bounded asynchronous cancellation has reached eligibility `0` and open
+  orders `0` for all three symbols within 90 seconds.
+- Unavailable availability-transition, disconnected quote-suppression, and
+  `FeedUnavailable` cancel counters must be present and increase from their
+  pre-outage values. Cancel error/corruption counters remain zero.
+- The order-submission counter is unchanged from the pre-outage boundary through
+  the settled boundary and every hold sample. Every hold sample has eligibility
+  `0` and exactly zero open quotes. No fresh recovery print is sent until the
+  hold completes.
 - Restart alone is not accepted as recovery. After fresh current-epoch trades,
   eligibility becomes `1`, a
   `reference_age_seconds{exported_source="last_trade_price"} < 15` sample
@@ -425,11 +455,15 @@ The helper writes only under ignored `soak-artifacts/`:
 - `runtime-events.jsonl` / `runtime-lifecycle.json` — Docker lifecycle events and exact transition counts;
 - `runtime-continuity.json` — per-critical-service identity/start/status proof;
 - `marketdata-transition.json` — the sole permitted outage stop/start (strict profile only);
-- `samples.csv` / `samples.jsonl` — normalized metric samples with accounting-period identity;
+- `samples.csv` / `samples.jsonl` — normalized present metric samples with accounting-period identity;
+- `metric-presence.csv` / `metric-presence.jsonl` — mandatory-series presence/value evidence;
+- `outage-telemetry.json` — strict-profile phase boundaries, counters, submissions, eligibility, and open orders;
 - `workload.csv` — order/fill latency evidence;
 - `counter-monotonicity.json` — any decreasing tracked counter series;
 - `open-order-bounds.json` — per-symbol and total maxima across all samples;
 - `summary.json` — machine-readable checks;
+- `cleanup.json` / `cleanup-errors.json` — original status and aggregated cleanup outcome;
+- `pre-run-compose-down.log` / `cleanup-compose-down.log` — isolation teardown evidence;
 - `compose-ps.json` and `compose.log` — runtime state and diagnostics.
 
 The shared `suite-manifest.json` pins the first profile's compatibility object
@@ -441,7 +475,7 @@ Use this summary shape (generated values only; never fabricate results):
 
 ```json
 {
-  "schemaVersion": "3",
+  "schemaVersion": "4",
   "runId": "20260724T180000Z-baseline",
   "profile": "baseline",
   "gitSha": "<40-hex commit>",
