@@ -131,9 +131,8 @@ public sealed class MarketMakerPnlLedger
     /// Active orders are never pruned. Position, average cost, and realized
     /// P&amp;L live in <see cref="_positions"/> and are intentionally untouched.
     /// </summary>
-    public void PruneTerminal(TimeSpan retention)
+    public void PruneTerminal(TimeSpan retention, DateTimeOffset now)
     {
-        var now = _clock.GetUtcNow();
         lock (_gate)
         {
             List<ulong>? expired = null;

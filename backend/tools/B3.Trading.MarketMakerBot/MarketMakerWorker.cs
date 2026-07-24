@@ -26,6 +26,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly OrderTracker _tracker;
     private readonly MarketPriceTracker _priceTracker;
     private readonly MarketMakerPnlLedger _pnlLedger;
+    private readonly MarketMakerOrderLifecycle _orderLifecycle;
     private readonly MarketMakerMetrics _metrics;
     private readonly MarketDataFeed _marketData;
     private readonly ILoggerFactory _loggerFactory;
@@ -51,6 +52,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         _tracker = tracker;
         _priceTracker = priceTracker;
         _pnlLedger = pnlLedger;
+        _orderLifecycle = new MarketMakerOrderLifecycle(tracker, pnlLedger);
         _metrics = metrics;
         _marketData = marketData;
         _loggerFactory = loggerFactory;
@@ -189,31 +191,54 @@ internal sealed class MarketMakerWorker : BackgroundService
                 // entirely on the New ack — so it must never be defaulted
                 // to zero via `??` (see OrderTracker.OnAccepted's doc
                 // comment for the duplicate-order bug this caused).
-                _tracker.SetOrderId(a.ClOrdID.Value, a.OrderId);
-                _tracker.OnAccepted(a.ClOrdID.Value, a.LeavesQty is { } aLeaves ? (long)aLeaves : null);
+                _orderLifecycle.Synchronize(() =>
+                {
+                    _tracker.SetOrderId(a.ClOrdID.Value, a.OrderId);
+                    _tracker.OnAccepted(a.ClOrdID.Value, a.LeavesQty is { } aLeaves ? (long)aLeaves : null);
+                });
                 break;
             case UpModels.OrderTrade t:
                 {
-                    var known = _tracker.TryGet(t.ClOrdID.Value, out var o);
-                    var symbol = known ? o.Symbol : null;
-                    _metrics.RecordFillReceived(symbol);
-                    if (known)
+                    var isFilled = t.OrderStatus == UpModels.OrderStatus.Filled;
+                    var transition = _orderLifecycle.Synchronize(() =>
                     {
-                        _tracker.SetOrderId(t.ClOrdID.Value, t.OrderId);
-                        var fillResult = _pnlLedger.Apply(new OwnFill(
+                        var known = _tracker.TryGet(t.ClOrdID.Value, out var order);
+                        FillApplyResult? fillResult = null;
+                        if (known)
+                        {
+                            _tracker.SetOrderId(t.ClOrdID.Value, t.OrderId);
+                            fillResult = _pnlLedger.Apply(new OwnFill(
+                                t.ClOrdID.Value,
+                                t.TradeId,
+                                order.Symbol,
+                                order.IsBuy,
+                                order.Quantity,
+                                t.LastPx,
+                                t.LastQty,
+                                t.CumQty,
+                                t.LeavesQty,
+                                isFilled,
+                                t.OrderStatus is UpModels.OrderStatus.PartiallyFilled or UpModels.OrderStatus.Filled));
+                        }
+
+                        _tracker.OnTrade(
                             t.ClOrdID.Value,
-                            t.TradeId,
-                            o.Symbol,
-                            o.IsBuy,
-                            o.Quantity,
-                            t.LastPx,
-                            t.LastQty,
-                            t.CumQty,
-                            t.LeavesQty,
-                            t.OrderStatus == UpModels.OrderStatus.Filled,
-                            t.OrderStatus is UpModels.OrderStatus.PartiallyFilled or UpModels.OrderStatus.Filled));
-                        _metrics.RecordFillResult(o.Symbol, fillResult);
-                        LogFillResult(t, o.Symbol, fillResult);
+                            isFilled,
+                            t.LeavesQty is { } tLeaves ? (long)tLeaves : null);
+                        if (isFilled)
+                            _pnlLedger.MarkTerminal(t.ClOrdID.Value);
+                        return (
+                            Known: known,
+                            Symbol: known ? order.Symbol : null,
+                            IsBuy: known && order.IsBuy,
+                            FillResult: fillResult);
+                    });
+
+                    _metrics.RecordFillReceived(transition.Symbol);
+                    if (transition.FillResult is { } fillResult)
+                    {
+                        _metrics.RecordFillResult(transition.Symbol!, fillResult);
+                        LogFillResult(t, transition.Symbol!, fillResult);
                     }
                     else
                     {
@@ -227,15 +252,11 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // LeavesQty — same rationale as OrderAccepted above;
                     // an absent/null LeavesQty on a partial fill must not
                     // be misread as "fully filled".
-                    var isFilled = t.OrderStatus == UpModels.OrderStatus.Filled;
-                    _tracker.OnTrade(t.ClOrdID.Value, isFilled, t.LeavesQty is { } tLeaves ? (long)tLeaves : null);
-                    if (isFilled)
-                        _pnlLedger.MarkTerminal(t.ClOrdID.Value);
                     // Fully filled → immediately re-quote the same side so
                     // our side of the book never goes empty. Partial fills
                     // stay resting (still working at the same price).
-                    if (known && isFilled)
-                        await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
+                    if (transition.Known && isFilled)
+                        await RequoteAsync(client, transition.Symbol!, transition.IsBuy, ct);
                     break;
                 }
             case UpModels.OrderCancelled c:
@@ -254,12 +275,22 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // — fall back to our own cancel-attempt correlation
                     // table before finally assuming ClOrdID IS the
                     // original id (the spontaneous-cancel case).
-                    var targetClOrdId = c.OrigClOrdID?.Value
-                        ?? (_tracker.TryResolveCancelAttempt(c.ClOrdID.Value, out var linked) ? linked : c.ClOrdID.Value);
-                    var known = _tracker.TryGet(targetClOrdId, out var o);
-                    _tracker.OnTerminal(targetClOrdId);
-                    _pnlLedger.MarkTerminal(targetClOrdId);
-                    if (known) await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
+                    var transition = _orderLifecycle.Synchronize(() =>
+                    {
+                        var targetClOrdId = c.OrigClOrdID?.Value
+                            ?? (_tracker.TryResolveCancelAttempt(c.ClOrdID.Value, out var linked)
+                                ? linked
+                                : c.ClOrdID.Value);
+                        var known = _tracker.TryGet(targetClOrdId, out var order);
+                        _tracker.OnTerminal(targetClOrdId);
+                        _pnlLedger.MarkTerminal(targetClOrdId);
+                        return (
+                            Known: known,
+                            Symbol: known ? order.Symbol : null,
+                            IsBuy: known && order.IsBuy);
+                    });
+                    if (transition.Known)
+                        await RequoteAsync(client, transition.Symbol!, transition.IsBuy, ct);
                     break;
                 }
             case UpModels.OrderRejected r:
@@ -282,8 +313,20 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // cancel-on-disconnect and a fresh OrderTracker clear
                     // the stuck state. A stuck side is an acceptable
                     // trade-off against a duplicated resting order.
-                    if (_tracker.TryResolveCancelAttempt(r.ClOrdID.Value, out var origClOrdId, out var wasBookDriven))
+                    var cancelReject = _orderLifecycle.Synchronize(() =>
                     {
+                        if (!_tracker.TryResolveCancelAttempt(
+                                r.ClOrdID.Value,
+                                out var origClOrdId,
+                                out var wasBookDriven))
+                        {
+                            return (
+                                Matched: false,
+                                OrigClOrdId: 0UL,
+                                WasBookDriven: false,
+                                StuckSymbol: "?");
+                        }
+
                         // Clear the pending-cancel marker (NOT the order
                         // itself — see rationale above) so the next
                         // reconcile tick / book delta is free to retry
@@ -292,6 +335,14 @@ internal sealed class MarketMakerWorker : BackgroundService
                         _tracker.ClearPendingCancel(origClOrdId);
                         var stuckKnown = _tracker.TryGet(origClOrdId, out var stuck);
                         var stuckSymbol = stuckKnown ? stuck.Symbol : "?";
+                        return (
+                            Matched: true,
+                            OrigClOrdId: origClOrdId,
+                            WasBookDriven: wasBookDriven,
+                            StuckSymbol: stuckSymbol);
+                    });
+                    if (cancelReject.Matched)
+                    {
                         // Attributed to the trigger that actually raised
                         // this cancel — both CancelStaleOrdersAsync and
                         // ReactToBookChangeAsync share SubmitCancelAsync,
@@ -300,27 +351,31 @@ internal sealed class MarketMakerWorker : BackgroundService
                         // misreported as the miss-fill safety net itself
                         // failing (the stale-cancel-rejected counter should
                         // normally stay at zero).
-                        if (wasBookDriven)
+                        if (cancelReject.WasBookDriven)
                         {
-                            _metrics.RecordBookDrivenRequoteCancelRejected(stuckSymbol);
+                            _metrics.RecordBookDrivenRequoteCancelRejected(cancelReject.StuckSymbol);
                             _log.LogInformation(
                                 "[mm] book-driven requote cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
-                                origClOrdId, r.Reason);
+                                cancelReject.OrigClOrdId, r.Reason);
                         }
                         else
                         {
-                            _metrics.RecordStaleCancelRejected(stuckSymbol);
+                            _metrics.RecordStaleCancelRejected(cancelReject.StuckSymbol);
                             _log.LogWarning(
                                 "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
-                                origClOrdId, r.Reason);
+                                cancelReject.OrigClOrdId, r.Reason);
                         }
                         break;
                     }
-                    var known = _tracker.TryGet(r.ClOrdID.Value, out var o);
-                    var symbol = known ? o.Symbol : null;
-                    _metrics.RecordRejected(symbol);
-                    _tracker.OnTerminal(r.ClOrdID.Value);
-                    _pnlLedger.MarkTerminal(r.ClOrdID.Value);
+                    var rejection = _orderLifecycle.Synchronize(() =>
+                    {
+                        var known = _tracker.TryGet(r.ClOrdID.Value, out var order);
+                        var symbol = known ? order.Symbol : null;
+                        _tracker.OnTerminal(r.ClOrdID.Value);
+                        _pnlLedger.MarkTerminal(r.ClOrdID.Value);
+                        return (Known: known, Symbol: symbol);
+                    });
+                    _metrics.RecordRejected(rejection.Symbol);
                     // Deliberately do NOT re-quote immediately here: an
                     // instrument-level reject (bad config, halt, risk
                     // limit) would otherwise repeat identically forever,
@@ -352,7 +407,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                 // (see pedrosakuma/B3EntryPointClient#228). Only the
                 // venue OrderId denormalization is safe to apply
                 // unconditionally.
-                _tracker.SetOrderId(m.ClOrdID.Value, m.OrderId);
+                _orderLifecycle.Synchronize(() => _tracker.SetOrderId(m.ClOrdID.Value, m.OrderId));
                 break;
         }
     }
@@ -384,8 +439,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             // common rather than rare, so tracker housekeeping now runs
             // every reconcile tick too — see OrderTracker.PruneClosed's
             // doc comment for why this became necessary.
-            _tracker.PruneClosed(_options.MaxOrderAge, _tracker.UtcNow);
-            _pnlLedger.PruneTerminal(_options.MaxOrderAge);
+            _orderLifecycle.Prune(_options.MaxOrderAge);
 
             foreach (var instr in _options.Instruments)
             {
@@ -648,7 +702,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         // re-quote it, but also won't cancel the stray one automatically).
         if (_priceTracker.IsDelisted(instr.Symbol))
         {
-            _tracker.OnTerminal(clOrdId);
+            _orderLifecycle.Synchronize(() => _tracker.OnTerminal(clOrdId));
             return;
         }
         var req = new UpModels.NewOrderRequest
@@ -669,7 +723,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _tracker.OnTerminal(clOrdId);
+            _orderLifecycle.Synchronize(() => _tracker.OnTerminal(clOrdId));
             _metrics.RecordOrderSubmitFailed(instr.Symbol);
             _log.LogWarning(ex, "[mm] quote submit failed for {Symbol} side={Side} clordid={ClOrdId}",
                 instr.Symbol, isBuy ? "buy" : "sell", clOrdId);

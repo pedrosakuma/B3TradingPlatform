@@ -220,7 +220,7 @@ public class MarketMakerPnlLedgerTests
         AssertApplied(ledger, fill);
 
         clock.Advance(TimeSpan.FromHours(1));
-        ledger.PruneTerminal(TimeSpan.FromMinutes(5));
+        ledger.PruneTerminal(TimeSpan.FromMinutes(5), clock.GetUtcNow());
 
         Assert.Equal(1, ledger.OrderStateCount);
         Assert.Equal(FillApplyStatus.Duplicate, ledger.Apply(fill).Status);
@@ -239,7 +239,7 @@ public class MarketMakerPnlLedgerTests
         clock.Advance(TimeSpan.FromMinutes(4));
         Assert.Equal(FillApplyStatus.Duplicate, ledger.Apply(fill).Status);
         clock.Advance(TimeSpan.FromMinutes(2));
-        ledger.PruneTerminal(TimeSpan.FromMinutes(5));
+        ledger.PruneTerminal(TimeSpan.FromMinutes(5), clock.GetUtcNow());
 
         Assert.Equal(1, ledger.OrderStateCount);
         Assert.Equal(FillApplyStatus.Duplicate, ledger.Apply(fill).Status);
@@ -256,7 +256,7 @@ public class MarketMakerPnlLedgerTests
         Assert.True(ledger.TryGetSnapshot("PETR4", out var before));
 
         clock.Advance(TimeSpan.FromMinutes(6));
-        ledger.PruneTerminal(TimeSpan.FromMinutes(5));
+        ledger.PruneTerminal(TimeSpan.FromMinutes(5), clock.GetUtcNow());
 
         Assert.Equal(0, ledger.OrderStateCount);
         Assert.True(ledger.TryGetSnapshot("PETR4", out var after));
