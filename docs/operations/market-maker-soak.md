@@ -271,7 +271,9 @@ Evidence records repository-relative paths, so manifests remain portable.
 Manual cleanup is:
 
 ```bash
-MM_SOAK_PROJECT_NAME="$SOAK_PROJECT_NAME" docker compose \
+MM_SOAK_COUNTERPARTY_USER="${SOAK_COUNTERPARTY_USER:-bob}" \
+MM_SOAK_PROJECT_NAME="$SOAK_PROJECT_NAME" \
+docker compose \
   --project-name "$SOAK_PROJECT_NAME" \
   -f docker/docker-compose.yml \
   -f docker/docker-compose.market-maker.yml \
