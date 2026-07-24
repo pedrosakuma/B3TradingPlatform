@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
 
+soak_curl_json_request() {
+    local method="$1" url="$2" token_variable="$3" body_variable="$4"
+    (
+        set +x
+        local token="${!token_variable-}" body="${!body_variable-}"
+        local curl_bin="${SOAK_CURL_BIN:-curl}"
+        local -a arguments=(-fsS --max-time 10 --request "$method")
+        if [[ -n "$token" ]]; then
+            exec 3<<<"Authorization: Bearer $token"
+            arguments+=(--header @/dev/fd/3)
+        fi
+        if [[ -n "$body" ]]; then
+            exec 4<<<"$body"
+            arguments+=(--header 'Content-Type: application/json' --data-binary @/dev/fd/4)
+        fi
+        "$curl_bin" "${arguments[@]}" "$url"
+    )
+}
+
 soak_metric_sample() {
     jq -c '
       (.data.result // []) as $rows |
@@ -23,12 +42,19 @@ soak_evaluate_outage_telemetry() {
     jq -c '
       . as $evidence |
       ($evidence.holdSamples // []) as $hold |
+      ($evidence.reconnectedSamples // []) as $reconnected |
       {
         passed: (
           $evidence.pre.present and
           $evidence.settled.present and
           $evidence.post.present and
           ($hold | length) > 0 and
+          ($reconnected | length) >= 2 and
+          $evidence.reconnectHoldSeconds > 0 and
+          (
+            (($reconnected | last).timestampUtc | fromdateiso8601) -
+            (($reconnected | first).timestampUtc | fromdateiso8601)
+          ) >= $evidence.reconnectHoldSeconds and
           $evidence.settled.feedIneligibleTransitions > $evidence.pre.feedIneligibleTransitions and
           (($hold | last).quoteSuppressions > $evidence.pre.quoteSuppressions) and
           $evidence.settled.feedUnavailableCancels > $evidence.pre.feedUnavailableCancels and
@@ -40,6 +66,11 @@ soak_evaluate_outage_telemetry() {
             .openOrders == 0 and
             .eligibleSymbols == 0 and
             .ordersSubmitted == $evidence.settled.ordersSubmitted) and
+          all($reconnected[];
+            .present and
+            .openOrders == 0 and
+            .eligibleSymbols == 0 and
+            .ordersSubmitted == $evidence.pre.ordersSubmitted) and
           $evidence.post.openOrders == $evidence.expectedSymbolCount * 2 and
           $evidence.post.eligibleSymbols == $evidence.expectedSymbolCount
         ),
@@ -50,10 +81,45 @@ soak_evaluate_outage_telemetry() {
           holdOpenOrders: 0,
           holdEligibleSymbols: 0,
           holdOrdersSubmitted: "unchanged from pre-outage through every hold sample",
+          reconnectedWithoutFreshReference:
+            "at least two samples with eligibility/openOrders=0 and submissions unchanged",
+          reconnectHoldSeconds: $evidence.reconnectHoldSeconds,
           postOpenOrders: ($evidence.expectedSymbolCount * 2),
           postEligibleSymbols: $evidence.expectedSymbolCount
         },
+        reconnectHoldSeconds: $evidence.reconnectHoldSeconds,
         observed: $evidence
+      }
+    '
+}
+
+soak_evaluate_counter_stabilization() {
+    jq -c '
+      (.samples // []) as $samples |
+      (.requiredStableCycles // 2) as $cycles |
+      (.intervalSeconds // 0) as $interval |
+      (.timeoutSeconds // null) as $timeout |
+      ($samples[(-($cycles + 1)):] // []) as $stableWindow |
+      {
+        passed: (
+          $cycles >= 2 and
+          $interval > 0 and
+          ($stableWindow | length) == ($cycles + 1) and
+          all($stableWindow[]; .present and .ordersSubmitted != null) and
+          ([
+            range(1; ($stableWindow | length)) as $index |
+            (
+              ($stableWindow[$index].timestampUtc | fromdateiso8601) -
+              ($stableWindow[$index - 1].timestampUtc | fromdateiso8601)
+            ) >= $interval
+          ] | all) and
+          ([$stableWindow[].ordersSubmitted] | unique | length) == 1
+        ),
+        requiredStableCycles: $cycles,
+        intervalSeconds: $interval,
+        timeoutSeconds: $timeout,
+        stableWindow: $stableWindow,
+        samples: $samples
       }
     '
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible real-stack market-maker soak driver (#719).
 set -euo pipefail
+case "$-" in *x*) set +x ;; esac
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
@@ -41,9 +42,13 @@ Operator controls:
   SOAK_PROJECT_NAME=b3tp-soak-<unique>
   SOAK_ARTIFACTS_DIR=soak-artifacts/<run-id>
   SOAK_OUTAGE_SECONDS=20
-  SOAK_RECOVERY_TIMEOUT_SECONDS=90
+  SOAK_RECOVERY_TIMEOUT_SECONDS=120
   SOAK_RECOVERY_CROSS_ATTEMPTS=3
   SOAK_RECOVERY_CROSS_INTERVAL_SECONDS=10
+  SOAK_RECONNECT_STALE_HOLD_SECONDS=<derived export+scrape cycle>
+  SOAK_PRE_OUTAGE_STABILIZATION_CYCLES=2
+  SOAK_PRE_OUTAGE_STABILIZATION_INTERVAL_SECONDS=<derived export+scrape cycle>
+  SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS=<derived>
   SOAK_INVENTORY_BIAS_LOTS=12
   SOAK_SUITE_MANIFEST=soak-artifacts/<suite-id>/suite-manifest.json
 EOF
@@ -100,9 +105,22 @@ readonly duration_seconds="${SOAK_DURATION_SECONDS:-300}"
 readonly sample_interval_seconds="${SOAK_SAMPLE_INTERVAL_SECONDS:-15}"
 readonly workload_interval_seconds="${SOAK_WORKLOAD_INTERVAL_SECONDS:-1}"
 readonly outage_seconds="${SOAK_OUTAGE_SECONDS:-20}"
-readonly recovery_timeout_seconds="${SOAK_RECOVERY_TIMEOUT_SECONDS:-90}"
+readonly recovery_timeout_seconds="${SOAK_RECOVERY_TIMEOUT_SECONDS:-120}"
 readonly recovery_cross_attempts="${SOAK_RECOVERY_CROSS_ATTEMPTS:-3}"
 readonly recovery_cross_interval_seconds="${SOAK_RECOVERY_CROSS_INTERVAL_SECONDS:-10}"
+readonly metric_export_interval_ms="${MM_SOAK_METRIC_EXPORT_INTERVAL_MS:-5000}"
+require_uint MM_SOAK_METRIC_EXPORT_INTERVAL_MS "$metric_export_interval_ms"
+readonly prometheus_scrape_interval_seconds=5
+readonly metric_export_interval_seconds="$(((metric_export_interval_ms + 999) / 1000))"
+readonly full_telemetry_cycle_seconds="$((metric_export_interval_seconds + prometheus_scrape_interval_seconds))"
+readonly pre_outage_stabilization_cycles="${SOAK_PRE_OUTAGE_STABILIZATION_CYCLES:-2}"
+require_uint SOAK_PRE_OUTAGE_STABILIZATION_CYCLES "$pre_outage_stabilization_cycles"
+readonly pre_outage_stabilization_interval_seconds="${SOAK_PRE_OUTAGE_STABILIZATION_INTERVAL_SECONDS:-$full_telemetry_cycle_seconds}"
+require_uint SOAK_PRE_OUTAGE_STABILIZATION_INTERVAL_SECONDS "$pre_outage_stabilization_interval_seconds"
+readonly pre_outage_stabilization_timeout_seconds="${SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS:-$((pre_outage_stabilization_interval_seconds * (pre_outage_stabilization_cycles + 4)))}"
+require_uint SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS "$pre_outage_stabilization_timeout_seconds"
+readonly reconnect_stale_hold_seconds="${SOAK_RECONNECT_STALE_HOLD_SECONDS:-$full_telemetry_cycle_seconds}"
+require_uint SOAK_RECONNECT_STALE_HOLD_SECONDS "$reconnect_stale_hold_seconds"
 readonly inventory_bias_lots="${SOAK_INVENTORY_BIAS_LOTS:-12}"
 readonly fill_timeout_seconds="${SOAK_FILL_TIMEOUT_SECONDS:-20}"
 readonly trading_user="${SOAK_TRADING_USER:-alice}"
@@ -142,8 +160,27 @@ require_bool SOAK_WITH_GRAFANA "$with_grafana"
 (( duration_seconds > 0 )) || { echo "ERROR: duration must be positive" >&2; exit 3; }
 (( recovery_cross_attempts > 0 )) || { echo "ERROR: recovery cross attempts must be positive" >&2; exit 3; }
 (( recovery_cross_interval_seconds > 0 )) || { echo "ERROR: recovery cross interval must be positive" >&2; exit 3; }
-(( (recovery_cross_attempts - 1) * recovery_cross_interval_seconds < recovery_timeout_seconds )) || {
-    echo "ERROR: recovery cross rounds consume the entire recovery timeout" >&2
+(( metric_export_interval_ms > 0 )) || { echo "ERROR: metric export interval must be positive" >&2; exit 3; }
+(( pre_outage_stabilization_cycles >= 2 )) || {
+    echo "ERROR: pre-outage stabilization requires at least two full telemetry cycles" >&2
+    exit 3
+}
+(( pre_outage_stabilization_interval_seconds >= full_telemetry_cycle_seconds )) || {
+    echo "ERROR: pre-outage stabilization interval must cover one OTLP export + Prometheus scrape cycle (${full_telemetry_cycle_seconds}s)" >&2
+    exit 3
+}
+(( pre_outage_stabilization_timeout_seconds >=
+    pre_outage_stabilization_interval_seconds * pre_outage_stabilization_cycles )) || {
+    echo "ERROR: pre-outage stabilization timeout cannot cover the required stable cycles" >&2
+    exit 3
+}
+(( reconnect_stale_hold_seconds >= full_telemetry_cycle_seconds )) || {
+    echo "ERROR: reconnect stale-data hold must cover one OTLP export + Prometheus scrape cycle (${full_telemetry_cycle_seconds}s)" >&2
+    exit 3
+}
+(( reconnect_stale_hold_seconds +
+    (recovery_cross_attempts - 1) * recovery_cross_interval_seconds < recovery_timeout_seconds )) || {
+    echo "ERROR: reconnect stale-data hold and recovery cross rounds consume the entire recovery timeout" >&2
     exit 3
 }
 
@@ -610,7 +647,7 @@ if (( warmup_seconds >= 600 && duration_seconds >= 7200 && sample_interval_secon
 fi
 configured_symbols_json="$(printf '%s\n' "${configured_symbols[@]}" | jq -R . | jq -s .)"
 jq -n \
-    --arg schemaVersion "4" \
+    --arg schemaVersion "5" \
     --arg runId "$run_id" \
     --arg profile "$profile" \
     --arg projectName "$project_name" \
@@ -629,6 +666,13 @@ jq -n \
     --argjson recoveryTimeoutSeconds "$recovery_timeout_seconds" \
     --argjson recoveryCrossAttempts "$recovery_cross_attempts" \
     --argjson recoveryCrossIntervalSeconds "$recovery_cross_interval_seconds" \
+    --argjson metricExportIntervalMilliseconds "$metric_export_interval_ms" \
+    --argjson prometheusScrapeIntervalSeconds "$prometheus_scrape_interval_seconds" \
+    --argjson fullTelemetryCycleSeconds "$full_telemetry_cycle_seconds" \
+    --argjson preOutageStabilizationCycles "$pre_outage_stabilization_cycles" \
+    --argjson preOutageStabilizationIntervalSeconds "$pre_outage_stabilization_interval_seconds" \
+    --argjson preOutageStabilizationTimeoutSeconds "$pre_outage_stabilization_timeout_seconds" \
+    --argjson reconnectStaleHoldSeconds "$reconnect_stale_hold_seconds" \
     --argjson inventoryBiasLots "$inventory_bias_lots" \
     --argjson fillTimeoutSeconds "$fill_timeout_seconds" \
     --argjson quantity "$quantity" \
@@ -666,6 +710,13 @@ jq -n \
         recoveryTimeoutSeconds: $recoveryTimeoutSeconds,
         recoveryCrossAttempts: $recoveryCrossAttempts,
         recoveryCrossIntervalSeconds: $recoveryCrossIntervalSeconds,
+        metricExportIntervalMilliseconds: $metricExportIntervalMilliseconds,
+        prometheusScrapeIntervalSeconds: $prometheusScrapeIntervalSeconds,
+        fullTelemetryCycleSeconds: $fullTelemetryCycleSeconds,
+        preOutageStabilizationCycles: $preOutageStabilizationCycles,
+        preOutageStabilizationIntervalSeconds: $preOutageStabilizationIntervalSeconds,
+        preOutageStabilizationTimeoutSeconds: $preOutageStabilizationTimeoutSeconds,
+        reconnectStaleHoldSeconds: $reconnectStaleHoldSeconds,
         withGrafana: $withGrafana
       },
       workload: {
@@ -1005,15 +1056,12 @@ wait_http "${base_url}/ready" 90 || { log "ERROR: trading host did not become re
 wait_http "${prometheus_url}/-/ready" 60 || { log "ERROR: Prometheus did not become ready"; exit 1; }
 
 login() {
-    local user="$1" password="$2"
-    curl -fsS --max-time 10 \
-        -H 'Content-Type: application/json' \
-        -d "$(jq -cn --arg username "$user" --arg password "$password" '{username:$username,password:$password}')" \
-        "${base_url}/api/auth/login" | jq -er '.token'
-}
-
-auth_header() {
-    printf '%s: %s %s' 'Authoriz''ation' 'Bear''er' "$1"
+    local user="$1" password="$2" no_auth_token="" login_body
+    login_body="$(printf '%s\0%s' "$user" "$password" |
+        jq -Rs 'split("\u0000") | {username:.[0],password:.[1]}')"
+    soak_curl_json_request \
+        POST "${base_url}/api/auth/login" no_auth_token login_body |
+        jq -er '.token'
 }
 
 trading_token="$(login "$trading_user" "$trading_password")"
@@ -1022,23 +1070,23 @@ counterparty_token="$(login "$counterparty_user" "$counterparty_password")"
 readonly counterparty_token
 
 deposit() {
-    local token="$1" amount="$2"
+    local token="$1" amount="$2" request_body
     awk -v amount="$amount" 'BEGIN { exit !(amount > 0) }' || return 0
-    curl -fsS --max-time 10 \
-        -H "$(auth_header "$token")" \
-        -H 'Content-Type: application/json' \
-        -d "$(jq -cn --argjson amount "$amount" '{amount:$amount}')" \
-        "${base_url}/api/balance/deposit" >/dev/null
+    request_body="$(jq -cn --argjson amount "$amount" '{amount:$amount}')"
+    soak_curl_json_request \
+        POST "${base_url}/api/balance/deposit" token request_body >/dev/null
 }
 
 deposit "$trading_token" "$deposit_amount"
 deposit "$counterparty_token" "$counterparty_deposit_amount"
 
 wait_order_filled() {
-    local token="$1" clordid="$2" expected_quantity="${3:-$quantity}" started orders status cum
+    local token="$1" clordid="$2" expected_quantity="${3:-$quantity}"
+    local started orders status cum empty_request_body=""
     started=$SECONDS
     while (( SECONDS - started < fill_timeout_seconds )); do
-        orders="$(curl -fsS --max-time 10 -H "$(auth_header "$token")" "${base_url}/api/orders")"
+        orders="$(soak_curl_json_request \
+            GET "${base_url}/api/orders" token empty_request_body)"
         status="$(jq -r --arg id "$clordid" '.[] | select((.clOrdId|tostring)==$id) | .status' <<<"$orders" | tail -n1)"
         cum="$(jq -r --arg id "$clordid" '.[] | select((.clOrdId|tostring)==$id) | .cumulativeQuantity' <<<"$orders" | tail -n1)"
         if [[ "$status" == "Filled" && "$cum" == "$expected_quantity" ]]; then
@@ -1057,17 +1105,15 @@ wait_order_filled() {
 
 submit_order() {
     local token="$1" user="$2" side="$3" price="$4" phase="$5"
-    local response clordid latency
-    response="$(curl -fsS --max-time 10 \
-        -H "$(auth_header "$token")" \
-        -H 'Content-Type: application/json' \
-        -d "$(jq -cn \
-            --arg symbol "$symbol" \
-            --arg side "$side" \
-            --argjson quantity "$quantity" \
-            --argjson price "$price" \
-            '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" \
-        "${base_url}/api/orders")"
+    local response clordid latency request_body
+    request_body="$(jq -cn \
+        --arg symbol "$symbol" \
+        --arg side "$side" \
+        --argjson quantity "$quantity" \
+        --argjson price "$price" \
+        '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')"
+    response="$(soak_curl_json_request \
+        POST "${base_url}/api/orders" token request_body)"
     [[ "$(jq -r '.status // ""' <<<"$response")" != "Rejected" ]] || {
         log "ERROR: $side order was rejected: $response"
         return 1
@@ -1081,31 +1127,29 @@ submit_order() {
 
 submit_recovery_cross() {
     local cross_symbol="$1" cross_quantity="$2" cross_price="$3" phase="${4:-feed-recovery-cross}"
-    local sell_response buy_response sell_id buy_id latency
-    sell_response="$(curl -fsS --max-time 10 \
-        -H "$(auth_header "$counterparty_token")" \
-        -H 'Content-Type: application/json' \
-        -d "$(jq -cn \
-            --arg symbol "$cross_symbol" \
-            --argjson quantity "$cross_quantity" \
-            --argjson price "$cross_price" \
-            '{symbol:$symbol,side:"Sell",type:"Limit",quantity:$quantity,price:$price}')" \
-        "${base_url}/api/orders")"
+    local sell_response buy_response sell_id buy_id latency request_body token
+    request_body="$(jq -cn \
+        --arg symbol "$cross_symbol" \
+        --argjson quantity "$cross_quantity" \
+        --argjson price "$cross_price" \
+        '{symbol:$symbol,side:"Sell",type:"Limit",quantity:$quantity,price:$price}')"
+    token="$counterparty_token"
+    sell_response="$(soak_curl_json_request \
+        POST "${base_url}/api/orders" token request_body)"
     [[ "$(jq -r '.status // ""' <<<"$sell_response")" != "Rejected" ]] || {
         log "ERROR: recovery-cross sell for $cross_symbol was rejected: $sell_response"
         return 1
     }
     sell_id="$(jq -er '.clOrdId | tostring' <<<"$sell_response")"
 
-    buy_response="$(curl -fsS --max-time 10 \
-        -H "$(auth_header "$trading_token")" \
-        -H 'Content-Type: application/json' \
-        -d "$(jq -cn \
-            --arg symbol "$cross_symbol" \
-            --argjson quantity "$cross_quantity" \
-            --argjson price "$cross_price" \
-            '{symbol:$symbol,side:"Buy",type:"Limit",quantity:$quantity,price:$price}')" \
-        "${base_url}/api/orders")"
+    request_body="$(jq -cn \
+        --arg symbol "$cross_symbol" \
+        --argjson quantity "$cross_quantity" \
+        --argjson price "$cross_price" \
+        '{symbol:$symbol,side:"Buy",type:"Limit",quantity:$quantity,price:$price}')"
+    token="$trading_token"
+    buy_response="$(soak_curl_json_request \
+        POST "${base_url}/api/orders" token request_body)"
     [[ "$(jq -r '.status // ""' <<<"$buy_response")" != "Rejected" ]] || {
         log "ERROR: recovery-cross buy for $cross_symbol was rejected: $buy_response"
         return 1
@@ -1529,6 +1573,64 @@ capture_outage_telemetry_snapshot() {
     '
 }
 
+stabilize_pre_outage_submissions() {
+    local started samples='[]' sample report elapsed
+    started=$SECONDS
+    while true; do
+        capture_metrics pre-outage-stabilization
+        sample="$(capture_outage_telemetry_snapshot pre-outage-stabilization)"
+        samples="$(jq -cn \
+            --argjson samples "$samples" \
+            --argjson sample "$sample" \
+            '$samples + [$sample]')"
+        report="$(jq -cn \
+            --argjson requiredStableCycles "$pre_outage_stabilization_cycles" \
+            --argjson intervalSeconds "$pre_outage_stabilization_interval_seconds" \
+            --argjson timeoutSeconds "$pre_outage_stabilization_timeout_seconds" \
+            --argjson samples "$samples" \
+            '{
+              requiredStableCycles: $requiredStableCycles,
+              intervalSeconds: $intervalSeconds,
+              timeoutSeconds: $timeoutSeconds,
+              samples: $samples
+            }' | soak_evaluate_counter_stabilization)"
+        if [[ "$(jq -r '.passed' <<<"$report")" == "true" ]]; then
+            printf '%s\n' "$report" >"${artifacts_dir}/pre-outage-stabilization.json"
+            pre_outage_stabilization_report="$report"
+            return 0
+        fi
+        elapsed=$((SECONDS - started))
+        if (( elapsed + pre_outage_stabilization_interval_seconds >
+            pre_outage_stabilization_timeout_seconds )); then
+            printf '%s\n' "$report" >"${artifacts_dir}/pre-outage-stabilization.json"
+            pre_outage_stabilization_report="$report"
+            log "ERROR: submitted-order counter did not remain stable for ${pre_outage_stabilization_cycles} consecutive full telemetry cycles within ${pre_outage_stabilization_timeout_seconds}s"
+            return 1
+        fi
+        sleep "$pre_outage_stabilization_interval_seconds"
+    done
+}
+
+capture_reconnected_no_reference_sample() {
+    local snapshot
+    capture_metrics reconnected-no-reference
+    snapshot="$(capture_outage_telemetry_snapshot reconnected-no-reference)"
+    reconnected_samples="$(jq -cn \
+        --argjson rows "$reconnected_samples" \
+        --argjson row "$snapshot" \
+        '$rows + [$row]')"
+    if ! jq -e \
+        --argjson submitted "$pre_outage_submissions" '
+          .present and
+          .eligibleSymbols == 0 and
+          .openOrders == 0 and
+          .ordersSubmitted == $submitted
+        ' >/dev/null <<<"$snapshot"; then
+        log "ERROR: reconnect reused stale epoch data or submitted orders before a fresh reference"
+        return 1
+    fi
+}
+
 next_side=Buy
 run_window() {
     local seconds="$1" phase="$2" sample="$3" started next_sample now price side
@@ -1605,13 +1707,30 @@ capture_metrics warmup-complete
 
 pause_outage_pass=true
 pause_recovery_pass=true
+reconnect_stale_epoch_pass=true
 outage_telemetry_pass=true
 outage_telemetry_evidence=null
 marketdata_transition_pass=true
 marketdata_transition_evidence=null
+pre_outage_stabilization_pass=true
+pre_outage_stabilization_report=null
 if [[ "$profile" == "pause-and-cancel" ]]; then
+    log "stabilizing submitted-order telemetry before the pre-outage boundary"
+    if ! stabilize_pre_outage_submissions; then
+        pre_outage_stabilization_pass=false
+        exit 1
+    fi
     capture_metrics pre-outage
     outage_pre_snapshot="$(capture_outage_telemetry_snapshot pre-outage)"
+    stabilized_submissions="$(jq -r '.stableWindow[-1].ordersSubmitted // "missing"' \
+        <<<"$pre_outage_stabilization_report")"
+    pre_outage_submissions="$(jq -r '.ordersSubmitted // "missing"' <<<"$outage_pre_snapshot")"
+    if [[ "$pre_outage_stabilization_report" == "null" ]] ||
+        [[ "$stabilized_submissions" != "$pre_outage_submissions" ]]; then
+        pre_outage_stabilization_pass=false
+        log "ERROR: submitted-order counter changed between stabilization and the pre-outage boundary"
+        exit 1
+    fi
     log "stopping marketdata to exercise PauseAndCancel"
     marketdata_before_snapshot="$(capture_service_runtime_snapshot marketdata before-intentional-stop)"
     outage_check_started_seconds=$SECONDS
@@ -1715,6 +1834,31 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
         ! wait_bot_log_since "$recovery_started_at" "MarketData connection state: Connected" "$recovery_remaining"; then
         pause_recovery_pass=false
     fi
+    reconnected_samples='[]'
+    if $pause_recovery_pass; then
+        log "holding the reconnected feed without generating a fresh reference for ${reconnect_stale_hold_seconds}s"
+        if ! capture_reconnected_no_reference_sample; then
+            pause_recovery_pass=false
+            reconnect_stale_epoch_pass=false
+        fi
+        reconnect_hold_started=$SECONDS
+        while $pause_recovery_pass &&
+            (( SECONDS - reconnect_hold_started < reconnect_stale_hold_seconds )); do
+            reconnect_hold_remaining=$((reconnect_stale_hold_seconds -
+                (SECONDS - reconnect_hold_started)))
+            reconnect_hold_sleep=$((reconnect_hold_remaining < sample_interval_seconds
+                ? reconnect_hold_remaining
+                : sample_interval_seconds))
+            (( reconnect_hold_sleep > 0 )) || reconnect_hold_sleep=1
+            sleep "$reconnect_hold_sleep"
+            if ! capture_reconnected_no_reference_sample; then
+                pause_recovery_pass=false
+                reconnect_stale_epoch_pass=false
+            fi
+        done
+    else
+        reconnect_stale_epoch_pass=false
+    fi
     if $pause_recovery_pass; then
         log "printing ${recovery_cross_attempts} post-gap cross rounds for every configured symbol"
         for ((attempt = 1; attempt <= recovery_cross_attempts; attempt++)); do
@@ -1756,21 +1900,28 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
     outage_post_snapshot="$(capture_outage_telemetry_snapshot recovered)"
     outage_telemetry_evidence="$(jq -cn \
         --argjson expectedSymbolCount "${#configured_symbols[@]}" \
+        --argjson reconnectHoldSeconds "$reconnect_stale_hold_seconds" \
         --argjson pre "$outage_pre_snapshot" \
         --argjson settled "$outage_settled_snapshot" \
         --argjson holdSamples "$outage_hold_samples" \
+        --argjson reconnectedSamples "$reconnected_samples" \
+        --argjson stabilization "$pre_outage_stabilization_report" \
         --argjson post "$outage_post_snapshot" \
         '{
           expectedSymbolCount: $expectedSymbolCount,
+          reconnectHoldSeconds: $reconnectHoldSeconds,
           phaseBoundaries: {
-            pre: "captured immediately before the intentional marketdata stop",
+            pre: "captured after the submitted-order counter was stable across full telemetry cycles and immediately before the intentional marketdata stop",
             settled: "captured after eligibility=0 and all asynchronous quote cancellations reached open=0",
             hold: "samples collected after the settled boundary and before marketdata restart",
+            reconnected: "samples collected after Connected and for a full telemetry cycle before any new trade/reference was generated",
             post: "captured only after fresh references and exact two-sided quotes recovered"
           },
+          preOutageStabilization: $stabilization,
           pre: $pre,
           settled: $settled,
           holdSamples: $holdSamples,
+          reconnectedSamples: $reconnectedSamples,
           post: $post
         }')"
     outage_telemetry_report="$(soak_evaluate_outage_telemetry <<<"$outage_telemetry_evidence")"
@@ -2061,11 +2212,17 @@ case "$profile" in
             "configured=$configured_spread effective=$effective_spread additional=$additional_spread"
         ;;
     pause-and-cancel)
+        record_check "pre-outage-submission-stability" "$pre_outage_stabilization_pass" \
+            "mandatory series present and submitted-order counter unchanged across at least two full OTLP export + Prometheus scrape cycles" \
+            "cycles=$pre_outage_stabilization_cycles intervalSeconds=$pre_outage_stabilization_interval_seconds artifact=pre-outage-stabilization.json"
         record_check "pause-and-cancel-outage" "$pause_outage_pass" \
             "settled eligibility/openOrders=0, required outage counters increase, submissions remain unchanged from pre-outage and quotes stay zero throughout hold" \
             "passed=$pause_outage_pass telemetry=$outage_telemetry_pass elapsedSeconds=$outage_cancellation_elapsed_seconds artifact=outage-telemetry.json"
+        record_check "pause-and-cancel-reconnected-stale-epoch-hold" "$reconnect_stale_epoch_pass" \
+            "after Connected and before a new market event, eligibility/openOrders remain zero and submissions unchanged for a full telemetry cycle" \
+            "holdSeconds=$reconnect_stale_hold_seconds artifact=outage-telemetry.json"
         record_check "pause-and-cancel-outage-telemetry" "$outage_telemetry_pass" \
-            "ineligible/suppression/feed-cancel activity increases; submissions stay unchanged from pre-outage through hold and open quotes remain zero" \
+            "outage counters increase; submissions stay unchanged and open quotes remain zero through disconnected and reconnected-without-reference holds" \
             "artifact=outage-telemetry.json"
         record_check "pause-and-cancel-recovery" "$pause_recovery_pass" \
             "fresh current-epoch trade, eligibility=1, openOrders=2 for every configured symbol within timeout" \

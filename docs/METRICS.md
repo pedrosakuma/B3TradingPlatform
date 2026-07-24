@@ -118,6 +118,10 @@ mandatory symbol/profile series to exist before their numeric values are used;
 Prometheus absence is never coerced to zero. The helper also verifies every collected
 counter (`*_total` after Prometheus translation) is monotonically
 non-decreasing, so a bot restart cannot erase earlier integrity/error evidence.
+Before the strict outage boundary, `bot.orders.submitted` must be unchanged
+across at least two complete OTLP export plus Prometheus scrape cycles. After
+reconnect and before any fresh market event, the stable eligibility gauge and
+open-order gauge must remain zero for another complete cycle.
 In the bundled Prometheus view, the scrape target's `source` label causes the
 instrument's reference-source attribute to appear as `exported_source`; the
 helper normalizes that bounded value into its CSV `source` column.

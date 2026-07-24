@@ -207,9 +207,13 @@ Useful controls:
 | `SOAK_SAMPLE_INTERVAL_SECONDS` | `15` | Prometheus snapshot interval |
 | `SOAK_WORKLOAD_INTERVAL_SECONDS` | `1` | Delay after each completed order |
 | `SOAK_OUTAGE_SECONDS` | `20` | Feed hold-down after cancellation proof |
-| `SOAK_RECOVERY_TIMEOUT_SECONDS` | `90` | Cancellation/fresh-recovery deadline |
+| `SOAK_RECOVERY_TIMEOUT_SECONDS` | `120` | Cancellation, reconnect hold, and fresh-recovery deadline |
 | `SOAK_RECOVERY_CROSS_ATTEMPTS` | `3` | Recorded post-gap crosses per symbol |
 | `SOAK_RECOVERY_CROSS_INTERVAL_SECONDS` | `10` | Delay between post-gap cross rounds |
+| `SOAK_RECONNECT_STALE_HOLD_SECONDS` | OTLP export + scrape cycle (`10`) | Connected hold before any fresh recovery event |
+| `SOAK_PRE_OUTAGE_STABILIZATION_CYCLES` | `2` | Consecutive full telemetry cycles with unchanged submissions |
+| `SOAK_PRE_OUTAGE_STABILIZATION_INTERVAL_SECONDS` | OTLP export + scrape cycle (`10`) | Delay between stabilization samples |
+| `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
 | `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Marketable workload buy limit |
@@ -233,6 +237,12 @@ The helper exits nonzero on a failed check, captures logs, and tears down its
 isolated project and volumes unless `--keep-stack`/`SOAK_KEEP_STACK=true` is
 set. It refuses a non-empty artifact directory so stale evidence cannot be
 mixed into a rerun.
+
+Login JSON and bearer headers are delivered to `curl` through anonymous,
+process-local file descriptors. Passwords and tokens are never placed in the
+`curl` process argument list or a temporary file, and the helper disables shell
+xtrace before loading credentials. Errors and evidence contain identities but
+never credentials.
 
 The pre-run `docker compose down -v --remove-orphans` is a required isolation
 barrier: failure aborts before build/start. Final cleanup attempts event-monitor
@@ -370,10 +380,17 @@ inspect the complete time series against these unambiguous thresholds:
 
 ### `PauseAndCancel`
 
+- Before `pre-outage`, the helper requires all mandatory series and waits until
+  the submitted-order counter is unchanged across at least two consecutive
+  full OTLP export plus Prometheus scrape cycles. The derived cycle is 10
+  seconds for the checked-in 5-second exporter and 5-second scrape. A configured
+  interval cannot be shorter than that cycle.
 - The helper captures explicit `pre-outage`, `outage-settled`, `outage-hold`,
-  and `recovered` telemetry boundaries. `outage-settled` begins only after
+  `reconnected-no-reference`, and `recovered` telemetry boundaries.
+  `outage-settled` begins only after
   bounded asynchronous cancellation has reached eligibility `0` and open
-  orders `0` for all three symbols within 90 seconds.
+  orders `0` for all three symbols within the configured 120-second default
+  deadline.
 - Unavailable availability-transition, disconnected quote-suppression, and
   `FeedUnavailable` cancel counters must be present and increase from their
   pre-outage values. Cancel error/corruption counters remain zero.
@@ -381,10 +398,17 @@ inspect the complete time series against these unambiguous thresholds:
   the settled boundary and every hold sample. Every hold sample has eligibility
   `0` and exactly zero open quotes. No fresh recovery print is sent until the
   hold completes.
-- Restart alone is not accepted as recovery. After fresh current-epoch trades,
+- After marketdata and the bot report connected, no recovery cross is sent for
+  at least one complete export-plus-scrape cycle. At least two
+  `reconnected-no-reference` samples must retain eligibility `0`, open orders
+  `0`, and the pre-outage submitted-order count. This proves reconnect did not
+  reuse a stale prior-epoch reference.
+- Restart alone is not accepted as recovery. Only after the reconnect hold does
+  the helper generate fresh current-epoch trades; then
   eligibility becomes `1`, a
   `reference_age_seconds{exported_source="last_trade_price"} < 15` sample
-  appears, and every configured symbol returns to `open=2` within 90 seconds.
+  appears, and every configured symbol returns to `open=2` within the configured
+  recovery deadline.
 - `reference_age_seconds` resets to a fresh value and `[mm-feed]` records
   source plus the unavailable-to-available transition.
 
@@ -455,6 +479,7 @@ The helper writes only under ignored `soak-artifacts/`:
 - `runtime-events.jsonl` / `runtime-lifecycle.json` — Docker lifecycle events and exact transition counts;
 - `runtime-continuity.json` — per-critical-service identity/start/status proof;
 - `marketdata-transition.json` — the sole permitted outage stop/start (strict profile only);
+- `pre-outage-stabilization.json` — mandatory counter presence and the consecutive stable-cycle window;
 - `samples.csv` / `samples.jsonl` — normalized present metric samples with accounting-period identity;
 - `metric-presence.csv` / `metric-presence.jsonl` — mandatory-series presence/value evidence;
 - `outage-telemetry.json` — strict-profile phase boundaries, counters, submissions, eligibility, and open orders;
@@ -475,7 +500,7 @@ Use this summary shape (generated values only; never fabricate results):
 
 ```json
 {
-  "schemaVersion": "4",
+  "schemaVersion": "5",
   "runId": "20260724T180000Z-baseline",
   "profile": "baseline",
   "gitSha": "<40-hex commit>",
@@ -499,9 +524,16 @@ Use this summary shape (generated values only; never fabricate results):
     "workloadIntervalSeconds": 1,
     "fillTimeoutSeconds": 20,
     "outageSeconds": 60,
-    "recoveryTimeoutSeconds": 90,
+    "recoveryTimeoutSeconds": 120,
     "recoveryCrossAttempts": 3,
     "recoveryCrossIntervalSeconds": 10,
+    "metricExportIntervalMilliseconds": 5000,
+    "prometheusScrapeIntervalSeconds": 5,
+    "fullTelemetryCycleSeconds": 10,
+    "preOutageStabilizationCycles": 2,
+    "preOutageStabilizationIntervalSeconds": 10,
+    "preOutageStabilizationTimeoutSeconds": 60,
+    "reconnectStaleHoldSeconds": 10,
     "withGrafana": false
   },
   "execution": {"buildImages": true, "keepStack": false},

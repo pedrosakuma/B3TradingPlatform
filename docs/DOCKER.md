@@ -344,8 +344,12 @@ marketdata stop/start in the outage profile. Evidence paths are restricted to
 the checkout's ignored `soak-artifacts/` tree. Missing Prometheus series are
 recorded as absent and fail rather than being treated as zero. Pre-run teardown
 is mandatory, and final teardown failures invalidate the result while retaining
-aggregated cleanup evidence. Multi-hour evidence is operator-run and is not
-part of normal CI.
+aggregated cleanup evidence. The strict profile stabilizes submitted-order
+telemetry before outage, then proves a connected feed remains ineligible with
+zero quotes for a full export-plus-scrape cycle before generating a fresh
+recovery trade. Sensitive HTTP bodies and bearer headers use anonymous file
+descriptors rather than process arguments. Multi-hour evidence is operator-run
+and is not part of normal CI.
 
 ### Out of scope
 
