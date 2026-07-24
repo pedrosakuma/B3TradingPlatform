@@ -334,11 +334,15 @@ volatility-spread, and `PauseAndCancel` runs. The dedicated
 `docker-compose.market-maker-soak.yml` overlay routes the bot to the bundled
 Collector, parameterizes only the opt-in feature switches, and isolates
 container/network/volume names. It also pins `Trading__Auth__Mode=Local` plus
-local login and the isolated counterparty's cross-workload risk opt-out.
+local login and resolves the operator-selected trading/counterparty seed and
+risk mappings without recording credentials.
 Closure evidence uses one shared suite
 manifest and compares actual runtime `sha256:` image IDs across profiles;
-mutable tags alone are not accepted. Multi-hour evidence is operator-run and
-is not part of normal CI.
+mutable tags alone are not accepted. It also proves container/image/start/restart
+continuity for all six critical services, allowing only the explicitly recorded
+marketdata stop/start in the outage profile. Evidence paths are restricted to
+the checkout's ignored `soak-artifacts/` tree. Multi-hour evidence is
+operator-run and is not part of normal CI.
 
 ### Out of scope
 

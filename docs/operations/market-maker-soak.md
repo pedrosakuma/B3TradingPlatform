@@ -25,7 +25,7 @@ Evidence is closure-eligible only when **each** profile has:
 - warmup at least 600 seconds;
 - evidence duration at least 7,200 seconds (two hours);
 - sample interval at most 30 seconds;
-- a clean checkout at the recorded commit;
+- a clean checkout at the recorded commit, including no untracked files;
 - `SOAK_SUITE_MANIFEST` set to one shared path below `soak-artifacts/`;
 - the same timing, workload controls, rendered common configuration, configured
   symbols, and actual runtime image IDs as the suite manifest.
@@ -43,14 +43,16 @@ claim about #717/#718.
 
 ## Prerequisites and isolation
 
-- Linux Docker Engine with Compose v2, `curl`, and `jq`;
+- Linux Docker Engine with Compose v2, `curl`, `jq`, and GNU `realpath`;
 - enough resources for matching, market data, trading host, bot, Collector, and
   Prometheus;
 - `docker/.env` populated as described in [DOCKER.md](../DOCKER.md), or the same
   required Compose values exported by the operator;
 - `SOAK_TRADING_PASSWORD` exported in the invoking shell. The helper never
   writes it to evidence;
-- a clean exact checkout; the helper records both its commit and dirty state.
+- a clean exact checkout; the helper records `gitClean`/`gitDirty` from the full
+  `git status --porcelain` result. Ignored `soak-artifacts/` output does not
+  dirty the checkout.
 
 The soak overlay replaces fixed container, network, and volume names with
 `MM_SOAK_PROJECT_NAME`-prefixed names. It also uses dedicated default host
@@ -59,6 +61,8 @@ finite automatic address pools. Give every run a unique project name:
 
 ```bash
 export SOAK_PROJECT_NAME=b3tp-719-baseline-01
+export SOAK_TRADING_USER=alice
+export SOAK_COUNTERPARTY_USER=bob
 export SOAK_TRADING_PASSWORD
 ```
 
@@ -89,8 +93,9 @@ The soak overlay:
 - routes `b3-market-maker-bot` by OTLP/gRPC to the bundled Collector;
 - pins `Trading__Auth__Mode=Local` and local login for this sandbox workload,
   even if the operator shell exports `AUTH_MODE=Entra`;
-- enables short selling only for the isolated `bob` counterparty used to print
-  recovery crosses, matching the existing real-conformance test policy;
+- resolves `SOAK_TRADING_USER` and `SOAK_COUNTERPARTY_USER` into distinct seed
+  slots and enables short selling only for that configured isolated
+  counterparty, matching the existing real-conformance test policy;
 - leaves Azure exporters and credentials out of this repository;
 - parameterizes the strategy/feed profile;
 - isolates containers, network, trading/matching/bot state, and observability
@@ -127,13 +132,16 @@ skew saturation, then reverses it through flat to 12 lots short and records
 negative saturation. The feed profile stops only the isolated `marketdata`
 service. Because strict mode cannot quote without a current-epoch reference,
 the helper crosses all three symbols once before the initial quote assertion.
-After restart it repeats alice/bob end-client crosses at each rendered
-reference price. This existing real-stack technique makes every configured
-symbol prove fresh eligibility and exactly two recovered quotes. A restarted
-UMDF consumer may discard the first post-gap event while healing sequence
-state, so the helper emits three recorded cross rounds, ten seconds apart, for
-all symbols. Only a fresh `<15s` last-trade reference plus two quotes for all
-symbols inside the single recovery timeout passes.
+After restart it repeats crosses between the configured trading and
+counterparty identities at each rendered reference price. The helper fails
+before startup if either identity has no unique rendered seed mapping or if the
+resolved counterparty risk mapping is absent. This existing real-stack
+technique makes every configured symbol prove fresh eligibility and exactly two
+recovered quotes. A restarted UMDF consumer may discard the first post-gap
+event while healing sequence state, so the helper emits three recorded cross
+rounds, ten seconds apart, for all symbols. Only a fresh `<15s` last-trade
+reference plus two quotes for all symbols inside the single recovery timeout
+passes.
 
 ## Run the four profiles
 
@@ -208,6 +216,8 @@ Useful controls:
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |
 | `SOAK_COUNTERPARTY_DEPOSIT_AMOUNT` | `0` | Counterparty sandbox deposit |
+| `SOAK_TRADING_USER` | `alice` | Trading workload identity; must resolve to one rendered seed slot |
+| `SOAK_COUNTERPARTY_USER` | `bob` | Distinct cross-printing identity; must resolve to one rendered seed slot/risk mapping |
 | `SOAK_ARTIFACTS_DIR` | `soak-artifacts/<run-id>` | Ignored evidence directory |
 | `SOAK_SUITE_MANIFEST` | unset | Shared closure-suite manifest; required for acceptance |
 | `SOAK_KEEP_STACK` | `false` | Keep isolated containers/volumes for inspection |
@@ -221,7 +231,16 @@ Useful controls:
 The helper exits nonzero on a failed check, captures logs, and tears down its
 isolated project and volumes unless `--keep-stack`/`SOAK_KEEP_STACK=true` is
 set. It refuses a non-empty artifact directory so stale evidence cannot be
-mixed into a rerun. Manual cleanup is:
+mixed into a rerun.
+
+Both evidence path controls are canonicalized before any directory or file is
+created. They must resolve under this checkout's ignored `soak-artifacts/`
+directory. The helper rejects `..` traversal, external absolute paths, symlink
+escapes, symlink overwrite targets, a manifest inside its profile artifact
+directory, non-file/non-directory targets, and stale atomic `.next` targets.
+Evidence records repository-relative paths, so manifests remain portable.
+
+Manual cleanup is:
 
 ```bash
 MM_SOAK_PROJECT_NAME="$SOAK_PROJECT_NAME" docker compose \
@@ -278,9 +297,18 @@ inspect the complete time series against these unambiguous thresholds:
   all remain zero.
 - Safety-cap hits, quote submit failures, quote rejects, and cancel
   reject/submit-failure counters remain zero.
-- Every sampled runtime row retains the initial container ID and image ID and
-  `restartCount=0`; the bot's `StartedAt` also remains unchanged. All runtime
-  services are running at final capture.
+- Every sampled critical service (`trading-host`, `matching-platform`,
+  `marketdata`, `market-maker-bot`, `otel-collector`, and `prometheus`) retains
+  its initial container ID and image ID with `restartCount=0`. `StartedAt`
+  remains unchanged for every service except the one intentional marketdata
+  stop/start in `PauseAndCancel`. The helper has no persistent workload-helper
+  container.
+- `PauseAndCancel` records explicit before-stop, stopped, and after-start
+  marketdata snapshots. They must show the same container/image,
+  `restartCount=0`, statuses `running -> exited -> running`, and exactly two
+  distinct `StartedAt` values. A Docker event monitor additionally requires
+  exactly one post-baseline marketdata `die`/`start` pair and zero lifecycle
+  events for every other critical service.
 - Every metric sample contains the same non-empty
   `accountingPeriodStartedAtUtc`. A changed bot process/ledger fails the run.
 - Every tracked `*_total` series is monotonically non-decreasing across all
@@ -394,6 +422,9 @@ The helper writes only under ignored `soak-artifacts/`:
 - `runtime-images.json` — configured references, actual image IDs, and available repo digests;
 - `compatibility.json` — exact cross-profile comparison input;
 - `runtime.csv` / `runtime.jsonl` — container IDs, image IDs, start time, restart count, and state;
+- `runtime-events.jsonl` / `runtime-lifecycle.json` — Docker lifecycle events and exact transition counts;
+- `runtime-continuity.json` — per-critical-service identity/start/status proof;
+- `marketdata-transition.json` — the sole permitted outage stop/start (strict profile only);
 - `samples.csv` / `samples.jsonl` — normalized metric samples with accounting-period identity;
 - `workload.csv` — order/fill latency evidence;
 - `counter-monotonicity.json` — any decreasing tracked counter series;
@@ -410,17 +441,20 @@ Use this summary shape (generated values only; never fabricate results):
 
 ```json
 {
-  "schemaVersion": "2",
+  "schemaVersion": "3",
   "runId": "20260724T180000Z-baseline",
   "profile": "baseline",
   "gitSha": "<40-hex commit>",
+  "gitClean": true,
   "gitDirty": false,
   "configuredSymbols": ["PETR4", "VALE3", "ITUB4"],
   "images": {
     "trading-host": "sha256:<actual-runtime-image-id>",
     "market-maker-bot": "sha256:<actual-runtime-image-id>",
     "matching-platform": "sha256:<actual-runtime-image-id>",
-    "marketdata": "sha256:<actual-runtime-image-id>"
+    "marketdata": "sha256:<actual-runtime-image-id>",
+    "otel-collector": "sha256:<actual-runtime-image-id>",
+    "prometheus": "sha256:<actual-runtime-image-id>"
   },
   "startedAtUtc": "<ISO-8601>",
   "finishedAtUtc": "<ISO-8601>",
@@ -438,6 +472,11 @@ Use this summary shape (generated values only; never fabricate results):
   },
   "execution": {"buildImages": true, "keepStack": false},
   "workload": {
+    "identities": {
+      "trading": {"seedIndex": 0, "username": "<trading-user>", "firm": "<firm>", "role": "<role>"},
+      "counterparty": {"seedIndex": 5, "username": "<counterparty-user>", "firm": "<firm>", "role": "<role>"},
+      "risk": {"counterparty": "<counterparty-user>", "allowShortSell": true}
+    },
     "symbol": "PETR4",
     "quantity": 100,
     "marketableBuyPrice": 32.8,

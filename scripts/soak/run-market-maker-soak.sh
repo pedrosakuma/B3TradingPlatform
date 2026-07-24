@@ -2,7 +2,7 @@
 # Reproducible real-stack market-maker soak driver (#719).
 set -euo pipefail
 
-readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
 
 profile=""
@@ -11,6 +11,7 @@ keep_stack="${SOAK_KEEP_STACK:-false}"
 build_images="${SOAK_BUILD_IMAGES:-true}"
 with_grafana="${SOAK_WITH_GRAFANA:-false}"
 stack_started=false
+runtime_event_monitor_pid=""
 
 usage() {
     cat <<'EOF'
@@ -90,6 +91,7 @@ require_bool() {
 require_cmd docker
 require_cmd curl
 require_cmd jq
+require_cmd realpath
 docker compose version >/dev/null
 
 readonly warmup_seconds="${SOAK_WARMUP_SECONDS:-60}"
@@ -111,6 +113,17 @@ readonly marketable_sell_price="${SOAK_MARKETABLE_SELL_PRICE:-29.30}"
 readonly reference_cross_price="${SOAK_REFERENCE_CROSS_PRICE:-30.00}"
 readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-100000.00}"
 readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-0}"
+
+for identity in "$trading_user" "$counterparty_user"; do
+    [[ "$identity" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+        echo "ERROR: soak identities must match ^[A-Za-z0-9][A-Za-z0-9._-]*$" >&2
+        exit 3
+    }
+done
+[[ "$trading_user" != "$counterparty_user" ]] || {
+    echo "ERROR: SOAK_TRADING_USER and SOAK_COUNTERPARTY_USER must differ" >&2
+    exit 3
+}
 
 require_uint SOAK_WARMUP_SECONDS "$warmup_seconds"
 require_uint SOAK_DURATION_SECONDS "$duration_seconds"
@@ -141,6 +154,9 @@ readonly project_name="${SOAK_PROJECT_NAME:-b3tp-soak-${run_id,,}}"
 }
 
 export MM_SOAK_PROJECT_NAME="$project_name"
+export TRADING_SEED_USER="${TRADING_SEED_USER:-$trading_user}"
+export TRADING_SEED_USER_2="${TRADING_SEED_USER_2:-$counterparty_user}"
+export MM_SOAK_COUNTERPARTY_USER="$counterparty_user"
 export TRADING_HOST_PORT="${SOAK_TRADING_HOST_PORT:-15000}"
 export FRONTEND_PORT="${SOAK_FRONTEND_PORT:-18080}"
 export MARKETDATA_PORT="${SOAK_MARKETDATA_PORT:-18081}"
@@ -203,10 +219,19 @@ rendered_compose="$("${compose[@]}" config --format json)"
 if ! jq -e \
     --arg inventorySkew "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
     --arg volatilitySpread "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" \
-    --arg feedLossPolicy "$MM_SOAK_FEED_LOSS_POLICY" '
+    --arg feedLossPolicy "$MM_SOAK_FEED_LOSS_POLICY" \
+    --arg tradingUser "$trading_user" \
+    --arg counterpartyUser "$counterparty_user" '
+      .services["trading-host"].environment as $hostEnvironment |
       .services["trading-host"].environment.Trading__Auth__Mode == "Local" and
       .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled == "true" and
-      .services["trading-host"].environment.Trading__Risk__PerEndClient__bob__AllowShortSell == "true" and
+      $hostEnvironment["Trading__Risk__PerEndClient__" + $counterpartyUser + "__AllowShortSell"] == "true" and
+      ([$hostEnvironment | to_entries[] |
+        select(.key | test("^Trading__Auth__Users__[0-9]+__Username$")) |
+        select(.value == $tradingUser)] | length) == 1 and
+      ([$hostEnvironment | to_entries[] |
+        select(.key | test("^Trading__Auth__Users__[0-9]+__Username$")) |
+        select(.value == $counterpartyUser)] | length) == 1 and
       .services["market-maker-bot"].environment.MarketMaker__MarketData__FeedLossPolicy == $feedLossPolicy and
       ([.services["market-maker-bot"].environment
           | to_entries[]
@@ -221,7 +246,9 @@ if ! jq -e \
     exit 3
 fi
 
-sanitized_rendered_config="$(jq '{
+sanitized_rendered_config="$(jq --arg counterpartyUser "$counterparty_user" '
+  .services["trading-host"].environment as $hostEnvironment |
+{
   services: {
     tradingHost: {
       image: .services["trading-host"].image,
@@ -229,9 +256,20 @@ sanitized_rendered_config="$(jq '{
         mode: .services["trading-host"].environment.Trading__Auth__Mode,
         localLoginEnabled: .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled
       },
+      seedUsers: [
+        $hostEnvironment | to_entries[] |
+        select(.key | test("^Trading__Auth__Users__[0-9]+__Username$")) |
+        (.key | capture("^Trading__Auth__Users__(?<index>[0-9]+)__Username$").index | tonumber) as $index |
+        {
+          seedIndex: $index,
+          username: .value,
+          firm: $hostEnvironment["Trading__Auth__Users__" + ($index | tostring) + "__Firm"],
+          role: $hostEnvironment["Trading__Auth__Users__" + ($index | tostring) + "__Role"]
+        }
+      ] | sort_by(.seedIndex),
       workloadRisk: {
-        counterparty: "bob",
-        allowShortSell: .services["trading-host"].environment.Trading__Risk__PerEndClient__bob__AllowShortSell
+        counterparty: $counterpartyUser,
+        allowShortSell: $hostEnvironment["Trading__Risk__PerEndClient__" + $counterpartyUser + "__AllowShortSell"]
       }
     },
     marketMakerBot: {
@@ -255,6 +293,32 @@ sanitized_rendered_config="$(jq '{
     ipam: .networks["b3-net"].ipam.config
   }
 }' <<<"$rendered_compose")"
+
+if ! identity_mappings_json="$(jq -ce \
+    --arg tradingUser "$trading_user" \
+    --arg counterpartyUser "$counterparty_user" '
+      .services.tradingHost as $host |
+      ($host.seedUsers | map(select(.username == $tradingUser))) as $trading |
+      ($host.seedUsers | map(select(.username == $counterpartyUser))) as $counterparty |
+      if ($trading | length) == 1 and ($counterparty | length) == 1 and
+         $host.workloadRisk.counterparty == $counterpartyUser and
+         $host.workloadRisk.allowShortSell == "true"
+      then {
+        trading: $trading[0],
+        counterparty: $counterparty[0],
+        risk: {
+          counterparty: $counterpartyUser,
+          allowShortSell: true
+        }
+      }
+      else error("resolved seed/risk mapping is unavailable or ambiguous")
+      end
+    ' <<<"$sanitized_rendered_config")"; then
+    echo "ERROR: rendered Compose profile lacks a unique secret-free seed/risk mapping for the soak identities" >&2
+    exit 3
+fi
+sanitized_rendered_config="$(jq --argjson identities "$identity_mappings_json" \
+    '.services.tradingHost.workloadIdentities = $identities' <<<"$sanitized_rendered_config")"
 
 mapfile -t configured_symbols < <(jq -r '
   .services.marketMakerBot.configuration
@@ -281,10 +345,80 @@ if [[ "${#configured_symbols[@]}" -ne 3 ]] ||
     echo "ERROR: rendered profile must contain PETR4/target plus exactly three configured symbols" >&2
     exit 3
 fi
+readonly evidence_root="${ROOT}/soak-artifacts"
+readonly artifacts_dir_input="${SOAK_ARTIFACTS_DIR:-soak-artifacts/${run_id}}"
+readonly suite_manifest_input="${SOAK_SUITE_MANIFEST:-}"
+
+git check-ignore -q --no-index "soak-artifacts/.integrity-probe" || {
+    echo "ERROR: repository soak-artifacts/ path is not ignored by git" >&2
+    exit 3
+}
+[[ "$(realpath -m "$evidence_root")" == "$evidence_root" ]] || {
+    echo "ERROR: repository soak-artifacts path is a symlink or resolves outside the repository" >&2
+    exit 3
+}
+
+canonical_evidence_path() {
+    local label="$1" input="$2" candidate canonical
+    [[ -n "$input" ]] || {
+        echo "ERROR: $label must not be empty" >&2
+        return 3
+    }
+    [[ ! "$input" =~ (^|/)\.\.(/|$) ]] || {
+        echo "ERROR: $label must not contain '..' traversal: $input" >&2
+        return 3
+    }
+    if [[ "$input" == /* ]]; then
+        candidate="$input"
+    else
+        candidate="${ROOT}/${input}"
+    fi
+    [[ ! -L "$candidate" ]] || {
+        echo "ERROR: $label must not overwrite a symlink: $input" >&2
+        return 3
+    }
+    canonical="$(realpath -m "$candidate")"
+    [[ "$canonical" == "$evidence_root"/* ]] || {
+        echo "ERROR: $label must resolve below repository soak-artifacts/: $input" >&2
+        return 3
+    }
+    printf '%s\n' "$canonical"
+}
+
+artifacts_dir="$(canonical_evidence_path SOAK_ARTIFACTS_DIR "$artifacts_dir_input")" || exit $?
+readonly artifacts_dir
+readonly artifacts_dir_relative="${artifacts_dir#"$ROOT/"}"
+suite_manifest=""
+suite_manifest_relative=""
+if [[ -n "$suite_manifest_input" ]]; then
+    suite_manifest="$(canonical_evidence_path SOAK_SUITE_MANIFEST "$suite_manifest_input")" || exit $?
+    suite_manifest_relative="${suite_manifest#"$ROOT/"}"
+    [[ "$suite_manifest" != "$artifacts_dir"/* ]] || {
+        echo "ERROR: SOAK_SUITE_MANIFEST must be shared outside the per-run artifact directory" >&2
+        exit 3
+    }
+    [[ ! -e "${suite_manifest}.next" && ! -L "${suite_manifest}.next" ]] || {
+        echo "ERROR: unsafe stale suite-manifest overwrite target exists: ${suite_manifest}.next" >&2
+        exit 3
+    }
+    [[ ! -e "$suite_manifest" || -f "$suite_manifest" ]] || {
+        echo "ERROR: SOAK_SUITE_MANIFEST exists but is not a regular file" >&2
+        exit 3
+    }
+fi
+[[ ! -e "$artifacts_dir" || -d "$artifacts_dir" ]] || {
+    echo "ERROR: SOAK_ARTIFACTS_DIR exists but is not a directory" >&2
+    exit 3
+}
+if [[ -d "$artifacts_dir" && -n "$(ls -A "$artifacts_dir")" ]]; then
+    echo "ERROR: SOAK_ARTIFACTS_DIR already contains files: $artifacts_dir_relative" >&2
+    exit 3
+fi
 if $dry_run; then
-    printf 'PASS: profile=%s project=%s authMode=Local inventorySkew=%s volatilitySpread=%s feedLossPolicy=%s\n' \
+    printf 'PASS: profile=%s project=%s authMode=Local inventorySkew=%s volatilitySpread=%s feedLossPolicy=%s artifacts=%s manifest=%s\n' \
         "$profile" "$project_name" "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
-        "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" "$MM_SOAK_FEED_LOSS_POLICY"
+        "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" "$MM_SOAK_FEED_LOSS_POLICY" \
+        "$artifacts_dir_relative" "${suite_manifest_relative:-none}"
     exit 0
 fi
 
@@ -296,16 +430,6 @@ readonly trading_password="$SOAK_TRADING_PASSWORD"
 readonly counterparty_password="${SOAK_COUNTERPARTY_PASSWORD:-$SOAK_TRADING_PASSWORD}"
 readonly base_url="http://127.0.0.1:${TRADING_HOST_PORT}"
 readonly prometheus_url="http://127.0.0.1:${PROMETHEUS_PORT}"
-readonly artifacts_dir="${SOAK_ARTIFACTS_DIR:-soak-artifacts/${run_id}}"
-readonly suite_manifest="${SOAK_SUITE_MANIFEST:-}"
-if [[ -n "$suite_manifest" && "$suite_manifest" != soak-artifacts/* ]]; then
-    echo "ERROR: SOAK_SUITE_MANIFEST must be a relative path below ignored soak-artifacts/" >&2
-    exit 3
-fi
-if [[ -d "$artifacts_dir" && -n "$(ls -A "$artifacts_dir")" ]]; then
-    echo "ERROR: SOAK_ARTIFACTS_DIR already contains files: $artifacts_dir" >&2
-    exit 3
-fi
 mkdir -p "$artifacts_dir"
 if [[ -n "$suite_manifest" ]]; then
     mkdir -p "$(dirname "$suite_manifest")"
@@ -315,12 +439,14 @@ readonly samples_csv="${artifacts_dir}/samples.csv"
 readonly workload_csv="${artifacts_dir}/workload.csv"
 readonly runtime_jsonl="${artifacts_dir}/runtime.jsonl"
 readonly runtime_csv="${artifacts_dir}/runtime.csv"
+readonly runtime_events_jsonl="${artifacts_dir}/runtime-events.jsonl"
 readonly checks_tsv="${artifacts_dir}/checks.tsv"
 printf 'timestamp_utc,phase,accountingPeriodStartedAtUtc,metric,symbol,side,reason,available,source,value\n' >"$samples_csv"
 printf 'timestamp_utc,phase,user,side,clOrdId,fillLatencySeconds\n' >"$workload_csv"
 printf 'timestamp_utc,phase,service,containerId,imageId,startedAtUtc,restartCount,status\n' >"$runtime_csv"
 : >"$samples_jsonl"
 : >"$runtime_jsonl"
+: >"$runtime_events_jsonl"
 : >"$checks_tsv"
 printf '%s\n' "$sanitized_rendered_config" >"${artifacts_dir}/rendered-config.json"
 
@@ -337,24 +463,32 @@ capture_logs() {
 
 cleanup() {
     local status=$?
+    if [[ -n "${runtime_event_monitor_pid:-}" ]] &&
+        kill -0 "$runtime_event_monitor_pid" 2>/dev/null; then
+        kill "$runtime_event_monitor_pid" 2>/dev/null || true
+        wait "$runtime_event_monitor_pid" 2>/dev/null || true
+    fi
     capture_logs
     if $stack_started && ! $keep_stack; then
         "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
     fi
     if (( status != 0 )); then
-        log "FAILED (exit $status); evidence retained in $artifacts_dir"
+        log "FAILED (exit $status); evidence retained in $artifacts_dir_relative"
     elif $keep_stack; then
-        log "PASS; stack retained for project $project_name and evidence is in $artifacts_dir"
+        log "PASS; stack retained for project $project_name and evidence is in $artifacts_dir_relative"
     else
-        log "PASS; isolated stack removed and evidence is in $artifacts_dir"
+        log "PASS; isolated stack removed and evidence is in $artifacts_dir_relative"
     fi
     exit "$status"
 }
 trap cleanup EXIT
 
 git_sha="$(git rev-parse HEAD)"
+git_status_porcelain="$(git status --porcelain)"
+git_clean=true
 git_dirty=false
-if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+if [[ -n "$git_status_porcelain" ]]; then
+    git_clean=false
     git_dirty=true
 fi
 timing_eligible=false
@@ -363,11 +497,12 @@ if (( warmup_seconds >= 600 && duration_seconds >= 7200 && sample_interval_secon
 fi
 configured_symbols_json="$(printf '%s\n' "${configured_symbols[@]}" | jq -R . | jq -s .)"
 jq -n \
-    --arg schemaVersion "2" \
+    --arg schemaVersion "3" \
     --arg runId "$run_id" \
     --arg profile "$profile" \
     --arg projectName "$project_name" \
     --arg gitSha "$git_sha" \
+    --argjson gitClean "$git_clean" \
     --argjson gitDirty "$git_dirty" \
     --arg symbol "$symbol" \
     --arg inventorySkew "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
@@ -391,17 +526,19 @@ jq -n \
     --argjson counterpartyDepositAmount "$counterparty_deposit_amount" \
     --argjson configuredSymbols "$configured_symbols_json" \
     --argjson configuredInstruments "$configured_instruments_json" \
+    --argjson identities "$identity_mappings_json" \
     --argjson timingEligible "$timing_eligible" \
     --argjson buildImages "$build_images" \
     --argjson keepStack "$keep_stack" \
     --argjson withGrafana "$with_grafana" \
-    --arg suiteManifest "$suite_manifest" \
+    --arg suiteManifest "$suite_manifest_relative" \
     '{
       schemaVersion: $schemaVersion,
       runId: $runId,
       profile: $profile,
       projectName: $projectName,
       gitSha: $gitSha,
+      gitClean: $gitClean,
       gitDirty: $gitDirty,
       symbol: $symbol,
       configuredSymbols: $configuredSymbols,
@@ -419,6 +556,7 @@ jq -n \
         withGrafana: $withGrafana
       },
       workload: {
+        identities: $identities,
         symbol: $symbol,
         quantity: $quantity,
         marketableBuyPrice: $marketableBuyPrice,
@@ -456,6 +594,15 @@ if $build_images; then
     "${compose[@]}" build trading-host market-maker-bot alert-receiver
 fi
 
+readonly critical_services=(
+    trading-host
+    matching-platform
+    marketdata
+    market-maker-bot
+    otel-collector
+    prometheus
+)
+critical_services_json="$(printf '%s\n' "${critical_services[@]}" | jq -R . | jq -s .)"
 services=(trading-host market-maker-bot prometheus)
 if $with_grafana; then
     services+=(grafana)
@@ -465,7 +612,8 @@ stack_started=true
 "${compose[@]}" up -d --no-build --wait "${services[@]}"
 
 capture_runtime_images() {
-    local runtime_images='[]' container_id inspect_json service configured_image image_id started_at repo_digests row
+    local runtime_images='[]' container_id inspect_json service configured_image image_id started_at
+    local restart_count status repo_digests row
     local container_ids=()
     mapfile -t container_ids < <("${compose[@]}" ps --all -q)
     ((${#container_ids[@]} > 0)) || {
@@ -478,6 +626,8 @@ capture_runtime_images() {
         configured_image="$(jq -er '.Config.Image' <<<"$inspect_json")"
         image_id="$(jq -er '.Image' <<<"$inspect_json")"
         started_at="$(jq -er '.State.StartedAt' <<<"$inspect_json")"
+        restart_count="$(jq -er '.RestartCount' <<<"$inspect_json")"
+        status="$(jq -er '.State.Status' <<<"$inspect_json")"
         repo_digests="$(docker image inspect "$image_id" | jq '.[0].RepoDigests // []')"
         row="$(jq -cn \
             --arg service "$service" \
@@ -485,6 +635,8 @@ capture_runtime_images() {
             --arg configuredImage "$configured_image" \
             --arg imageId "$image_id" \
             --arg startedAtUtc "$started_at" \
+            --argjson restartCount "$restart_count" \
+            --arg status "$status" \
             --argjson repoDigests "$repo_digests" \
             '{
               service: $service,
@@ -492,16 +644,21 @@ capture_runtime_images() {
               configuredImage: $configuredImage,
               imageId: $imageId,
               startedAtUtc: $startedAtUtc,
+              restartCount: $restartCount,
+              status: $status,
               repoDigests: $repoDigests
             }')"
         runtime_images="$(jq -cn --argjson rows "$runtime_images" --argjson row "$row" '$rows + [$row]')"
     done
-    jq -e '
+    jq -e --argjson critical "$critical_services_json" '
       length > 0 and
       (map(.service) | unique | length) == length and
-      all(.imageId | test("^sha256:[0-9a-f]{64}$"))
+      all(.imageId | test("^sha256:[0-9a-f]{64}$")) and
+      (($critical - map(.service)) | length == 0) and
+      all(.[] | select(.service as $service | $critical | index($service));
+        .restartCount == 0 and .status == "running")
     ' >/dev/null <<<"$runtime_images" || {
-        log "ERROR: runtime image evidence is incomplete or does not contain immutable image IDs"
+        log "ERROR: critical runtime evidence is incomplete, unhealthy, restarted, or lacks immutable image IDs"
         return 1
     }
     jq 'sort_by(.service)' <<<"$runtime_images" >"${artifacts_dir}/runtime-images.json"
@@ -519,29 +676,57 @@ mv "${artifacts_dir}/run.json.next" "${artifacts_dir}/run.json"
 
 runtime_stable=true
 runtime_violation_logged=false
+runtime_event_monitor_stable=true
+marketdata_transition_phase=steady
+marketdata_after_started_at=""
 capture_runtime_state() {
-    local phase="$1" timestamp service expected_id expected_image expected_started current_id state restart_count status started_at row
+    local phase="$1" timestamp service expected_id expected_image expected_started current_id inspect_json
+    local restart_count status started_at actual_image service_stable row
     timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     while IFS=$'\t' read -r service expected_id expected_image expected_started; do
         current_id="$("${compose[@]}" ps --all -q "$service")"
         restart_count=-1
         status=missing
         started_at=missing
-        if [[ "$current_id" == "$expected_id" ]] && state="$(docker inspect "$current_id" 2>/dev/null | jq '.[0]')"; then
-            restart_count="$(jq -er '.RestartCount' <<<"$state")"
-            status="$(jq -er '.State.Status' <<<"$state")"
-            started_at="$(jq -er '.State.StartedAt' <<<"$state")"
-            if [[ "$(jq -er '.Image' <<<"$state")" != "$expected_image" ]]; then
-                runtime_stable=false
-            fi
-            if [[ "$service" == "market-maker-bot" && "$started_at" != "$expected_started" ]]; then
-                runtime_stable=false
+        actual_image=missing
+        service_stable=true
+        if [[ "$current_id" == "$expected_id" ]] &&
+            inspect_json="$(docker inspect "$current_id" 2>/dev/null | jq '.[0]')"; then
+            restart_count="$(jq -er '.RestartCount' <<<"$inspect_json")"
+            status="$(jq -er '.State.Status' <<<"$inspect_json")"
+            started_at="$(jq -er '.State.StartedAt' <<<"$inspect_json")"
+            actual_image="$(jq -er '.Image' <<<"$inspect_json")"
+            [[ "$actual_image" == "$expected_image" ]] || service_stable=false
+            (( restart_count == 0 )) || service_stable=false
+            if [[ "$profile" == "pause-and-cancel" && "$service" == "marketdata" ]]; then
+                case "$marketdata_transition_phase" in
+                    steady)
+                        [[ "$status" == "running" && "$started_at" == "$expected_started" ]] ||
+                            service_stable=false
+                        ;;
+                    stopped)
+                        [[ "$status" == "exited" && "$started_at" == "$expected_started" ]] ||
+                            service_stable=false
+                        ;;
+                    restarted)
+                        [[ "$status" == "running" &&
+                            -n "$marketdata_after_started_at" &&
+                            "$started_at" == "$marketdata_after_started_at" &&
+                            "$started_at" != "$expected_started" ]] || service_stable=false
+                        ;;
+                    *)
+                        service_stable=false
+                        ;;
+                esac
+            else
+                [[ "$status" == "running" && "$started_at" == "$expected_started" ]] ||
+                    service_stable=false
             fi
         else
-            runtime_stable=false
+            service_stable=false
             status=replaced-or-missing
         fi
-        if (( restart_count != 0 )); then
+        if ! $service_stable; then
             runtime_stable=false
         fi
         row="$(jq -cn \
@@ -549,7 +734,7 @@ capture_runtime_state() {
             --arg phase "$phase" \
             --arg service "$service" \
             --arg containerId "${current_id:-missing}" \
-            --arg imageId "$expected_image" \
+            --arg imageId "$actual_image" \
             --arg startedAtUtc "$started_at" \
             --argjson restartCount "$restart_count" \
             --arg status "$status" \
@@ -566,15 +751,62 @@ capture_runtime_state() {
         printf '%s\n' "$row" >>"$runtime_jsonl"
         jq -r '[.timestampUtc,.phase,.service,.containerId,.imageId,.startedAtUtc,.restartCount,.status] | @csv' \
             <<<"$row" >>"$runtime_csv"
-    done < <(jq -r '.[] | [.service,.containerId,.imageId,.startedAtUtc] | @tsv' \
+    done < <(jq -r --argjson critical "$critical_services_json" '
+        .[] |
+        select(.service as $service | $critical | index($service)) |
+        [.service,.containerId,.imageId,.startedAtUtc] | @tsv' \
         "${artifacts_dir}/runtime-images.json")
+    if [[ -n "${runtime_event_monitor_pid:-}" ]] &&
+        ! kill -0 "$runtime_event_monitor_pid" 2>/dev/null; then
+        runtime_event_monitor_stable=false
+        runtime_stable=false
+    fi
     if ! $runtime_stable && ! $runtime_violation_logged; then
         log "ERROR: runtime container identity, image ID, or restart count changed; this run cannot pass"
         runtime_violation_logged=true
     fi
 }
 
+capture_service_runtime_snapshot() {
+    local service="$1" phase="$2" container_id inspect_json
+    container_id="$("${compose[@]}" ps --all -q "$service")"
+    [[ -n "$container_id" ]] || {
+        log "ERROR: critical service '$service' has no container while capturing '$phase'"
+        return 1
+    }
+    inspect_json="$(docker inspect "$container_id" | jq -e '.[0]')"
+    jq -cn \
+        --arg timestampUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg phase "$phase" \
+        --arg service "$service" \
+        --arg containerId "$container_id" \
+        --arg imageId "$(jq -er '.Image' <<<"$inspect_json")" \
+        --arg startedAtUtc "$(jq -er '.State.StartedAt' <<<"$inspect_json")" \
+        --argjson restartCount "$(jq -er '.RestartCount' <<<"$inspect_json")" \
+        --arg status "$(jq -er '.State.Status' <<<"$inspect_json")" \
+        '{
+          timestampUtc: $timestampUtc,
+          phase: $phase,
+          service: $service,
+          containerId: $containerId,
+          imageId: $imageId,
+          startedAtUtc: $startedAtUtc,
+          restartCount: $restartCount,
+          status: $status
+        }'
+}
+
 capture_runtime_state initial
+docker events \
+    --filter type=container \
+    --filter "label=com.docker.compose.project=$project_name" \
+    --format '{{json .}}' >>"$runtime_events_jsonl" &
+runtime_event_monitor_pid=$!
+sleep 1
+kill -0 "$runtime_event_monitor_pid" 2>/dev/null || {
+    log "ERROR: Docker runtime event monitor failed to start"
+    exit 1
+}
 
 compatibility_json="$(jq -n \
     --slurpfile run "${artifacts_dir}/run.json" \
@@ -621,7 +853,7 @@ if [[ -n "$suite_manifest" ]]; then
               .compatibility == $compatibility
             ' >/dev/null "$suite_manifest"; then
             printf '%s\n' "$compatibility_json" >"${artifacts_dir}/compatibility-observed.json"
-            log "ERROR: suite compatibility mismatch; compare $suite_manifest with ${artifacts_dir}/compatibility-observed.json"
+            log "ERROR: suite compatibility mismatch; compare $suite_manifest_relative with ${artifacts_dir_relative}/compatibility-observed.json"
             exit 1
         fi
         if jq -e --arg profile "$profile" '.runs[$profile] != null' >/dev/null "$suite_manifest"; then
@@ -1063,11 +1295,17 @@ capture_metrics warmup-complete
 
 pause_outage_pass=true
 pause_recovery_pass=true
+marketdata_transition_pass=true
+marketdata_transition_evidence=null
 if [[ "$profile" == "pause-and-cancel" ]]; then
     log "stopping marketdata to exercise PauseAndCancel"
+    marketdata_before_snapshot="$(capture_service_runtime_snapshot marketdata before-intentional-stop)"
     outage_check_started_seconds=$SECONDS
     outage_deadline=$((SECONDS + recovery_timeout_seconds))
     "${compose[@]}" stop marketdata
+    marketdata_transition_phase=stopped
+    marketdata_stopped_snapshot="$(capture_service_runtime_snapshot marketdata intentionally-stopped)"
+    capture_runtime_state outage-stopped
     outage_remaining=$((outage_deadline - SECONDS))
     if (( outage_remaining <= 0 )); then
         pause_outage_pass=false
@@ -1109,6 +1347,37 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
         ! wait_service_healthy marketdata "$recovery_remaining"; then
         pause_recovery_pass=false
     fi
+    marketdata_after_snapshot="$(capture_service_runtime_snapshot marketdata after-intentional-start)"
+    marketdata_after_started_at="$(jq -er '.startedAtUtc' <<<"$marketdata_after_snapshot")"
+    marketdata_transition_phase=restarted
+    marketdata_transition_evidence="$(jq -cn \
+        --argjson before "$marketdata_before_snapshot" \
+        --argjson stopped "$marketdata_stopped_snapshot" \
+        --argjson after "$marketdata_after_snapshot" \
+        '{
+          expectedTransition: "running -> exited -> running",
+          allowedTransitionCount: 1,
+          before: $before,
+          stopped: $stopped,
+          after: $after
+        }')"
+    if ! jq -e '
+        ([.before,.stopped,.after] | map(.service) | unique) == ["marketdata"] and
+        ([.before,.stopped,.after] | map(.containerId) | unique | length) == 1 and
+        ([.before,.stopped,.after] | map(.imageId) | unique | length) == 1 and
+        all(.before,.stopped,.after; .restartCount == 0) and
+        .before.status == "running" and
+        .stopped.status == "exited" and
+        .after.status == "running" and
+        .stopped.startedAtUtc == .before.startedAtUtc and
+        .after.startedAtUtc != .before.startedAtUtc
+    ' >/dev/null <<<"$marketdata_transition_evidence"; then
+        marketdata_transition_pass=false
+        runtime_stable=false
+        log "ERROR: marketdata did not exhibit exactly the permitted stop/start identity transition"
+    fi
+    printf '%s\n' "$marketdata_transition_evidence" >"${artifacts_dir}/marketdata-transition.json"
+    capture_runtime_state recovery-started
     recovery_remaining=$((recovery_deadline - SECONDS))
     if (( recovery_remaining <= 0 )) ||
         ! wait_bot_log_since "$recovery_started_at" "MarketData connection state: Connected" "$recovery_remaining"; then
@@ -1170,6 +1439,14 @@ done
 wait_metric_equals 'sum(bot_orders_open{service_name="b3-market-maker-bot"})' \
     6 "$recovery_timeout_seconds" || true
 capture_metrics final
+if kill -0 "$runtime_event_monitor_pid" 2>/dev/null; then
+    kill "$runtime_event_monitor_pid"
+    wait "$runtime_event_monitor_pid" 2>/dev/null || true
+else
+    runtime_event_monitor_stable=false
+    runtime_stable=false
+fi
+runtime_event_monitor_pid=""
 "${compose[@]}" ps --format json >"${artifacts_dir}/compose-ps.json"
 
 record_check() {
@@ -1268,10 +1545,97 @@ counter_monotonic_report="$(jq -s '
 ' "$samples_jsonl")"
 counter_monotonic="$(jq -r '.violations | length == 0' <<<"$counter_monotonic_report")"
 printf '%s\n' "$counter_monotonic_report" >"${artifacts_dir}/counter-monotonicity.json"
-runtime_final_running="$(jq -s '
-  [.[] | select(.phase == "final")] as $rows |
-  ($rows | length) > 0 and all($rows[]; .status == "running" and .restartCount == 0)
+runtime_lifecycle_report="$(jq -s \
+  --arg profile "$profile" \
+  --argjson monitorStable "$runtime_event_monitor_stable" \
+  --argjson critical "$critical_services_json" '
+  [
+    .[] |
+    (.Actor.Attributes["com.docker.compose.service"] // "") as $service |
+    select($critical | index($service)) |
+    select(.Action == "start" or .Action == "die" or .Action == "restart") |
+    {timeNano: .timeNano, service: $service, action: .Action, containerId: (.Actor.ID // .id)}
+  ] as $events |
+  [
+    $critical[] as $service |
+    [$events[] | select(.service == $service)] as $rows |
+    {
+      service: $service,
+      startCount: ([$rows[] | select(.action == "start")] | length),
+      dieCount: ([$rows[] | select(.action == "die")] | length),
+      restartCount: ([$rows[] | select(.action == "restart")] | length),
+      events: $rows,
+      passed: (
+        if $profile == "pause-and-cancel" and $service == "marketdata" then
+          ([$rows[] | select(.action == "start")] | length) == 1 and
+          ([$rows[] | select(.action == "die")] | length) == 1 and
+          ([$rows[] | select(.action == "restart")] | length) == 0
+        else
+          ($rows | length) == 0
+        end
+      )
+    }
+  ] as $services |
+  {
+    monitoredAfterInitialSnapshot: true,
+    monitorStable: $monitorStable,
+    services: $services,
+    passed: ($monitorStable and all($services[]; .passed))
+  }
+' "$runtime_events_jsonl")"
+runtime_lifecycle_pass="$(jq -r '.passed' <<<"$runtime_lifecycle_report")"
+printf '%s\n' "$runtime_lifecycle_report" >"${artifacts_dir}/runtime-lifecycle.json"
+runtime_continuity_report="$(jq -s \
+  --arg profile "$profile" \
+  --argjson critical "$critical_services_json" \
+  --argjson lifecycle "$runtime_lifecycle_report" \
+  --argjson transition "$marketdata_transition_evidence" '
+  . as $all |
+  [
+    $critical[] as $service |
+    [$all[] | select(.service == $service)] as $rows |
+    {
+      service: $service,
+      sampleCount: ($rows | length),
+      containerIds: ($rows | map(.containerId) | unique),
+      imageIds: ($rows | map(.imageId) | unique),
+      startedAtUtcValues: ($rows | map(.startedAtUtc) | unique),
+      restartCounts: ($rows | map(.restartCount) | unique),
+      statuses: ($rows | map(.status) | unique),
+      passed: (
+        ($rows | length) > 0 and
+        ($rows | map(.containerId) | unique | length) == 1 and
+        ($rows | map(.imageId) | unique | length) == 1 and
+        all($rows[]; .restartCount == 0) and
+        (if $profile == "pause-and-cancel" and $service == "marketdata" then
+           ($rows | map(.startedAtUtc) | unique | length) == 2 and
+           ($rows | map(.status) | unique) == ["exited","running"] and
+           $transition != null and
+           $transition.allowedTransitionCount == 1
+         else
+           ($rows | map(.startedAtUtc) | unique | length) == 1 and
+           all($rows[]; .status == "running")
+         end)
+      )
+    }
+  ] as $services |
+  {
+    criticalServices: $critical,
+    lifecycleEvents: $lifecycle,
+    permittedMarketdataTransition: $transition,
+    services: $services,
+    passed: (
+      ($services | length) == ($critical | length) and
+      all($services[]; .passed) and
+      $lifecycle.passed
+    )
+  }
 ' "$runtime_jsonl")"
+runtime_continuity_pass="$(jq -r '.passed' <<<"$runtime_continuity_report")"
+printf '%s\n' "$runtime_continuity_report" >"${artifacts_dir}/runtime-continuity.json"
+if [[ "$runtime_continuity_pass" != "true" || "$runtime_lifecycle_pass" != "true" ]]; then
+    runtime_stable=false
+fi
 max_restart_count="$(jq -s '[.[].restartCount] | max' "$runtime_jsonl")"
 
 record_check "final-quotes-per-eligible-symbol" "$final_quotes_exact" \
@@ -1299,9 +1663,14 @@ record_check "operational-error-counters" \
     "$(numeric_test "$operational_errors == 0" && echo true || echo false)" \
     "0 submit/reject/cancel error events" "$operational_errors"
 record_check "runtime-containers-stable" \
-    "$($runtime_stable && [[ "$runtime_final_running" == "true" ]] && echo true || echo false)" \
-    "same container/image IDs, restartCount=0 throughout, all services running at final" \
-    "stable=$runtime_stable finalRunning=$runtime_final_running maxRestartCount=$max_restart_count"
+    "$($runtime_stable && [[ "$runtime_continuity_pass" == "true" ]] && echo true || echo false)" \
+    "all critical services keep container/image identity and restartCount=0 with no lifecycle event; PauseAndCancel permits exactly one marketdata die/start pair" \
+    "stable=$runtime_stable continuity=$runtime_continuity_pass lifecycle=$runtime_lifecycle_pass maxRestartCount=$max_restart_count report=runtime-continuity.json"
+if [[ "$profile" == "pause-and-cancel" ]]; then
+    record_check "marketdata-intentional-transition" "$marketdata_transition_pass" \
+        "exactly one recorded running -> exited -> running transition with stable container/image and restartCount=0" \
+        "artifact=marketdata-transition.json"
+fi
 record_check "accounting-period-stable" \
     "$($accounting_stable && [[ "$accounting_period_count" == "1" ]] && echo true || echo false)" \
     "one non-empty accountingPeriodStartedAtUtc across every sample" \
@@ -1353,7 +1722,7 @@ if ! $timing_eligible; then
 fi
 if $git_dirty; then
     eligibility_reasons="$(jq -cn --argjson rows "$eligibility_reasons" \
-        '$rows + ["checkout contains tracked changes"]')"
+        '$rows + ["checkout contains tracked modifications or untracked files"]')"
 fi
 if [[ -z "$suite_manifest" ]]; then
     eligibility_reasons="$(jq -cn --argjson rows "$eligibility_reasons" \
@@ -1409,7 +1778,7 @@ if jq -e '.passed and .acceptanceEligible' >/dev/null "${artifacts_dir}/summary.
     suite_manifest_next="${suite_manifest}.next"
     jq \
         --arg profile "$profile" \
-        --arg artifactDirectory "$artifacts_dir" \
+        --arg artifactDirectory "$artifacts_dir_relative" \
         --slurpfile summary "${artifacts_dir}/summary.json" '
           .runs[$profile] = {
             runId: $summary[0].runId,

@@ -23,12 +23,13 @@ services:
       # The helper drives the existing local-login sandbox API directly.
       # Pin both settings so an operator shell with AUTH_MODE=Entra cannot
       # silently produce a stack that the workload cannot authenticate to.
-      Trading__Auth__Mode: Local
-      Trading__Auth__LocalLoginEnabled: "true"
+      - Trading__Auth__Mode=Local
+      - Trading__Auth__LocalLoginEnabled=true
       # The feed-recovery workload prints end-client crosses for all symbols.
       # Match the existing real-conformance sandbox policy; this is isolated
-      # test-account configuration, not a market-maker strategy change.
-      Trading__Risk__PerEndClient__bob__AllowShortSell: "true"
+      # test-account configuration, not a market-maker strategy change. List
+      # syntax permits Compose interpolation in the configuration key.
+      - Trading__Risk__PerEndClient__${MM_SOAK_COUNTERPARTY_USER:?Set MM_SOAK_COUNTERPARTY_USER}__AllowShortSell=true
 
   frontend:
     container_name: ${MM_SOAK_PROJECT_NAME}-frontend
