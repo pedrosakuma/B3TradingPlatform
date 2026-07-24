@@ -15,6 +15,7 @@ public sealed class MarketMakerMetrics : IDisposable
 
     private readonly MarketMakerPnlLedger _ledger;
     private readonly MarketPriceTracker _prices;
+    private readonly IReadOnlyList<InstrumentConfig> _instruments;
     private readonly TimeSpan _markMaxAge;
     private readonly Meter _meter;
     private readonly Counter<long> _ordersSubmitted;
@@ -43,6 +44,7 @@ public sealed class MarketMakerMetrics : IDisposable
     {
         _ledger = ledger;
         _prices = prices;
+        _instruments = options.Value.Instruments;
         _markMaxAge = options.Value.Telemetry.MarkMaxAge;
         _meter = new Meter(MeterName, "1.0.0");
         _ordersSubmitted = _meter.CreateCounter<long>("bot.orders.submitted");
@@ -68,6 +70,7 @@ public sealed class MarketMakerMetrics : IDisposable
 
         _meter.CreateObservableGauge("bot.position.net_quantity", ObservePositions);
         _meter.CreateObservableGauge("bot.position.average_entry_price", ObserveAverageCosts);
+        _meter.CreateObservableGauge("bot.strategy.inventory_skew_ticks", ObserveInventorySkewTicks);
         _meter.CreateObservableGauge("bot.pnl.realized", ObserveRealizedPnl);
         _meter.CreateObservableGauge("bot.pnl.unrealized", ObserveUnrealizedPnl);
         _meter.CreateObservableGauge("bot.pnl.total", ObserveTotalPnl);
@@ -124,6 +127,24 @@ public sealed class MarketMakerMetrics : IDisposable
     private IEnumerable<Measurement<double>> ObserveAverageCosts() =>
         _ledger.SnapshotAll().Select(snapshot =>
             new Measurement<double>((double)snapshot.AverageCost, SymbolTag(snapshot.Symbol)));
+
+    private IEnumerable<Measurement<double>> ObserveInventorySkewTicks()
+    {
+        foreach (var instrument in _instruments)
+        {
+            if (!instrument.InventorySkew.Enabled)
+                continue;
+            var netQuantity = _ledger.TryGetSnapshot(instrument.Symbol, out var position)
+                ? position.Position
+                : 0L;
+            var skew = InventorySkewCalculator.Calculate(
+                instrument.InventorySkew,
+                netQuantity,
+                instrument.LotSize,
+                instrument.TickSize);
+            yield return new Measurement<double>((double)skew.SkewTicks, SymbolTag(instrument.Symbol));
+        }
+    }
 
     private IEnumerable<Measurement<double>> ObserveRealizedPnl() =>
         _ledger.SnapshotAll().Select(snapshot =>

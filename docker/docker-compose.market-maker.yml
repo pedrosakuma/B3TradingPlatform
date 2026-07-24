@@ -116,6 +116,11 @@ services:
       MarketMaker__Instruments__0__LotSize: "100"
       MarketMaker__Instruments__0__QuoteLots: "1"
       MarketMaker__Instruments__0__SpreadTicks: "5"
+      # Inventory skew is opt-in per instrument. FullSkewAtLots is the
+      # normalization/saturation band only; it does not cap inventory.
+      MarketMaker__Instruments__0__InventorySkew__Enabled: "false"
+      MarketMaker__Instruments__0__InventorySkew__FullSkewAtLots: "10"
+      MarketMaker__Instruments__0__InventorySkew__MaxSkewTicks: "5"
 
       MarketMaker__Instruments__1__Symbol: VALE3
       MarketMaker__Instruments__1__SecurityId: "900000000002"
@@ -124,6 +129,9 @@ services:
       MarketMaker__Instruments__1__LotSize: "100"
       MarketMaker__Instruments__1__QuoteLots: "1"
       MarketMaker__Instruments__1__SpreadTicks: "5"
+      MarketMaker__Instruments__1__InventorySkew__Enabled: "false"
+      MarketMaker__Instruments__1__InventorySkew__FullSkewAtLots: "10"
+      MarketMaker__Instruments__1__InventorySkew__MaxSkewTicks: "5"
 
       MarketMaker__Instruments__2__Symbol: ITUB4
       MarketMaker__Instruments__2__SecurityId: "900000000003"
@@ -132,6 +140,9 @@ services:
       MarketMaker__Instruments__2__LotSize: "100"
       MarketMaker__Instruments__2__QuoteLots: "1"
       MarketMaker__Instruments__2__SpreadTicks: "5"
+      MarketMaker__Instruments__2__InventorySkew__Enabled: "false"
+      MarketMaker__Instruments__2__InventorySkew__FullSkewAtLots: "10"
+      MarketMaker__Instruments__2__InventorySkew__MaxSkewTicks: "5"
     volumes:
       - market-maker-bot-state:/var/lib/b3-market-maker-bot
 

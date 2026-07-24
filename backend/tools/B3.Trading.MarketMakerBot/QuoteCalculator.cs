@@ -24,6 +24,7 @@ public readonly record struct QuoteInputs(
     decimal ReferencePrice,
     QuoteReferenceSource ReferenceSource,
     decimal InventoryMidShift,
+    decimal InventorySkewTicks,
     decimal ConfiguredHalfSpread,
     decimal EffectiveHalfSpread,
     decimal TickSize,
@@ -36,6 +37,7 @@ public readonly record struct QuoteDecision(
     decimal ReferencePrice,
     QuoteReferenceSource ReferenceSource,
     decimal InventoryMidShift,
+    decimal InventorySkewTicks,
     decimal ConfiguredHalfSpread,
     decimal EffectiveHalfSpread,
     QuoteSuppressionReason SuppressionReason);
@@ -59,6 +61,7 @@ public static class QuoteCalculator
                 inputs.ReferencePrice,
                 inputs.ReferenceSource,
                 inputs.InventoryMidShift,
+                inputs.InventorySkewTicks,
                 inputs.ConfiguredHalfSpread,
                 inputs.EffectiveHalfSpread,
                 QuoteSuppressionReason.None)
@@ -86,6 +89,7 @@ public static class QuoteCalculator
             referencePrice,
             QuoteReferenceSource.Explicit,
             InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
             ConfiguredHalfSpread: halfSpread,
             EffectiveHalfSpread: halfSpread,
             instrument.TickSize));
@@ -113,6 +117,7 @@ public static class QuoteCalculator
             inputs.ReferencePrice,
             inputs.ReferenceSource,
             inputs.InventoryMidShift,
+            inputs.InventorySkewTicks,
             inputs.ConfiguredHalfSpread,
             inputs.EffectiveHalfSpread,
             reason);

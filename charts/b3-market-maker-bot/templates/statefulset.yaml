@@ -96,6 +96,12 @@ spec:
               value: {{ $instrument.quoteLots | quote }}
             - name: {{ printf "MarketMaker__Instruments__%d__SpreadTicks" $i }}
               value: {{ $instrument.spreadTicks | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__Enabled" $i }}
+              value: {{ $instrument.inventorySkew.enabled | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__FullSkewAtLots" $i }}
+              value: {{ $instrument.inventorySkew.fullSkewAtLots | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__MaxSkewTicks" $i }}
+              value: {{ $instrument.inventorySkew.maxSkewTicks | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

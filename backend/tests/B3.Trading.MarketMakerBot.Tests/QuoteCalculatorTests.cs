@@ -88,6 +88,7 @@ public class QuoteCalculatorTests
             ReferencePrice: 30m,
             QuoteReferenceSource.LiveMarketData,
             InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
             ConfiguredHalfSpread: 0.05m,
             EffectiveHalfSpread: 0.05m,
             TickSize: 0.01m);
@@ -99,6 +100,7 @@ public class QuoteCalculatorTests
         Assert.Equal(30m, decision.ReferencePrice);
         Assert.Equal(QuoteReferenceSource.LiveMarketData, decision.ReferenceSource);
         Assert.Equal(0m, decision.InventoryMidShift);
+        Assert.Equal(0m, decision.InventorySkewTicks);
         Assert.Equal(0.05m, decision.ConfiguredHalfSpread);
         Assert.Equal(0.05m, decision.EffectiveHalfSpread);
         Assert.Equal(QuoteSuppressionReason.None, decision.SuppressionReason);
@@ -112,6 +114,7 @@ public class QuoteCalculatorTests
             ReferencePrice: 30m,
             QuoteReferenceSource.ConfiguredRefPrice,
             InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
             ConfiguredHalfSpread: 0.05m,
             EffectiveHalfSpread: 0.05m,
             TickSize: 0.01m,
@@ -131,6 +134,7 @@ public class QuoteCalculatorTests
             ReferencePrice: 0.01m,
             QuoteReferenceSource.ConfiguredRefPrice,
             InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
             ConfiguredHalfSpread: 0.05m,
             EffectiveHalfSpread: 0.05m,
             TickSize: 0.01m));
@@ -152,6 +156,7 @@ public class QuoteCalculatorTests
             instrument.RefPrice,
             QuoteReferenceSource.ConfiguredRefPrice,
             InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
             ConfiguredHalfSpread: halfSpread,
             EffectiveHalfSpread: halfSpread,
             instrument.TickSize));

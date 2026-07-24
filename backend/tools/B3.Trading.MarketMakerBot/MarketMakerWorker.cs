@@ -246,6 +246,11 @@ internal sealed class MarketMakerWorker : BackgroundService
                     {
                         _metrics.RecordFillResult(transition.Symbol!, fillResult);
                         LogFillResult(t, transition.Symbol!, fillResult);
+                        if (fillResult.Status == FillApplyStatus.Applied &&
+                            FindInstrument(transition.Symbol!)?.InventorySkew.Enabled == true)
+                        {
+                            SignalPricingContextChanged(transition.Symbol!, CancelReason.InventoryStrategy);
+                        }
                     }
                     else
                     {
@@ -560,10 +565,24 @@ internal sealed class MarketMakerWorker : BackgroundService
 
             if (!_pendingPricingContextSignals.TryGetValue(symbol, out var current))
                 continue;
-            if (_pendingPricingContextSignals.TryUpdate(symbol, reason, current))
+            var merged = MergePricingContextReason(current, reason);
+            if (merged == current)
+                return false;
+            if (_pendingPricingContextSignals.TryUpdate(symbol, merged, current))
                 return false;
         }
     }
+
+    private static CancelReason MergePricingContextReason(CancelReason current, CancelReason incoming) =>
+        PricingContextPriority(incoming) > PricingContextPriority(current) ? incoming : current;
+
+    private static int PricingContextPriority(CancelReason reason) => reason switch
+    {
+        CancelReason.FeedUnavailable => 3,
+        CancelReason.InventoryStrategy => 2,
+        CancelReason.PriceDrift => 1,
+        _ => 0,
+    };
 
     internal async Task PricingContextReactionLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
@@ -619,23 +638,37 @@ internal sealed class MarketMakerWorker : BackgroundService
         var instr = FindInstrument(symbol);
         if (instr is null) return;
         var now = _tracker.UtcNow;
-        var maxDeviation = instr.TickSize * _options.RequoteDeviationTicks;
+        var maxDeviation = reason == CancelReason.InventoryStrategy
+            ? 0m
+            : instr.TickSize * _options.RequoteDeviationTicks;
+        TimeSpan? retryAfter = null;
 
         foreach (var isBuy in new[] { true, false })
         {
             if (!_tracker.TryGetActiveSideOrder(symbol, isBuy, out var resting)) continue;
             if (resting.PendingCancelClOrdId is not null) continue;
+            var decision = BuildQuoteDecision(instr, isBuy);
+            if (!decision.ShouldQuote || decision.Price is not { } target) continue;
+            if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
+
             // Fast-path skip only — the authoritative throttle check runs
             // INSIDE SubmitCancelAsync's atomic registration below (see
             // OrderTracker.TryRegisterCancelAttempt), since this snapshot
             // read is unsynchronized and could be stale by the time we
             // actually try to register the attempt.
             var lastActivity = resting.LastCancelAttemptAtUtc ?? resting.SubmittedAtUtc;
-            if (now - lastActivity < _options.MinRequoteInterval) continue;
-
-            var decision = BuildQuoteDecision(instr, isBuy);
-            if (!decision.ShouldQuote || decision.Price is not { } target) continue;
-            if (Math.Abs(resting.Price - target) <= maxDeviation) continue;
+            var elapsed = now - lastActivity;
+            if (elapsed < _options.MinRequoteInterval)
+            {
+                if (reason == CancelReason.InventoryStrategy)
+                {
+                    var remaining = _options.MinRequoteInterval - elapsed;
+                    retryAfter = retryAfter is null || remaining < retryAfter
+                        ? remaining
+                        : retryAfter;
+                }
+                continue;
+            }
 
             if (await SubmitCancelAsync(
                     client,
@@ -662,6 +695,12 @@ internal sealed class MarketMakerWorker : BackgroundService
                         resting.ClOrdId, symbol, isBuy ? "buy" : "sell", reason, resting.Price, target);
                 }
             }
+        }
+
+        if (retryAfter is { } delay)
+        {
+            await Task.Delay(delay, ct);
+            SignalPricingContextChanged(symbol, reason);
         }
     }
 
@@ -795,21 +834,31 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     /// <summary>
     /// The single worker-side context builder for both initial/replacement
-    /// submits and reactive drift comparisons. Inventory shift is zero and
-    /// effective spread equals configured spread until #717/#718 opt in.
+    /// submits and reactive drift comparisons. Inventory comes only from the
+    /// process-local P&amp;L ledger; effective spread remains configured spread
+    /// until #718 opts in.
     /// </summary>
     internal QuoteDecision BuildQuoteDecision(InstrumentConfig instrument, bool isBuy)
     {
         var hasLiveReference = _priceTracker.TryGetReferencePrice(instrument.Symbol, out var liveReference);
         var referencePrice = hasLiveReference ? liveReference : instrument.RefPrice;
         var configuredHalfSpread = instrument.SpreadTicks * instrument.TickSize;
+        var netQuantity = _pnlLedger.TryGetSnapshot(instrument.Symbol, out var position)
+            ? position.Position
+            : 0L;
+        var inventorySkew = InventorySkewCalculator.Calculate(
+            instrument.InventorySkew,
+            netQuantity,
+            instrument.LotSize,
+            instrument.TickSize);
         return QuoteCalculator.Decide(new QuoteInputs(
             isBuy,
             referencePrice,
             hasLiveReference
                 ? QuoteReferenceSource.LiveMarketData
                 : QuoteReferenceSource.ConfiguredRefPrice,
-            InventoryMidShift: 0m,
+            inventorySkew.MidShift,
+            inventorySkew.SkewTicks,
             ConfiguredHalfSpread: configuredHalfSpread,
             EffectiveHalfSpread: configuredHalfSpread,
             instrument.TickSize,

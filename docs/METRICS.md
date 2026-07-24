@@ -49,6 +49,7 @@ metadata, never accumulated position or P&L.
 |---|---|---|---|
 | `bot.position.net_quantity` | Observable Gauge | `symbol` | Signed net quantity |
 | `bot.position.average_entry_price` | Observable Gauge | `symbol` | Weighted-average open cost |
+| `bot.strategy.inventory_skew_ticks` | Observable Gauge | `symbol` | Signed applied inventory skew for enabled instruments; positive means long inventory shifts the quote mid down, negative means short inventory shifts it up |
 | `bot.pnl.realized` | Observable Gauge | `symbol` | Process-lifetime gross realized P&L |
 | `bot.pnl.unrealized` | Observable Gauge | `symbol` | Omitted unless a connected live mark is no older than `MarketMaker:Telemetry:MarkMaxAge` |
 | `bot.pnl.total` | Observable Gauge | `symbol` | Realized + unrealized; omitted under the same fresh-mark gate |

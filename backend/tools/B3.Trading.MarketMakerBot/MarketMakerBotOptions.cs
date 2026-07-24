@@ -161,4 +161,25 @@ public sealed class InstrumentConfig
     /// <see cref="RefPrice"/>.</summary>
     [Range(0, int.MaxValue)]
     public int SpreadTicks { get; set; } = 5;
+
+    /// <summary>
+    /// Optional inventory-aware mid-price shift. Disabled by default so the
+    /// historical symmetric quote behavior remains unchanged.
+    /// </summary>
+    public InventorySkewConfig InventorySkew { get; set; } = new();
+}
+
+public sealed class InventorySkewConfig
+{
+    /// <summary>Whether this instrument's quotes react to process-local inventory.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Absolute inventory, in lots, at which the configured maximum shift is
+    /// reached. This is only a normalization/saturation band, not a risk limit.
+    /// </summary>
+    public long FullSkewAtLots { get; set; } = 10;
+
+    /// <summary>Maximum absolute mid-price shift, in ticks.</summary>
+    public decimal MaxSkewTicks { get; set; } = 5m;
 }

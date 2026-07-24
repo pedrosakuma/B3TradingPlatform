@@ -33,6 +33,7 @@ builder.Services
         "MarketMaker:MarketData:WsUrl, if set, must be an absolute URI.")
     .ValidateOnStart();
 
+builder.Services.AddSingleton<IValidateOptions<MarketMakerBotOptions>, MarketMakerBotOptionsValidator>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<OrderTracker>();
 builder.Services.AddSingleton<MarketPriceTracker>();
