@@ -1,6 +1,8 @@
 using B3.EntryPoint.Client.Models;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 
 namespace B3.Trading.MarketMakerBot.Tests;
 
@@ -124,6 +126,65 @@ public class MarketMakerWorkerTests : IDisposable
         await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
 
         Assert.Single(client.SubmittedOrders);
+    }
+
+    [Fact]
+    public async Task QuoteSideAsync_SubmitPriceMatchesUnifiedDecision()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, priceTracker) = CreateWorker(clock);
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 31m);
+
+        var decision = worker.BuildQuoteDecision(instrument, isBuy: true);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        Assert.True(decision.ShouldQuote);
+        Assert.Equal(30.95m, decision.Price);
+        Assert.Equal(QuoteReferenceSource.LiveMarketData, decision.ReferenceSource);
+        Assert.Equal(0m, decision.InventoryMidShift);
+        Assert.Equal(decision.ConfiguredHalfSpread, decision.EffectiveHalfSpread);
+        Assert.Equal(decision.Price, Assert.Single(client.SubmittedOrders).Price);
+    }
+
+    [Fact]
+    public void BuildQuoteDecision_DefaultContextPreservesStaticBehaviorAndDelistSuppression()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, _, instrument, priceTracker) = CreateWorker(clock);
+
+        var defaultDecision = worker.BuildQuoteDecision(instrument, isBuy: false);
+
+        Assert.True(defaultDecision.ShouldQuote);
+        Assert.Equal(30.05m, defaultDecision.Price);
+        Assert.Equal(30m, defaultDecision.ReferencePrice);
+        Assert.Equal(QuoteReferenceSource.ConfiguredRefPrice, defaultDecision.ReferenceSource);
+        Assert.Equal(QuoteSuppressionReason.None, defaultDecision.SuppressionReason);
+
+        priceTracker.OnSymbolDelisted(instrument.Symbol);
+        var delistedDecision = worker.BuildQuoteDecision(instrument, isBuy: false);
+
+        Assert.False(delistedDecision.ShouldQuote);
+        Assert.Null(delistedDecision.Price);
+        Assert.Equal(QuoteSuppressionReason.InstrumentDelisted, delistedDecision.SuppressionReason);
+    }
+
+    [Fact]
+    public async Task ReactToBookChangeAsync_UsesSameRoundedDecisionAsSubmit()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, priceTracker) = CreateWorker(clock,
+            options => options.MinRequoteInterval = TimeSpan.Zero);
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 31.001m);
+        var submittedDecision = worker.BuildQuoteDecision(instrument, isBuy: true);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
+
+        Assert.Equal(submittedDecision.Price, Assert.Single(client.SubmittedOrders).Price);
+        Assert.Empty(client.SubmittedCancels);
     }
 
     [Fact]
@@ -399,9 +460,12 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task HandleEventAsync_OrderRejected_CancelAttemptRejected_LeavesOriginalOrderUntouched(bool isBookDriven)
+    [InlineData(CancelReason.StaleOrder)]
+    [InlineData(CancelReason.PriceDrift)]
+    [InlineData(CancelReason.InventoryStrategy)]
+    [InlineData(CancelReason.FeedUnavailable)]
+    public async Task HandleEventAsync_OrderRejected_CancelAttemptRejected_LeavesOriginalOrderUntouched(
+        CancelReason cancelReason)
     {
         // A rejected cancel (book-driven requote or staleness guard —
         // both share SubmitCancelAsync) must NOT free the original
@@ -412,7 +476,7 @@ public class MarketMakerWorkerTests : IDisposable
         await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
         var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
         var cancelClOrdId = clOrdId + 1000;
-        tracker.RegisterCancelAttempt(cancelClOrdId, clOrdId, isBookDriven);
+        tracker.RegisterCancelAttempt(cancelClOrdId, clOrdId, cancelReason);
 
         await worker.HandleEventAsync(client, new OrderRejected
         {
@@ -474,6 +538,11 @@ public class MarketMakerWorkerTests : IDisposable
 
         Assert.Single(client.SubmittedCancels);
         Assert.Equal(clOrdId, client.SubmittedCancels[0].OrigClOrdID.Value);
+        Assert.True(tracker.TryResolveCancelAttempt(
+            client.SubmittedCancels[0].ClOrdID.Value,
+            out _,
+            out var cancelReason));
+        Assert.Equal(CancelReason.StaleOrder, cancelReason);
         // Still open — only cancelled, not yet closed (that's the venue's
         // OrderCancelled/OrderRejected ER via HandleEventAsync).
         Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
@@ -515,7 +584,122 @@ public class MarketMakerWorkerTests : IDisposable
 
         Assert.Single(client.SubmittedCancels);
         Assert.Equal(clOrdId, client.SubmittedCancels[0].OrigClOrdID.Value);
+        Assert.True(tracker.TryResolveCancelAttempt(
+            client.SubmittedCancels[0].ClOrdID.Value,
+            out _,
+            out var cancelReason));
+        Assert.Equal(CancelReason.PriceDrift, cancelReason);
         Assert.True(tracker.TryGet(clOrdId, out var order) && order.PendingCancelClOrdId is not null);
+    }
+
+    [Fact]
+    public async Task ReactToBookChangeAsync_PriceDrift_ReevaluatesAndCancelsBothSides()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, priceTracker) = CreateWorker(clock,
+            options => options.MinRequoteInterval = TimeSpan.Zero);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        var originalIds = client.SubmittedOrders.Select(order => order.ClOrdID.Value).ToHashSet();
+
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 31m);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
+
+        Assert.Equal(2, client.SubmittedCancels.Count);
+        Assert.Equal(originalIds,
+            client.SubmittedCancels.Select(cancel => cancel.OrigClOrdID.Value).ToHashSet());
+        Assert.Equal(2, client.SubmittedOrders.Count);
+    }
+
+    [Fact]
+    public async Task PricingContextSignals_ConcurrentBurstCoalescesAndReevaluatesBothSides()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, priceTracker) = CreateWorker(clock,
+            options => options.MinRequoteInterval = TimeSpan.Zero);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 31m);
+        clock.Advance(TimeSpan.FromMinutes(1));
+
+        var queued = 0;
+        Parallel.For(0, 100, _ =>
+        {
+            if (worker.SignalPricingContextChanged(instrument.Symbol, CancelReason.PriceDrift))
+                Interlocked.Increment(ref queued);
+        });
+        Assert.Equal(1, queued);
+        Assert.False(worker.SignalPricingContextChanged("UNKNOWN", CancelReason.PriceDrift));
+
+        var bothSidesCancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 2)
+                bothSidesCancelled.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+
+        await bothSidesCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+        await reactionLoop;
+
+        Assert.Equal(2, client.SubmittedCancels.Count);
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.All(client.SubmittedCancels, cancel =>
+        {
+            Assert.True(tracker.TryResolveCancelAttempt(cancel.ClOrdID.Value, out _, out var reason));
+            Assert.Equal(CancelReason.PriceDrift, reason);
+        });
+    }
+
+    [Theory]
+    [InlineData(CancelReason.StaleOrder, "bot.orders.stale_cancel_rejected")]
+    [InlineData(CancelReason.PriceDrift, "bot.orders.book_driven_requote_cancel_rejected")]
+    public async Task HandleEventAsync_CancelReject_PreservesReasonSpecificMetric(
+        CancelReason cancelReason,
+        string expectedMetric)
+    {
+        var (worker, tracker, client, instrument) = CreateWorker();
+        var metrics = _metrics[^1];
+        using var listener = new MeterListener();
+        var measurements = new ConcurrentBag<string>();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (ReferenceEquals(instrument.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, _, _) =>
+        {
+            if (value == 1)
+                measurements.Add(instrument.Name);
+        });
+        listener.Start();
+
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+        var cancelClOrdId = originalClOrdId + 1000;
+        tracker.RegisterCancelAttempt(cancelClOrdId, originalClOrdId, cancelReason);
+
+        await worker.HandleEventAsync(client, new OrderRejected
+        {
+            ClOrdID = new ClOrdID(cancelClOrdId),
+            OrderId = 0,
+            RejectCode = 1,
+            Reason = "test reject",
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.Contains(expectedMetric, measurements);
+        var unexpectedMetric = cancelReason == CancelReason.StaleOrder
+            ? "bot.orders.book_driven_requote_cancel_rejected"
+            : "bot.orders.stale_cancel_rejected";
+        Assert.DoesNotContain(unexpectedMetric, measurements);
     }
 
     [Fact]

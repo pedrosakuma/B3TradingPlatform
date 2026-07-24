@@ -21,6 +21,7 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
 {
     public List<NewOrderRequest> SubmittedOrders { get; } = new();
     public List<CancelOrderRequest> SubmittedCancels { get; } = new();
+    public Func<CancelOrderRequest, CancellationToken, Task>? CancelHandler { get; set; }
 
     public Task<ClOrdID> SubmitAsync(NewOrderRequest request, CancellationToken ct)
     {
@@ -28,10 +29,11 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
         return Task.FromResult(request.ClOrdID);
     }
 
-    public Task CancelAsync(CancelOrderRequest request, CancellationToken ct)
+    public async Task CancelAsync(CancelOrderRequest request, CancellationToken ct)
     {
         SubmittedCancels.Add(request);
-        return Task.CompletedTask;
+        if (CancelHandler is not null)
+            await CancelHandler(request, ct);
     }
 
     // --- Unused by MarketMakerWorker; not exercised by these tests. ---
