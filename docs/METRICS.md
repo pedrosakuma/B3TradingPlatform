@@ -59,6 +59,7 @@ metadata, never accumulated position or P&L.
 | `bot.pnl.fills_invalid` | Counter | `symbol` | Invalid price/quantity/identity ignored |
 | `bot.pnl.fills_inconsistent` | Counter | `symbol` | CumQty, LeavesQty, status, or replay payload mismatch ignored |
 | `bot.pnl.fill_delta_mismatch` | Counter | `symbol` | Advancing CumQty-derived delta differed from LastQty; authoritative cumulative delta was booked |
+| `bot.orders.cancel_ack_expired` | Counter | `symbol`, `reason` | Pending cancel exceeded `MarketMaker:CancelAckTimeout`; marker expired and guarded retry was enabled |
 
 Structured snapshots use the same ledger and mark-freshness gate at
 `MarketMaker:Telemetry:SnapshotInterval`. A missing/stale mark is logged as

@@ -194,6 +194,73 @@ public class MarketMakerMetricsTests
         Assert.Contains(("bot.strategy.volatility_additional_half_spread_ticks", 3L, "PETR4"), longs);
     }
 
+    [Fact]
+    public void FeedPolicyMetrics_UseBoundedSymbolReasonAndSourceTags()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var ledger = new MarketMakerPnlLedger(clock);
+        var prices = new MarketPriceTracker(clock);
+        var options = Options.Create(new MarketMakerBotOptions
+        {
+            MarketData = new MarketDataOptions
+            {
+                FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+                MaxReferenceAge = TimeSpan.FromSeconds(10),
+            },
+            Instruments = [new InstrumentConfig { Symbol = "PETR4" }],
+        });
+        var volatility = new VolatilitySpreadEstimator(options, clock);
+        using var metrics = new MarketMakerMetrics(ledger, prices, volatility, options);
+        using var listener = new MeterListener();
+        var counters = new ConcurrentBag<string>();
+        var gauges = new ConcurrentBag<string>();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (ReferenceEquals(instrument.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, _, _) =>
+        {
+            if (value == 1)
+                counters.Add(instrument.Name);
+        });
+        listener.SetMeasurementEventCallback<double>((instrument, _, tags, _) =>
+        {
+            if (tags.ToArray().Any(tag =>
+                    tag.Key == "source" && Equals(tag.Value, "trading_reference_price")))
+            {
+                gauges.Add(instrument.Name);
+            }
+        });
+        listener.Start();
+
+        metrics.RecordFeedAvailabilityTransition(
+            "PETR4",
+            available: false,
+            FeedUnavailableReason.Disconnected);
+        metrics.RecordFeedSuppressedDecision(
+            "PETR4",
+            isBuy: true,
+            FeedUnavailableReason.Disconnected);
+        metrics.RecordFeedCancel("PETR4", isBuy: true);
+        metrics.RecordFeedCancelRejected("PETR4");
+        metrics.RecordFeedCancelSubmitFailed("PETR4");
+        metrics.RecordFeedCancelRetry("PETR4");
+        metrics.RecordCancelAcknowledgementExpired("PETR4", CancelReason.FeedUnavailable);
+        prices.SetConnected(true);
+        prices.OnInfoSnapshot("PETR4", 30m, null);
+        listener.RecordObservableInstruments();
+
+        Assert.Contains("bot.market_data.availability_transition", counters);
+        Assert.Contains("bot.market_data.quote_suppressed", counters);
+        Assert.Contains("bot.orders.feed_unavailable_cancel", counters);
+        Assert.Contains("bot.orders.feed_unavailable_cancel_rejected", counters);
+        Assert.Contains("bot.orders.feed_unavailable_cancel_submit_failed", counters);
+        Assert.Contains("bot.orders.feed_unavailable_cancel_retry", counters);
+        Assert.Contains("bot.orders.cancel_ack_expired", counters);
+        Assert.Contains("bot.market_data.reference_age_seconds", gauges);
+    }
+
     private static string GetSymbol(ReadOnlySpan<KeyValuePair<string, object?>> tags)
     {
         foreach (var tag in tags)

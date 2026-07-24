@@ -44,6 +44,45 @@ public class MarketMakerOptionsBindingTests
         Assert.Equal(20, volatility.MaxAdditionalSpreadTicks);
     }
 
+    [Fact]
+    public void LegacyConfiguration_KeepsStaticFeedLossDefaults()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:MarketData:WsUrl"] = "",
+        });
+
+        Assert.Equal(FeedLossPolicy.StaticRefPrice, options.MarketData.FeedLossPolicy);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
+        Assert.Equal(TimeSpan.FromSeconds(10), options.CancelAckTimeout);
+    }
+
+    [Fact]
+    public void PartialFeedPolicyOverride_KeepsFreshnessDefault()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:MarketData:FeedLossPolicy"] = "PauseAndCancel",
+            ["MarketMaker:MarketData:WsUrl"] = "wss://marketdata.test/ws",
+        });
+
+        Assert.Equal(FeedLossPolicy.PauseAndCancel, options.MarketData.FeedLossPolicy);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
+    }
+
+    [Fact]
+    public void CancelAckTimeoutOverrideBindsWithoutChangingOtherBehaviourDefaults()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:CancelAckTimeout"] = "00:00:15",
+        });
+
+        Assert.Equal(TimeSpan.FromSeconds(15), options.CancelAckTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(5), options.ReconcileInterval);
+        Assert.Equal(TimeSpan.FromMilliseconds(250), options.MinRequoteInterval);
+    }
+
     private static MarketMakerBotOptions Bind(Dictionary<string, string?> values)
     {
         var configuration = new ConfigurationBuilder()

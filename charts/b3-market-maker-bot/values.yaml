@@ -62,17 +62,23 @@ session:
   senderLocation: SP
   enteringTrader: MM
 
-# ── Market data (best-effort quote anchor) ────────────────────────────────
-# Same feed b3-trading-host subscribes to. Optional: if unset, or the feed
-# can't connect, the bot quotes off each instrument's static refPrice.
+# ── Market data + feed-loss policy ────────────────────────────────────────
+# StaticRefPrice is the compatibility/default policy: if the feed is absent or
+# disconnected, quote from each configured refPrice. PauseAndCancel requires a
+# nonblank absolute wsUrl and a fresh per-symbol current-connection reference.
 marketData:
   wsUrl: ws://marketdata:8080/ws
+  feedLossPolicy: StaticRefPrice
+  maxReferenceAge: "00:00:30"
 
 # ── Behaviour ──────────────────────────────────────────────────────────────
 behaviour:
   # Defensive safety net only — the primary re-quote path is event-driven
   # (fills/cancels/rejects), see MarketMakerWorker.
   reconcileInterval: "00:00:05"
+  # Clears a lost cancel acknowledgement's pending marker after this window,
+  # retaining a bounded correlation tombstone so late ERs remain safe.
+  cancelAckTimeout: "00:00:10"
 
 # ── Position/P&L observability ───────────────────────────────────────────────
 observability:

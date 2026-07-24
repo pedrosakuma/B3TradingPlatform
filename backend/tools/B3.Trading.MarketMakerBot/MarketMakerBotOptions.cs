@@ -96,15 +96,17 @@ public sealed class MarketMakerBotOptions
     /// </summary>
     public TimeSpan MinRequoteInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>
+    /// Maximum time a submitted cancel may remain without a terminal
+    /// acknowledgement before its pending marker expires and guarded retry is
+    /// allowed. The original order remains open until an authoritative ER.
+    /// </summary>
+    public TimeSpan CancelAckTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
     [Required, MinLength(1)]
     public List<InstrumentConfig> Instruments { get; set; } = new();
 
-    /// <summary>Live market-data anchor. Optional by design: if unset the
-    /// bot degrades gracefully to quoting off each instrument's static
-    /// <see cref="InstrumentConfig.RefPrice"/> only (same fallback shape
-    /// as the trading-host's own market-data gate) rather than failing to
-    /// start — a co-located bot without a feed is still useful liquidity
-    /// in a pinch.</summary>
+    /// <summary>Live market-data anchor and explicit feed-loss behavior.</summary>
     public MarketDataOptions MarketData { get; set; } = new();
 
     /// <summary>Process-local P&amp;L snapshot and mark-freshness settings.</summary>
@@ -120,6 +122,24 @@ public sealed class MarketDataOptions
     /// <summary>WebSocket endpoint, e.g. <c>ws://market-data-platform:8080/ws</c>.
     /// Leave unset to run with static RefPrice anchors only.</summary>
     public string? WsUrl { get; set; }
+
+    /// <summary>
+    /// Behavior when a fresh per-symbol live reference is unavailable.
+    /// StaticRefPrice preserves the historical fallback and is the default.
+    /// </summary>
+    public FeedLossPolicy FeedLossPolicy { get; set; } = FeedLossPolicy.StaticRefPrice;
+
+    /// <summary>
+    /// Maximum age of a current-connection-epoch reference under
+    /// PauseAndCancel. Ignored by StaticRefPrice.
+    /// </summary>
+    public TimeSpan MaxReferenceAge { get; set; } = TimeSpan.FromSeconds(30);
+}
+
+public enum FeedLossPolicy
+{
+    StaticRefPrice,
+    PauseAndCancel,
 }
 
 public sealed class MarketMakerTelemetryOptions

@@ -10,6 +10,36 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
         var failures = new List<string>();
         var symbols = new HashSet<string>(StringComparer.Ordinal);
 
+        if (options.CancelAckTimeout <= TimeSpan.Zero)
+            failures.Add("MarketMaker:CancelAckTimeout must be positive.");
+
+        if (!Enum.IsDefined(options.MarketData.FeedLossPolicy))
+        {
+            failures.Add("MarketMaker:MarketData:FeedLossPolicy is not supported.");
+        }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(options.MarketData.WsUrl) &&
+                !MarketDataOptionsValidation.TryGetWebSocketUri(options.MarketData.WsUrl, out _))
+            {
+                failures.Add(
+                    "MarketMaker:MarketData:WsUrl, if set, must be an absolute ws:// or wss:// URI.");
+            }
+            if (options.MarketData.FeedLossPolicy == FeedLossPolicy.PauseAndCancel)
+            {
+                if (string.IsNullOrWhiteSpace(options.MarketData.WsUrl))
+                {
+                    failures.Add(
+                        "MarketMaker:MarketData:WsUrl must be nonblank when FeedLossPolicy is PauseAndCancel.");
+                }
+                if (options.MarketData.MaxReferenceAge <= TimeSpan.Zero)
+                {
+                    failures.Add(
+                        "MarketMaker:MarketData:MaxReferenceAge must be positive when FeedLossPolicy is PauseAndCancel.");
+                }
+            }
+        }
+
         for (var index = 0; index < options.Instruments.Count; index++)
         {
             var instrument = options.Instruments[index];
@@ -88,5 +118,16 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);
+    }
+}
+
+internal static class MarketDataOptionsValidation
+{
+    internal static bool TryGetWebSocketUri(string value, out Uri? uri)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out uri))
+            return false;
+        return string.Equals(uri.Scheme, Uri.UriSchemeWs, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(uri.Scheme, Uri.UriSchemeWss, StringComparison.OrdinalIgnoreCase);
     }
 }

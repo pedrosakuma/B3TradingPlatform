@@ -46,7 +46,7 @@ internal sealed class MarketMakerPnlReporter : BackgroundService
                 markPrice = mark.Price;
                 unrealizedPnl = snapshot.UnrealizedPnl(mark.Price);
                 totalPnl = snapshot.TotalPnl(mark.Price);
-                markAge = _clock.GetUtcNow() - mark.ObservedAtUtc;
+                markAge = _clock.GetUtcNow() - mark.ReceivedAtUtc;
             }
 
             _log.LogInformation(

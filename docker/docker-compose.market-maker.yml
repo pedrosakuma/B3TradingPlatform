@@ -36,9 +36,9 @@
 # `marketdata:8080/ws` endpoint trading-host uses, see
 # Trading__MarketData__WsUrl in docker-compose.yml) to anchor its quotes
 # on the live TradingReferencePrice/LastTradePrice instead of a static
-# config value (#683, item "mm-marketdata-conn"). This is best-effort:
-# if `marketdata` is down or MarketData__WsUrl is unset, the bot just
-# falls back to each instrument's static RefPrice.
+# config value (#683, item "mm-marketdata-conn"). Feed-loss behavior is
+# explicit: this sandbox overlay retains the legacy StaticRefPrice fallback;
+# operators can select PauseAndCancel to require a fresh per-symbol mark.
 
 name: b3trading
 
@@ -87,17 +87,25 @@ services:
       MarketMaker__SenderLocation: SP
       MarketMaker__EnteringTrader: MM
 
-      # ── Market data (best-effort quote anchor) ─────────────────────
+      # ── Market data + feed-loss policy ─────────────────────────────
       # Same feed trading-host subscribes to (see Trading__MarketData__WsUrl
       # in docker-compose.yml). Optional: if unset, or the feed can't
-      # connect, the bot quotes off each instrument's static RefPrice.
+      # connect, StaticRefPrice quotes off each instrument's configured
+      # RefPrice. PauseAndCancel instead suppresses/cancels that symbol
+      # until a fresh current-connection reference is available.
       MarketMaker__MarketData__WsUrl: ws://marketdata:8080/ws
+      MarketMaker__MarketData__FeedLossPolicy: StaticRefPrice
+      MarketMaker__MarketData__MaxReferenceAge: "00:00:30"
 
       # ── Behaviour ──────────────────────────────────────────────────
       MarketMaker__StateDirectory: /var/lib/b3-market-maker-bot
       # Defensive safety net only — the primary re-quote path is
       # event-driven (fills/cancels/rejects), see MarketMakerWorker.
       MarketMaker__ReconcileInterval: "00:00:05"
+      # A successfully transmitted cancel whose ER is lost is retried only
+      # after this bounded acknowledgement window; MinRequoteInterval remains
+      # the secondary anti-churn guard.
+      MarketMaker__CancelAckTimeout: "00:00:10"
       # Gross/pre-fee process-local P&L snapshots. Unrealized P&L is
       # omitted unless the connected live mark is newer than MarkMaxAge.
       MarketMaker__Telemetry__SnapshotInterval: "00:00:30"

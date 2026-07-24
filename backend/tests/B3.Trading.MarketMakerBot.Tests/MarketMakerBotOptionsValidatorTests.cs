@@ -81,6 +81,22 @@ public class MarketMakerBotOptionsValidatorTests
         Assert.True(_validator.Validate(null, options).Succeeded);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_RequiresPositiveCancelAckTimeout(int seconds)
+    {
+        var options = Options();
+        options.CancelAckTimeout = TimeSpan.FromSeconds(seconds);
+
+        var result = _validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(
+            result.Failures!,
+            failure => failure.Contains("CancelAckTimeout", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Validate_DisabledVolatility_DoesNotValidateInactiveValues()
     {
@@ -128,6 +144,123 @@ public class MarketMakerBotOptionsValidatorTests
         options.Instruments[0].VolatilitySpread = EnabledVolatility();
 
         Assert.True(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("relative/ws")]
+    public void Validate_PauseAndCancel_RequiresAbsoluteWsUrl(string? wsUrl)
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = wsUrl,
+            MaxReferenceAge = TimeSpan.FromSeconds(10),
+        };
+
+        var result = _validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Failures!, failure => failure.Contains("WsUrl", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("http://marketdata.test/ws")]
+    [InlineData("https://marketdata.test/ws")]
+    [InlineData("file:///marketdata.sock")]
+    public void Validate_RejectsNonWebSocketSchemesForEitherPolicy(string wsUrl)
+    {
+        foreach (var policy in Enum.GetValues<FeedLossPolicy>())
+        {
+            var options = Options();
+            options.MarketData = new MarketDataOptions
+            {
+                FeedLossPolicy = policy,
+                WsUrl = wsUrl,
+                MaxReferenceAge = TimeSpan.FromSeconds(10),
+            };
+
+            var result = _validator.Validate(null, options);
+
+            Assert.False(result.Succeeded);
+            Assert.Contains(result.Failures!, failure => failure.Contains("ws:// or wss://", StringComparison.Ordinal));
+        }
+        Assert.False(MarketDataOptionsValidation.TryGetWebSocketUri(wsUrl, out _));
+    }
+
+    [Theory]
+    [InlineData("ws://marketdata.test/ws")]
+    [InlineData("wss://marketdata.test/ws")]
+    [InlineData("WS://marketdata.test/ws")]
+    [InlineData("WSS://marketdata.test/ws")]
+    public void Validate_AcceptsWebSocketSchemesCaseInsensitively(string wsUrl)
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = wsUrl,
+            MaxReferenceAge = TimeSpan.FromSeconds(10),
+        };
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+        Assert.True(MarketDataOptionsValidation.TryGetWebSocketUri(wsUrl, out var uri));
+        Assert.NotNull(uri);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_PauseAndCancel_RequiresPositiveMaxReferenceAge(int seconds)
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = "wss://marketdata.test/ws",
+            MaxReferenceAge = TimeSpan.FromSeconds(seconds),
+        };
+
+        Assert.False(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_StaticRefPrice_AllowsNoFeedAndInactiveFreshness()
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.StaticRefPrice,
+            WsUrl = null,
+            MaxReferenceAge = TimeSpan.Zero,
+        };
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_AcceptsPauseAndCancelWithAbsoluteFeedAndPositiveAge()
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = "wss://marketdata.test/ws",
+            MaxReferenceAge = TimeSpan.FromSeconds(10),
+        };
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_RejectsUnknownFeedLossPolicy()
+    {
+        var options = Options();
+        options.MarketData.FeedLossPolicy = (FeedLossPolicy)99;
+
+        Assert.False(_validator.Validate(null, options).Succeeded);
     }
 
     public static TheoryData<VolatilitySpreadConfig> InvalidVolatilityConfigurations() => new()

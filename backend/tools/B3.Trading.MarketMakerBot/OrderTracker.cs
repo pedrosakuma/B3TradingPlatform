@@ -29,10 +29,13 @@ public sealed class OrderTracker
     // (an earlier version of this fix aliased the same TrackedOrder under
     // both keys, which double-counted it in OpenCount/InFlightCount/
     // FindStale, all of which iterate _orders.Values) — this is a pure
-    // lookup table, consulted only from OrderRejected handling (see
-    // MarketMakerWorker.HandleEventAsync), since OrderCancelled already
-    // carries the original id directly via OrigClOrdID.
+    // lookup table used to resolve cancel rejects and cancel acks whose
+    // OrigClOrdID was dropped by the gateway.
     private readonly ConcurrentDictionary<ulong, CancelAttempt> _cancelAttempts = new();
+    // Expired cancel ids remain recognizable for a bounded period so a late
+    // reject cannot be mistaken for a rejected new-order submit.
+    private readonly ConcurrentDictionary<ulong, ExpiredCancelAttemptCorrelation>
+        _expiredCancelAttempts = new();
     // Tracks which ClOrdId currently owns each (symbol, side) reservation,
     // so a duplicate/racing terminal ER for an order that has already been
     // superseded by a newer reservation on the same side can't free a slot
@@ -249,10 +252,10 @@ public sealed class OrderTracker
                 var lastActivity = order.LastCancelAttemptAtUtc ?? order.SubmittedAtUtc;
                 if (now - lastActivity < minInterval) return false;
             }
+            _cancelAttempts[cancelClOrdId] = new CancelAttempt(origClOrdId, reason);
             order.PendingCancelClOrdId = cancelClOrdId;
             order.LastCancelAttemptAtUtc = now;
         }
-        _cancelAttempts[cancelClOrdId] = new CancelAttempt(origClOrdId, reason);
         return true;
     }
 
@@ -274,6 +277,12 @@ public sealed class OrderTracker
             reason = attempt.Reason;
             return true;
         }
+        if (_expiredCancelAttempts.TryGetValue(clOrdId, out var expired))
+        {
+            origClOrdId = expired.Attempt.OrigClOrdId;
+            reason = expired.Attempt.Reason;
+            return true;
+        }
         origClOrdId = 0;
         reason = default;
         return false;
@@ -283,6 +292,12 @@ public sealed class OrderTracker
     /// trigger tag.</summary>
     public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId) =>
         TryResolveCancelAttempt(clOrdId, out origClOrdId, out _);
+
+    public void ForgetCancelAttempt(ulong cancelClOrdId)
+    {
+        _cancelAttempts.TryRemove(cancelClOrdId, out _);
+        _expiredCancelAttempts.TryRemove(cancelClOrdId, out _);
+    }
 
     /// <summary>
     /// Records the venue's own OrderId for a tracked order, learned from
@@ -356,6 +371,58 @@ public sealed class OrderTracker
                     _cancelAttempts.TryRemove(expectedCancelClOrdId, out _);
                 }
             }
+        _expiredCancelAttempts.TryRemove(expectedCancelClOrdId, out _);
+    }
+
+    /// <summary>
+    /// Atomically expires open-order cancel attempts whose acknowledgement age
+    /// is at least <paramref name="timeout"/>. Only the matching pending marker
+    /// and active correlation are cleared; <see cref="TrackedOrder.LastCancelAttemptAtUtc"/>
+    /// remains intact so the normal requote throttle still applies. Expired ids
+    /// are retained as bounded tombstones for safe classification of late ERs.
+    /// </summary>
+    public IReadOnlyList<ExpiredPendingCancel> ExpirePendingCancelAttempts(
+        TimeSpan timeout,
+        DateTimeOffset now)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        List<ExpiredPendingCancel>? expired = null;
+        foreach (var order in _orders.Values)
+        {
+            lock (order)
+            {
+                if (!order.IsOpen ||
+                    order.PendingCancelClOrdId is not { } pending ||
+                    order.LastCancelAttemptAtUtc is not { } attemptedAt ||
+                    now - attemptedAt < timeout ||
+                    !_cancelAttempts.TryGetValue(pending, out var attempt))
+                {
+                    continue;
+                }
+                if (attempt.OrigClOrdId != order.ClOrdId)
+                    continue;
+
+                _expiredCancelAttempts[pending] =
+                    new ExpiredCancelAttemptCorrelation(attempt, now);
+                if (!_cancelAttempts.TryRemove(pending, out _))
+                {
+                    _expiredCancelAttempts.TryRemove(pending, out _);
+                    continue;
+                }
+
+                order.PendingCancelClOrdId = null;
+                (expired ??= new List<ExpiredPendingCancel>()).Add(
+                    new ExpiredPendingCancel(
+                        order.ClOrdId,
+                        pending,
+                        order.Symbol,
+                        order.IsBuy,
+                        attempt.Reason,
+                        attemptedAt,
+                        now));
+            }
+        }
+        return expired ?? (IReadOnlyList<ExpiredPendingCancel>)Array.Empty<ExpiredPendingCancel>();
     }
 
     /// <summary>
@@ -421,8 +488,11 @@ public sealed class OrderTracker
     /// side must not evict the newer order's reservation.</summary>
     private void Close(TrackedOrder o)
     {
-        o.IsOpen = false;
-        lock (o) { o.PendingCancelClOrdId = null; }
+        lock (o)
+        {
+            o.IsOpen = false;
+            o.PendingCancelClOrdId = null;
+        }
         if (o.OrderId is { } orderId) _ownOrderIds.TryRemove(orderId, out _);
         lock (_sideLock)
         {
@@ -468,6 +538,10 @@ public sealed class OrderTracker
         if (staleAttempts is not null)
             foreach (var id in staleAttempts)
                 _cancelAttempts.TryRemove(id, out _);
+
+        foreach (var kv in _expiredCancelAttempts)
+            if (now - kv.Value.ExpiredAtUtc > retention)
+                _expiredCancelAttempts.TryRemove(kv.Key, out _);
     }
 }
 
@@ -475,6 +549,18 @@ public sealed class OrderTracker
 /// original order it targets, tagged with which trigger raised it (see
 /// <see cref="OrderTracker.TryResolveCancelAttempt(ulong, out ulong, out CancelReason)"/>).</summary>
 internal readonly record struct CancelAttempt(ulong OrigClOrdId, CancelReason Reason);
+internal readonly record struct ExpiredCancelAttemptCorrelation(
+    CancelAttempt Attempt,
+    DateTimeOffset ExpiredAtUtc);
+
+public readonly record struct ExpiredPendingCancel(
+    ulong OrigClOrdId,
+    ulong CancelClOrdId,
+    string Symbol,
+    bool IsBuy,
+    CancelReason Reason,
+    DateTimeOffset AttemptedAtUtc,
+    DateTimeOffset ExpiredAtUtc);
 
 /// <summary>
 /// Trigger responsible for an explicit cancel. New pricing and feed policies

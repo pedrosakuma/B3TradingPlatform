@@ -1,94 +1,288 @@
-using System.Collections.Concurrent;
-
 namespace B3.Trading.MarketMakerBot;
 
 /// <summary>
-/// Thread-safe last-known-price cache fed by <see cref="MarketDataFeed"/>.
-/// Once market data starts flowing, it anchors the market maker's
-/// quotes instead of each instrument's static config
-/// <see cref="InstrumentConfig.RefPrice"/>; before the first update (or
-/// whenever the feed is disabled/disconnected) callers fall back to
-/// that config value. Also tracks which symbols the venue has reported
-/// as delisted, so the worker can pause quoting them instead of
-/// resting orders against an instrument that no longer trades.
+/// Thread-safe per-symbol reference-price and feed-readiness tracker. Static
+/// fallback callers retain the historical connected-cache behavior through
+/// <see cref="TryGetReferencePrice"/>; strict callers use
+/// <see cref="GetAvailability"/> so a reconnect cannot reuse a previous
+/// connection epoch's cached value.
 /// </summary>
 public sealed class MarketPriceTracker
 {
-    private readonly ConcurrentDictionary<string, MarketMark> _referencePrice = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, byte> _delisted = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SymbolReferenceState> _symbols = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _delisted = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
     private readonly TimeProvider _clock;
-    private volatile bool _connected;
+    private bool _connected;
+    private long _connectionEpoch;
+    private DateTimeOffset? _connectionStartedAtUtc;
 
     public MarketPriceTracker(TimeProvider? clock = null)
     {
         _clock = clock ?? TimeProvider.System;
     }
 
-    /// <summary>Returns the last live price for <paramref name="symbol"/>
-    /// only while the feed is actually connected — once disconnected the
-    /// cached value is considered stale and callers must fall back to
-    /// the configured <see cref="InstrumentConfig.RefPrice"/> rather than
-    /// quoting off a price that may no longer reflect the market.</summary>
+    /// <summary>
+    /// Historical/default behavior: serve any cached reference while connected,
+    /// including a value retained across reconnect.
+    /// </summary>
     public bool TryGetReferencePrice(string symbol, out decimal price)
     {
-        if (!_connected)
+        lock (_gate)
         {
-            price = default;
-            return false;
+            if (_connected &&
+                _symbols.TryGetValue(symbol, out var state) &&
+                state.LastValidMark is { } mark)
+            {
+                price = mark.Price;
+                return true;
+            }
         }
-        if (_referencePrice.TryGetValue(symbol, out var mark))
-        {
-            price = mark.Price;
-            return true;
-        }
+
         price = default;
         return false;
     }
 
-    /// <summary>Returns a connected live mark only when it was updated within
-    /// <paramref name="maxAge"/>. Quote fallback behavior deliberately keeps
-    /// using <see cref="TryGetReferencePrice"/>; this stricter seam is only
-    /// for unrealized P&amp;L publication.</summary>
     public bool TryGetFreshMark(string symbol, TimeSpan maxAge, out MarketMark mark)
     {
-        if (!_connected)
+        lock (_gate)
         {
-            mark = default;
-            return false;
+            if (!_connected ||
+                !_symbols.TryGetValue(symbol, out var state) ||
+                state.LastValidMark is not { } found)
+            {
+                mark = default;
+                return false;
+            }
+
+            mark = found;
+            var age = _clock.GetUtcNow() - mark.ReceivedAtUtc;
+            return age >= TimeSpan.Zero && age <= maxAge;
         }
-        if (!_referencePrice.TryGetValue(symbol, out mark))
+    }
+
+    /// <summary>
+    /// Strict per-symbol readiness. Eligibility requires a connected socket, no
+    /// subscription error in the current epoch, a valid update stamped with the
+    /// current epoch, and an age inside <paramref name="maxAge"/>. An update
+    /// received exactly at the epoch start and a mark whose age equals maxAge
+    /// are eligible; timestamps ahead of the local clock are rejected.
+    /// </summary>
+    public ReferenceAvailability GetAvailability(string symbol, TimeSpan maxAge)
+    {
+        lock (_gate)
+        {
+            _symbols.TryGetValue(symbol, out var state);
+            var currentEpochMark = state?.CurrentEpochMark;
+            var mark = currentEpochMark ?? state?.LastValidMark;
+            TimeSpan? age = mark is { } value ? _clock.GetUtcNow() - value.ReceivedAtUtc : null;
+            var reason = !_connected
+                ? FeedUnavailableReason.Disconnected
+                : state?.SubscriptionErrorEpoch == _connectionEpoch
+                    ? FeedUnavailableReason.SubscriptionError
+                    : currentEpochMark is null ||
+                        currentEpochMark.Value.ConnectionEpoch != _connectionEpoch
+                        ? FeedUnavailableReason.AwaitingCurrentEpochReference
+                        : age < TimeSpan.Zero || age > maxAge
+                            ? FeedUnavailableReason.StaleReference
+                            : FeedUnavailableReason.None;
+            return new ReferenceAvailability(
+                reason == FeedUnavailableReason.None,
+                reason,
+                _connected,
+                _connectionEpoch,
+                _connectionStartedAtUtc,
+                mark,
+                age);
+        }
+    }
+
+    public bool TryGetEligibleReference(
+        string symbol,
+        TimeSpan maxAge,
+        out MarketMark mark,
+        out FeedUnavailableReason unavailableReason)
+    {
+        var availability = GetAvailability(symbol, maxAge);
+        unavailableReason = availability.UnavailableReason;
+        if (availability.IsEligible && availability.LastValidMark is { } found)
+        {
+            mark = found;
+            return true;
+        }
+
+        mark = default;
+        return false;
+    }
+
+    public bool IsDelisted(string symbol)
+    {
+        lock (_gate)
+            return _delisted.Contains(symbol);
+    }
+
+    public bool OnTrade(string symbol, decimal price) =>
+        OnTrade(symbol, price, _clock.GetUtcNow());
+
+    public bool OnTrade(string symbol, decimal price, DateTimeOffset receivedAtUtc) =>
+        Update(symbol, price, ReferencePriceSource.Trade, receivedAtUtc);
+
+    /// <summary>
+    /// Prefers the venue's TradingReferencePrice, falling back to
+    /// LastTradePrice only when the former is absent.
+    /// </summary>
+    public bool OnInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice)
+        => OnInfoSnapshot(
+            symbol,
+            tradingReferencePrice,
+            lastTradePrice,
+            _clock.GetUtcNow());
+
+    public bool OnInfoSnapshot(
+        string symbol,
+        decimal? tradingReferencePrice,
+        decimal? lastTradePrice,
+        DateTimeOffset receivedAtUtc)
+    {
+        if (tradingReferencePrice is { } reference)
+            return reference > 0m &&
+                Update(
+                    symbol,
+                    reference,
+                    ReferencePriceSource.TradingReferencePrice,
+                    receivedAtUtc);
+        return lastTradePrice is > 0m &&
+            Update(
+                symbol,
+                lastTradePrice.Value,
+                ReferencePriceSource.LastTradePrice,
+                receivedAtUtc);
+    }
+
+    public void OnSymbolDelisted(string symbol)
+    {
+        lock (_gate)
+            _delisted.Add(symbol);
+    }
+
+    public void OnSubscriptionError(string symbol)
+    {
+        lock (_gate)
+            GetOrAdd(symbol).SubscriptionErrorEpoch = _connectionEpoch;
+    }
+
+    /// <summary>
+    /// Entering Connected starts a new epoch. Cached marks remain available to
+    /// StaticRefPrice, but strict eligibility requires a fresh mark stamped in
+    /// the new epoch.
+    /// </summary>
+    public bool SetConnected(bool connected, DateTimeOffset? changedAtUtc = null)
+    {
+        lock (_gate)
+        {
+            if (_connected == connected)
+                return false;
+            _connected = connected;
+            if (connected)
+            {
+                _connectionEpoch++;
+                _connectionStartedAtUtc = changedAtUtc ?? _clock.GetUtcNow();
+                foreach (var state in _symbols.Values)
+                    state.CurrentEpochMark = null;
+            }
+            return true;
+        }
+    }
+
+    private bool Update(
+        string symbol,
+        decimal price,
+        ReferencePriceSource source,
+        DateTimeOffset receivedAtUtc)
+    {
+        if (price <= 0m)
             return false;
 
-        var age = _clock.GetUtcNow() - mark.ObservedAtUtc;
-        return age >= TimeSpan.Zero && age <= maxAge;
+        lock (_gate)
+        {
+            var now = _clock.GetUtcNow();
+            if (receivedAtUtc > now)
+                return false;
+
+            var state = GetOrAdd(symbol);
+            if (state.LastValidMark is { } last &&
+                receivedAtUtc < last.ReceivedAtUtc)
+            {
+                return false;
+            }
+
+            var belongsToCurrentEpoch = _connected &&
+                _connectionStartedAtUtc is { } epochStart &&
+                receivedAtUtc >= epochStart;
+            var mark = new MarketMark(
+                price,
+                receivedAtUtc,
+                source,
+                belongsToCurrentEpoch ? _connectionEpoch : 0);
+            // Equal source timestamps are resolved by callback order: the latest
+            // callback replaces the prior mark and therefore determines source.
+            state.LastValidMark = mark;
+            if (belongsToCurrentEpoch &&
+                (state.CurrentEpochMark is not { } current ||
+                    mark.ReceivedAtUtc >= current.ReceivedAtUtc))
+            {
+                state.CurrentEpochMark = mark;
+                state.SubscriptionErrorEpoch = null;
+            }
+            return true;
+        }
     }
 
-    public bool IsDelisted(string symbol) => _delisted.ContainsKey(symbol);
-
-    public void OnTrade(string symbol, decimal price)
+    private SymbolReferenceState GetOrAdd(string symbol)
     {
-        if (price > 0m) _referencePrice[symbol] = new MarketMark(price, _clock.GetUtcNow());
+        if (!_symbols.TryGetValue(symbol, out var state))
+        {
+            state = new SymbolReferenceState();
+            _symbols.Add(symbol, state);
+        }
+        return state;
     }
 
-    /// <summary>Prefers the venue's own <c>TradingReferencePrice</c> — the
-    /// authoritative anchor B3 itself publishes — falling back to
-    /// <c>LastTradePrice</c> when the venue hasn't set one yet (e.g.
-    /// before the first trade of the day).</summary>
-    public void OnInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice)
+    private sealed class SymbolReferenceState
     {
-        var candidate = tradingReferencePrice ?? lastTradePrice;
-        if (candidate is { } p && p > 0m)
-            _referencePrice[symbol] = new MarketMark(p, _clock.GetUtcNow());
+        public MarketMark? LastValidMark { get; set; }
+        public MarketMark? CurrentEpochMark { get; set; }
+        public long? SubscriptionErrorEpoch { get; set; }
     }
 
-    public readonly record struct MarketMark(decimal Price, DateTimeOffset ObservedAtUtc);
-
-    public void OnSymbolDelisted(string symbol) => _delisted[symbol] = 0;
-
-    /// <summary>Toggled by <see cref="MarketDataFeed"/> as the SDK's
-    /// connection state changes. Cached prices are kept (not cleared) so
-    /// a reconnect resumes anchoring immediately, but
-    /// <see cref="TryGetReferencePrice"/> refuses to serve them while
-    /// disconnected.</summary>
-    public void SetConnected(bool connected) => _connected = connected;
+    public readonly record struct MarketMark(
+        decimal Price,
+        DateTimeOffset ReceivedAtUtc,
+        ReferencePriceSource Source = ReferencePriceSource.Trade,
+        long ConnectionEpoch = 0);
 }
+
+public enum ReferencePriceSource
+{
+    Trade,
+    TradingReferencePrice,
+    LastTradePrice,
+}
+
+public enum FeedUnavailableReason
+{
+    None,
+    Disconnected,
+    AwaitingCurrentEpochReference,
+    SubscriptionError,
+    StaleReference,
+}
+
+public readonly record struct ReferenceAvailability(
+    bool IsEligible,
+    FeedUnavailableReason UnavailableReason,
+    bool IsConnected,
+    long ConnectionEpoch,
+    DateTimeOffset? ConnectionStartedAtUtc,
+    MarketPriceTracker.MarketMark? LastValidMark,
+    TimeSpan? ReferenceAge);
