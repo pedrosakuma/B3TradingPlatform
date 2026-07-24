@@ -98,6 +98,15 @@ services:
       # Defensive safety net only — the primary re-quote path is
       # event-driven (fills/cancels/rejects), see MarketMakerWorker.
       MarketMaker__ReconcileInterval: "00:00:05"
+      # Gross/pre-fee process-local P&L snapshots. Unrealized P&L is
+      # omitted unless the connected live mark is newer than MarkMaxAge.
+      MarketMaker__Telemetry__SnapshotInterval: "00:00:30"
+      MarketMaker__Telemetry__MarkMaxAge: "00:00:30"
+      # OTLP remains disabled here by default. Set the standard
+      # OTEL_EXPORTER_OTLP_ENDPOINT/PROTOCOL variables when routing this
+      # bot to a collector (b3deploy owns collector -> Azure Monitor).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
 
       # ── Instruments (must match docker/real/instruments-eqt.json) ──
       MarketMaker__Instruments__0__Symbol: PETR4

@@ -69,6 +69,17 @@ spec:
               value: /var/lib/b3-market-maker-bot
             - name: MarketMaker__ReconcileInterval
               value: {{ .Values.behaviour.reconcileInterval | quote }}
+            # ── Position/P&L observability ────────────────────────────────
+            - name: MarketMaker__Telemetry__SnapshotInterval
+              value: {{ .Values.observability.snapshotInterval | quote }}
+            - name: MarketMaker__Telemetry__MarkMaxAge
+              value: {{ .Values.observability.markMaxAge | quote }}
+            {{- if .Values.observability.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlpEndpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.observability.otlpProtocol | quote }}
+            {{- end }}
             # ── Instruments (must match matching's instruments-eqt.json) ─
             {{- range $i, $instrument := .Values.instruments }}
             - name: {{ printf "MarketMaker__Instruments__%d__Symbol" $i }}

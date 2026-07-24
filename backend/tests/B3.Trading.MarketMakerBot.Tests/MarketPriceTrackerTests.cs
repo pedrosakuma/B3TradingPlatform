@@ -116,4 +116,22 @@ public class MarketPriceTrackerTests
         Assert.True(tracker.TryGetReferencePrice("PETR4", out var price));
         Assert.Equal(30m, price);
     }
+
+    [Fact]
+    public void TryGetFreshMark_RequiresConnectionAndRecentUpdate()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var tracker = new MarketPriceTracker(clock);
+        tracker.OnTrade("PETR4", 30m);
+
+        Assert.False(tracker.TryGetFreshMark("PETR4", TimeSpan.FromSeconds(10), out _));
+
+        tracker.SetConnected(true);
+        Assert.True(tracker.TryGetFreshMark("PETR4", TimeSpan.FromSeconds(10), out var mark));
+        Assert.Equal(30m, mark.Price);
+
+        clock.Advance(TimeSpan.FromSeconds(11));
+        Assert.False(tracker.TryGetFreshMark("PETR4", TimeSpan.FromSeconds(10), out _));
+        Assert.True(tracker.TryGetReferencePrice("PETR4", out _));
+    }
 }

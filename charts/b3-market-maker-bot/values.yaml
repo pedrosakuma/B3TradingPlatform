@@ -71,6 +71,18 @@ behaviour:
   # (fills/cancels/rejects), see MarketMakerWorker.
   reconcileInterval: "00:00:05"
 
+# ── Position/P&L observability ───────────────────────────────────────────────
+observability:
+  # Structured per-symbol gross/pre-fee position/P&L log cadence.
+  snapshotInterval: "00:00:30"
+  # Unrealized P&L is omitted when the connected live mark is older than this.
+  markMaxAge: "00:00:30"
+  # Cloud-neutral OTLP collector endpoint. Leave empty to disable the exporter.
+  # In b3deploy this should target the in-cluster collector; the collector owns
+  # any Azure Monitor (or other backend) export configuration.
+  otlpEndpoint: ""
+  otlpProtocol: grpc
+
 # ── Instruments (must match matching-platform's instruments-eqt.json) ─────
 instruments:
   - symbol: PETR4
