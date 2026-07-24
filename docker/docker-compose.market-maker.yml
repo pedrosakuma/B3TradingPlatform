@@ -105,6 +105,8 @@ services:
       # OTLP remains disabled here by default. Set the standard
       # OTEL_EXPORTER_OTLP_ENDPOINT/PROTOCOL variables when routing this
       # bot to a collector (b3deploy owns collector -> Azure Monitor).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
 
       # ── Instruments (must match docker/real/instruments-eqt.json) ──
       MarketMaker__Instruments__0__Symbol: PETR4

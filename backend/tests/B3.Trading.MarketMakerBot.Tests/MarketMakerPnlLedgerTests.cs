@@ -210,6 +210,59 @@ public class MarketMakerPnlLedgerTests
         Assert.Equal(startedAt, snapshot.AccountingPeriodStartedAtUtc);
     }
 
+    [Fact]
+    public void PruneTerminal_RetainsActiveOrderAccountingState()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T03:00:00Z"));
+        var ledger = new MarketMakerPnlLedger(clock);
+        var fill = Fill(1, 1, true, 40, 30m, orderQuantity: 100,
+            cumQty: 40, leavesQty: 60, isFilled: false);
+        AssertApplied(ledger, fill);
+
+        clock.Advance(TimeSpan.FromHours(1));
+        ledger.PruneTerminal(TimeSpan.FromMinutes(5));
+
+        Assert.Equal(1, ledger.OrderStateCount);
+        Assert.Equal(FillApplyStatus.Duplicate, ledger.Apply(fill).Status);
+        AssertSnapshot(ledger, position: 40, averageCost: 30m, realizedPnl: 0m);
+    }
+
+    [Fact]
+    public void PruneTerminal_RetainsRecentTerminalReplayDedupWindow()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T03:00:00Z"));
+        var ledger = new MarketMakerPnlLedger(clock);
+        var fill = Fill(1, 1, true, 100, 30m);
+        AssertApplied(ledger, fill);
+        ledger.MarkTerminal(1);
+
+        clock.Advance(TimeSpan.FromMinutes(4));
+        Assert.Equal(FillApplyStatus.Duplicate, ledger.Apply(fill).Status);
+        clock.Advance(TimeSpan.FromMinutes(2));
+        ledger.PruneTerminal(TimeSpan.FromMinutes(5));
+
+        Assert.Equal(1, ledger.OrderStateCount);
+        Assert.Equal(FillApplyStatus.Duplicate, ledger.Apply(fill).Status);
+        AssertSnapshot(ledger, position: 100, averageCost: 30m, realizedPnl: 0m);
+    }
+
+    [Fact]
+    public void PruneTerminal_EvictsExpiredStateWithoutChangingPositionOrPnl()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T03:00:00Z"));
+        var ledger = new MarketMakerPnlLedger(clock);
+        AssertApplied(ledger, Fill(1, 1, true, 100, 30m));
+        ledger.MarkTerminal(1);
+        Assert.True(ledger.TryGetSnapshot("PETR4", out var before));
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        ledger.PruneTerminal(TimeSpan.FromMinutes(5));
+
+        Assert.Equal(0, ledger.OrderStateCount);
+        Assert.True(ledger.TryGetSnapshot("PETR4", out var after));
+        Assert.Equal(before, after);
+    }
+
     private static OwnFill Fill(
         ulong clOrdId,
         ulong tradeId,

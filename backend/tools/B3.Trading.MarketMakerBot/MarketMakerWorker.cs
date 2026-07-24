@@ -229,6 +229,8 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // be misread as "fully filled".
                     var isFilled = t.OrderStatus == UpModels.OrderStatus.Filled;
                     _tracker.OnTrade(t.ClOrdID.Value, isFilled, t.LeavesQty is { } tLeaves ? (long)tLeaves : null);
+                    if (isFilled)
+                        _pnlLedger.MarkTerminal(t.ClOrdID.Value);
                     // Fully filled → immediately re-quote the same side so
                     // our side of the book never goes empty. Partial fills
                     // stay resting (still working at the same price).
@@ -256,6 +258,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                         ?? (_tracker.TryResolveCancelAttempt(c.ClOrdID.Value, out var linked) ? linked : c.ClOrdID.Value);
                     var known = _tracker.TryGet(targetClOrdId, out var o);
                     _tracker.OnTerminal(targetClOrdId);
+                    _pnlLedger.MarkTerminal(targetClOrdId);
                     if (known) await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
                     break;
                 }
@@ -317,6 +320,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                     var symbol = known ? o.Symbol : null;
                     _metrics.RecordRejected(symbol);
                     _tracker.OnTerminal(r.ClOrdID.Value);
+                    _pnlLedger.MarkTerminal(r.ClOrdID.Value);
                     // Deliberately do NOT re-quote immediately here: an
                     // instrument-level reject (bad config, halt, risk
                     // limit) would otherwise repeat identically forever,
@@ -381,6 +385,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             // every reconcile tick too — see OrderTracker.PruneClosed's
             // doc comment for why this became necessary.
             _tracker.PruneClosed(_options.MaxOrderAge, _tracker.UtcNow);
+            _pnlLedger.PruneTerminal(_options.MaxOrderAge);
 
             foreach (var instr in _options.Instruments)
             {

@@ -39,7 +39,11 @@ The market-maker bot uses `service.name=b3-market-maker-bot` and
 
 The bot's position ledger is process-local, gross/pre-fee, and derived only
 from validated `OrderTrade` events for known bot orders. It is deliberately
-independent of the trading application's persisted P&L state.
+independent of the trading application's persisted P&L state. Per-order
+CumQty/execution identities remain available for FIXP replay deduplication
+while an order is active and for a quiet `MarketMaker:MaxOrderAge` window
+after terminal status; reconcile cleanup then evicts only that per-order
+metadata, never accumulated position or P&L.
 
 | OTel name | Type | Tags | Notes |
 |---|---|---|---|

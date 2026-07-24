@@ -8,12 +8,13 @@ public sealed class MarketMakerPnlLedger
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, MutablePosition> _positions = new(StringComparer.Ordinal);
-    private readonly Dictionary<ulong, ulong> _orderCumQty = new();
-    private readonly Dictionary<ExecutionIdentity, ExecutionSignature> _executions = new();
+    private readonly Dictionary<ulong, OrderAccountingState> _orders = new();
+    private readonly TimeProvider _clock;
 
     public MarketMakerPnlLedger(TimeProvider? clock = null)
     {
-        AccountingPeriodStartedAtUtc = (clock ?? TimeProvider.System).GetUtcNow();
+        _clock = clock ?? TimeProvider.System;
+        AccountingPeriodStartedAtUtc = _clock.GetUtcNow();
     }
 
     public DateTimeOffset AccountingPeriodStartedAtUtc { get; }
@@ -22,18 +23,30 @@ public sealed class MarketMakerPnlLedger
     {
         lock (_gate)
         {
-            var identity = new ExecutionIdentity(fill.ClOrdId, fill.TradeId);
+            var now = _clock.GetUtcNow();
             var signature = new ExecutionSignature(fill.Price, fill.Quantity, fill.CumQty, fill.LeavesQty);
-            if (_executions.TryGetValue(identity, out var existing))
+            var hasOrderState = _orders.TryGetValue(fill.ClOrdId, out var orderState);
+            if (hasOrderState && orderState!.Executions.TryGetValue(fill.TradeId, out var existing))
             {
+                orderState.LastSeenAtUtc = now;
                 return existing == signature
                     ? new(FillApplyStatus.Duplicate, "execution identity already applied")
                     : new(FillApplyStatus.Inconsistent, "execution identity was reused with different fill data");
             }
 
-            var validationError = Validate(fill, out var nextCumQty, out var bookedQuantity, out var quantityMismatch);
+            var previousCumQty = hasOrderState ? orderState!.CumulativeQuantity : 0;
+            var validationError = Validate(
+                fill,
+                previousCumQty,
+                out var nextCumQty,
+                out var bookedQuantity,
+                out var quantityMismatch);
             if (validationError is not null)
+            {
+                if (hasOrderState)
+                    orderState!.LastSeenAtUtc = now;
                 return validationError.Value;
+            }
 
             var signedQuantity = checked((long)bookedQuantity) * (fill.IsBuy ? 1L : -1L);
             var isNewPosition = !_positions.TryGetValue(fill.Symbol, out var position);
@@ -49,8 +62,12 @@ public sealed class MarketMakerPnlLedger
             }
             if (isNewPosition)
                 _positions.Add(fill.Symbol, position);
-            _orderCumQty[fill.ClOrdId] = nextCumQty;
-            _executions.Add(identity, signature);
+            orderState ??= new OrderAccountingState(now);
+            orderState.CumulativeQuantity = nextCumQty;
+            orderState.LastSeenAtUtc = now;
+            orderState.Executions.Add(fill.TradeId, signature);
+            if (!hasOrderState)
+                _orders.Add(fill.ClOrdId, orderState);
             return new(
                 FillApplyStatus.Applied,
                 quantityMismatch
@@ -87,8 +104,69 @@ public sealed class MarketMakerPnlLedger
         }
     }
 
+    /// <summary>
+    /// Marks an order's accounting/dedup state terminal without creating state
+    /// for orders that never produced a valid fill. Idempotent terminal
+    /// replays refresh <see cref="OrderAccountingState.LastSeenAtUtc"/> but do
+    /// not move the original terminal timestamp.
+    /// </summary>
+    public void MarkTerminal(ulong clOrdId)
+    {
+        lock (_gate)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var state))
+                return;
+
+            var now = _clock.GetUtcNow();
+            state.LastSeenAtUtc = now;
+            state.TerminalAtUtc ??= now;
+        }
+    }
+
+    /// <summary>
+    /// Evicts only terminal per-order CumQty/execution-identity state after a
+    /// quiet <paramref name="retention"/> window. This window is the bot's
+    /// documented FIXP replay-dedup horizon and is driven from the same
+    /// reconcile lifecycle/retention as <see cref="OrderTracker.PruneClosed"/>.
+    /// Active orders are never pruned. Position, average cost, and realized
+    /// P&amp;L live in <see cref="_positions"/> and are intentionally untouched.
+    /// </summary>
+    public void PruneTerminal(TimeSpan retention)
+    {
+        var now = _clock.GetUtcNow();
+        lock (_gate)
+        {
+            List<ulong>? expired = null;
+            foreach (var (clOrdId, state) in _orders)
+            {
+                if (state.TerminalAtUtc is not null && now - state.LastSeenAtUtc > retention)
+                    (expired ??= []).Add(clOrdId);
+            }
+
+            if (expired is not null)
+                foreach (var clOrdId in expired)
+                    _orders.Remove(clOrdId);
+        }
+    }
+
+    internal int OrderStateCount
+    {
+        get
+        {
+            lock (_gate)
+                return _orders.Count;
+        }
+    }
+
+    internal bool IsTerminalOrderState(ulong clOrdId)
+    {
+        lock (_gate)
+            return _orders.TryGetValue(clOrdId, out var state) && state.TerminalAtUtc is not null;
+    }
+
     private FillApplyResult? Validate(
         OwnFill fill,
+        ulong previousCumQty,
         out ulong nextCumQty,
         out ulong bookedQuantity,
         out bool quantityMismatch)
@@ -107,7 +185,6 @@ public sealed class MarketMakerPnlLedger
         if (fill.Price <= 0m)
             return new(FillApplyStatus.Invalid, "LastPx is not positive");
         var orderQuantity = (ulong)fill.OrderQuantity;
-        var previousCumQty = _orderCumQty.GetValueOrDefault(fill.ClOrdId);
         if (fill.CumQty is { } reportedCumQty)
         {
             if (reportedCumQty <= previousCumQty)
@@ -200,8 +277,20 @@ public sealed class MarketMakerPnlLedger
         public decimal RealizedPnl;
     }
 
-    private readonly record struct ExecutionIdentity(ulong ClOrdId, ulong TradeId);
     private readonly record struct ExecutionSignature(decimal Price, ulong Quantity, ulong? CumQty, ulong? LeavesQty);
+
+    private sealed class OrderAccountingState
+    {
+        public OrderAccountingState(DateTimeOffset now)
+        {
+            LastSeenAtUtc = now;
+        }
+
+        public ulong CumulativeQuantity;
+        public DateTimeOffset LastSeenAtUtc;
+        public DateTimeOffset? TerminalAtUtc;
+        public Dictionary<ulong, ExecutionSignature> Executions { get; } = new();
+    }
 }
 
 public readonly record struct OwnFill(

@@ -62,8 +62,7 @@ public class MarketMakerWorkerTests : IDisposable
     /// <see cref="MarketMakerWorker.CancelStaleOrdersAsync"/>/<see
     /// cref="MarketMakerWorker.ReactToBookChangeAsync"/> tests: takes an
     /// explicit <see cref="TimeProvider"/> (wired into the
-    /// <see cref="OrderTracker"/>, which is the only place the worker
-    /// reads the clock from — see <see cref="OrderTracker.UtcNow"/>) and
+    /// <see cref="OrderTracker"/>, P&amp;L ledger, and price tracker) and
     /// an <paramref name="configure"/> callback for the staleness/requote
     /// tunables those two methods depend on, and also hands back the
     /// <see cref="MarketPriceTracker"/> so tests can move the live
@@ -93,7 +92,7 @@ public class MarketMakerWorkerTests : IDisposable
         configure?.Invoke(options);
         var tracker = new OrderTracker(clock);
         var priceTracker = new MarketPriceTracker(clock);
-        var pnlLedger = new MarketMakerPnlLedger();
+        var pnlLedger = new MarketMakerPnlLedger(clock);
         var metrics = new MarketMakerMetrics(pnlLedger, priceTracker, Options.Create(options));
         _metrics.Add(metrics);
         var loggerFactory = NullLoggerFactory.Instance;
@@ -242,6 +241,7 @@ public class MarketMakerWorkerTests : IDisposable
         Assert.Equal(100, snapshot.Position);
         Assert.Equal(30m, snapshot.AverageCost);
         Assert.Equal(0m, snapshot.RealizedPnl);
+        Assert.True(ledger.IsTerminalOrderState(clOrdId));
     }
 
     [Fact]
