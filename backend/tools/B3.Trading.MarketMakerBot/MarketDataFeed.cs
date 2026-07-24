@@ -28,7 +28,9 @@ internal sealed class MarketDataFeed : IAsyncDisposable
     private readonly MarketPriceTracker _tracker;
     private readonly VolatilitySpreadEstimator _volatilitySpread;
     private readonly ILogger _log;
+    private readonly object _connectionGate = new();
     private MarketDataClient? _client;
+    private bool _connectionEligible;
 
     /// <summary>
     /// Raised for every order-level book delta (add/update/delete) the
@@ -53,6 +55,12 @@ internal sealed class MarketDataFeed : IAsyncDisposable
 
     /// <summary>Raised only when a symbol's effective dynamic spread tick count changes.</summary>
     public event Action<string>? VolatilitySpreadChanged;
+
+    /// <summary>
+    /// Raised once whenever live-reference eligibility changes. The worker fans
+    /// this out across configured symbols through its coalesced pricing channel.
+    /// </summary>
+    public event Action? ConnectionEligibilityChanged;
 
     public MarketDataFeed(
         MarketPriceTracker tracker,
@@ -163,9 +171,16 @@ internal sealed class MarketDataFeed : IAsyncDisposable
 
     internal void NotifyConnectionState(bool connected)
     {
-        _tracker.SetConnected(connected);
-        foreach (var change in _volatilitySpread.SetConnected(connected))
-            PublishVolatilityChange(change);
+        lock (_connectionGate)
+        {
+            var eligibilityChanged = _connectionEligible != connected;
+            _connectionEligible = connected;
+            _tracker.SetConnected(connected);
+            foreach (var change in _volatilitySpread.SetConnected(connected))
+                PublishVolatilityChange(change);
+            if (eligibilityChanged)
+                ConnectionEligibilityChanged?.Invoke();
+        }
     }
 
     private void OnConnectionStateChanged(ConnectionStateChangedEvent ev)

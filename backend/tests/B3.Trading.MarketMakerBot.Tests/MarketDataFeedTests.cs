@@ -109,4 +109,30 @@ public class MarketDataFeedTests
         Assert.Equal(2, signals);
         Assert.Equal(2, estimator.GetSnapshot("PETR4").AdditionalSpreadTicks);
     }
+
+    [Fact]
+    public void ConnectionEligibility_SignalsEveryTransitionOnce_IndependentlyOfVolatilityAndDelisting()
+    {
+        var tracker = new MarketPriceTracker();
+        var options = Options.Create(new MarketMakerBotOptions
+        {
+            Instruments = [new InstrumentConfig { Symbol = "PETR4" }],
+        });
+        var estimator = new VolatilitySpreadEstimator(options, TimeProvider.System);
+        var feed = new MarketDataFeed(tracker, estimator, NullLogger.Instance);
+        var connectionSignals = 0;
+        var availabilitySignals = 0;
+        feed.ConnectionEligibilityChanged += () => connectionSignals++;
+        feed.SymbolAvailabilityChanged += _ => availabilitySignals++;
+
+        feed.NotifyConnectionState(true);
+        feed.NotifyConnectionState(true);
+        feed.NotifyConnectionState(false);
+        feed.NotifyConnectionState(false);
+        feed.NotifyConnectionState(true);
+        feed.NotifySymbolDelisted("PETR4");
+
+        Assert.Equal(3, connectionSignals);
+        Assert.Equal(1, availabilitySignals);
+    }
 }

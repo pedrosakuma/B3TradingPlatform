@@ -93,6 +93,7 @@ jobs:
           set -euo pipefail
           rendered="$(helm template ci charts/b3-market-maker-bot)"
           grep -Fq 'image: ghcr.io/pedrosakuma/b3-market-maker-bot:latest' <<<"$rendered"
+          grep -Fq 'imagePullPolicy: Always' <<<"$rendered"
           ! grep -Fq 'b3-market-maker-bot:0.1.0' <<<"$rendered"
 
       # #574: a values/template-only chart change that lands without a

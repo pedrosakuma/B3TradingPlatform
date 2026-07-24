@@ -14,7 +14,9 @@ image:
   # Optional digest pin (e.g. "sha256:05f6a7f6...").
   # When set, the image reference becomes "repository@digest" and `tag` is ignored.
   digest: ""
-  pullPolicy: IfNotPresent
+  # `latest` is mutable by design, so avoid stale node-cache reuse. Operators
+  # pinning an immutable tag/digest may override this to IfNotPresent.
+  pullPolicy: Always
 
 # Hardcoded to 1 in templates/statefulset.yaml — the bot's FIXP session
 # (sessionId/sessionVerId below) is single-writer against matching-platform,

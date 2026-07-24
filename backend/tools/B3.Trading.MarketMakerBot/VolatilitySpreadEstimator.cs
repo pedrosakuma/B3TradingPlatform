@@ -153,6 +153,8 @@ public sealed class VolatilitySpreadEstimator
             return cap;
         }
 
+        if (scaled == 0m)
+            return config.Multiplier > 0m ? Math.Min(1, cap) : 0;
         if (scaled >= cap)
             return cap;
         scaled = Math.Ceiling(scaled);

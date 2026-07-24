@@ -155,6 +155,27 @@ public class VolatilitySpreadEstimatorTests
     }
 
     [Fact]
+    public void PositiveScalingUnderflow_StillWidensByOneTick()
+    {
+        const decimal minimumScaleMultiplier = 0.0000000000000000000000000001m;
+        var estimator = Create(
+            out _,
+            minSamples: 1,
+            multiplier: minimumScaleMultiplier,
+            tickSize: 0.02m);
+        estimator.SetConnected(true);
+        estimator.OnTrade("PETR4", 30m);
+
+        var change = estimator.OnTrade("PETR4", 30.01m);
+
+        Assert.NotNull(change);
+        var estimate = 0.5m;
+        Assert.Equal(0m, checked(estimate * minimumScaleMultiplier));
+        Assert.Equal(0.5m, change.Value.Current.MoveEstimateTicks);
+        Assert.Equal(1, change.Value.Current.AdditionalSpreadTicks);
+    }
+
+    [Fact]
     public void SymbolsHaveIndependentBaselinesAndSamples()
     {
         var estimator = Create(out _, minSamples: 1, symbols: ["PETR4", "VALE3"]);
@@ -213,7 +234,8 @@ public class VolatilitySpreadEstimatorTests
         TimeSpan? window = null,
         decimal multiplier = 1m,
         int cap = 20,
-        string[]? symbols = null)
+        string[]? symbols = null,
+        decimal tickSize = 0.01m)
     {
         clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
         var instruments = (symbols ?? ["PETR4"]).Select((symbol, index) => new InstrumentConfig
@@ -221,7 +243,7 @@ public class VolatilitySpreadEstimatorTests
             Symbol = symbol,
             SecurityId = (ulong)(index + 1),
             RefPrice = 30m,
-            TickSize = 0.01m,
+            TickSize = tickSize,
             SpreadTicks = 5,
             VolatilitySpread = new VolatilitySpreadConfig
             {

@@ -1354,6 +1354,79 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FeedEligibilityChange_RepricesBothSidesWithDisabledOrZeroTickVolatility(
+        bool enableZeroTickVolatility)
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, _) = CreateWorker(
+            clock,
+            options =>
+            {
+                options.MinRequoteInterval = TimeSpan.Zero;
+                if (enableZeroTickVolatility)
+                    EnableVolatilitySpread(options);
+            },
+            out _,
+            out var marketData);
+        marketData.NotifyTrade(instrument.Symbol, 31m);
+        if (enableZeroTickVolatility)
+            marketData.NotifyTrade(instrument.Symbol, 31m);
+        marketData.NotifyConnectionState(true);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        Assert.Equal(30.95m, client.SubmittedOrders.Single(order => order.Side == Side.Buy).Price);
+        Assert.Equal(31.05m, client.SubmittedOrders.Single(order => order.Side == Side.Sell).Price);
+
+        var disconnectCancels = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconnectCancels = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.CancelHandler = (_, _) =>
+        {
+            if (client.SubmittedCancels.Count == 2)
+                disconnectCancels.TrySetResult(true);
+            else if (client.SubmittedCancels.Count == 4)
+                reconnectCancels.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+        marketData.ConnectionEligibilityChanged += worker.OnMarketDataConnectionEligibilityChanged;
+        using var cts = new CancellationTokenSource();
+        var reactionLoop = worker.PricingContextReactionLoopAsync(client, cts.Token);
+        try
+        {
+            marketData.NotifyConnectionState(false);
+            await disconnectCancels.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            marketData.NotifyConnectionState(false);
+            await Task.Yield();
+            Assert.Equal(2, client.SubmittedCancels.Count);
+
+            foreach (var cancel in client.SubmittedCancels.ToArray())
+                await AckCancelAsync(worker, client, cancel, seqNum: 1);
+
+            Assert.Equal(29.95m, client.SubmittedOrders.Last(order => order.Side == Side.Buy).Price);
+            Assert.Equal(30.05m, client.SubmittedOrders.Last(order => order.Side == Side.Sell).Price);
+
+            marketData.NotifyConnectionState(true);
+            await reconnectCancels.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            marketData.NotifyConnectionState(true);
+            await Task.Yield();
+            Assert.Equal(4, client.SubmittedCancels.Count);
+
+            foreach (var cancel in client.SubmittedCancels.Skip(2).ToArray())
+                await AckCancelAsync(worker, client, cancel, seqNum: 2);
+
+            Assert.Equal(30.95m, client.SubmittedOrders.Last(order => order.Side == Side.Buy).Price);
+            Assert.Equal(31.05m, client.SubmittedOrders.Last(order => order.Side == Side.Sell).Price);
+        }
+        finally
+        {
+            marketData.ConnectionEligibilityChanged -= worker.OnMarketDataConnectionEligibilityChanged;
+            cts.Cancel();
+            await reactionLoop;
+        }
+    }
+
+    [Theory]
     [InlineData(CancelReason.StaleOrder, "bot.orders.stale_cancel_rejected")]
     [InlineData(CancelReason.PriceDrift, "bot.orders.book_driven_requote_cancel_rejected")]
     public async Task HandleEventAsync_CancelReject_PreservesReasonSpecificMetric(
@@ -1470,4 +1543,19 @@ public class MarketMakerWorkerTests : IDisposable
             MaxAdditionalSpreadTicks = 20,
         };
     }
+
+    private static Task AckCancelAsync(
+        MarketMakerWorker worker,
+        FakeEntryPointClient client,
+        CancelOrderRequest cancel,
+        ulong seqNum) =>
+        worker.HandleEventAsync(client, new OrderCancelled
+        {
+            ClOrdID = cancel.ClOrdID,
+            OrigClOrdID = cancel.OrigClOrdID,
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = seqNum,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
 }

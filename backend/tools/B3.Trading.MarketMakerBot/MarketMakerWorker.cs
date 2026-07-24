@@ -129,6 +129,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         _marketData.BookOrderChanged += OnBookOrderChanged;
         _marketData.SymbolAvailabilityChanged += OnSymbolAvailabilityChanged;
         _marketData.VolatilitySpreadChanged += OnVolatilitySpreadChanged;
+        _marketData.ConnectionEligibilityChanged += OnMarketDataConnectionEligibilityChanged;
         try
         {
             _log.LogInformation("[mm] connecting to {Endpoint} session={Session} verId={VerId}",
@@ -168,6 +169,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             _marketData.BookOrderChanged -= OnBookOrderChanged;
             _marketData.SymbolAvailabilityChanged -= OnSymbolAvailabilityChanged;
             _marketData.VolatilitySpreadChanged -= OnVolatilitySpreadChanged;
+            _marketData.ConnectionEligibilityChanged -= OnMarketDataConnectionEligibilityChanged;
             _pricingContextSignals.Writer.TryComplete();
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
             await _marketData.DisposeAsync();
@@ -585,6 +587,12 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     internal void OnVolatilitySpreadChanged(string symbol) =>
         SignalPricingContextChanged(symbol, CancelReason.VolatilityStrategy);
+
+    internal void OnMarketDataConnectionEligibilityChanged()
+    {
+        foreach (var symbol in _configuredSymbols)
+            SignalPricingContextChanged(symbol, CancelReason.FeedUnavailable);
+    }
 
     /// <summary>
     /// Coalesces a pricing-context change for one configured symbol. A signal
