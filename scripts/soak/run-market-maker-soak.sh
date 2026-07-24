@@ -528,14 +528,16 @@ capture_logs() {
 }
 
 stop_runtime_event_monitor_for_cleanup() {
-    local wait_status
     [[ -n "${runtime_event_monitor_pid:-}" ]] || return 0
-    kill -0 "$runtime_event_monitor_pid" 2>/dev/null || return 0
-    kill "$runtime_event_monitor_pid" 2>/dev/null || return $?
-    wait "$runtime_event_monitor_pid" 2>/dev/null || {
-        wait_status=$?
-        [[ "$wait_status" == "130" || "$wait_status" == "143" ]]
-    }
+    local monitor_pid="$runtime_event_monitor_pid"
+    runtime_event_monitor_pid=""
+    if soak_stop_event_monitor "$monitor_pid"; then
+        return 0
+    fi
+    runtime_event_monitor_stable=false
+    runtime_stable=false
+    log "ERROR: Docker runtime event monitor exited before intentional shutdown"
+    return 1
 }
 
 teardown_stack_for_cleanup() {

@@ -190,6 +190,22 @@ soak_evaluate_suite_source_binding() {
     '
 }
 
+soak_stop_event_monitor() {
+    local monitor_pid="$1" wait_status
+    [[ -n "$monitor_pid" ]] || return 0
+    if ! kill -0 "$monitor_pid" 2>/dev/null; then
+        wait "$monitor_pid" 2>/dev/null || true
+        return 1
+    fi
+    kill "$monitor_pid" 2>/dev/null || return 1
+    if wait "$monitor_pid" 2>/dev/null; then
+        return 0
+    else
+        wait_status=$?
+        [[ "$wait_status" == "130" || "$wait_status" == "143" ]]
+    fi
+}
+
 soak_run_cleanup_steps() {
     local errors_file="$1"
     shift

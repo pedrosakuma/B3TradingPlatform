@@ -271,10 +271,16 @@ Evidence records repository-relative paths, so manifests remain portable.
 Manual cleanup is:
 
 ```bash
+# REQUIRED: replace this with the exact project name printed by the failed run.
+failed_project_name='<exact-project-name-from-failed-run>'
+[[ "$failed_project_name" != '<exact-project-name-from-failed-run>' ]] || {
+  echo 'Set failed_project_name to the failed run project before cleanup.' >&2
+  exit 2
+}
 MM_SOAK_COUNTERPARTY_USER="${SOAK_COUNTERPARTY_USER:-bob}" \
-MM_SOAK_PROJECT_NAME="$SOAK_PROJECT_NAME" \
+MM_SOAK_PROJECT_NAME="$failed_project_name" \
 docker compose \
-  --project-name "$SOAK_PROJECT_NAME" \
+  --project-name "$failed_project_name" \
   -f docker/docker-compose.yml \
   -f docker/docker-compose.market-maker.yml \
   -f docker/docker-compose.observability.yml \
@@ -351,7 +357,9 @@ inspect the complete time series against these unambiguous thresholds:
   `restartCount=0`, statuses `running -> exited -> running`, and exactly two
   distinct `StartedAt` values. A Docker event monitor additionally requires
   exactly one post-baseline marketdata `die`/`start` pair and zero lifecycle
-  events for every other critical service.
+  events for every other critical service. The monitor process itself must
+  remain alive until the helper requests shutdown; an earlier exit fails the
+  lifecycle and cleanup evidence.
 - Every metric sample contains the same non-empty
   `accountingPeriodStartedAtUtc`. A changed bot process/ledger fails the run.
 - Every tracked `*_total` series is monotonically non-decreasing across all

@@ -197,6 +197,23 @@ fi
 unset SOAK_TRADING_PASSWORD
 soak_child_environment_is_secret_free private_password
 
+monitor_stable=true
+sleep 30 &
+early_monitor_pid=$!
+kill "$early_monitor_pid"
+wait "$early_monitor_pid" 2>/dev/null || true
+if ! soak_stop_event_monitor "$early_monitor_pid"; then
+    monitor_stable=false
+fi
+if $monitor_stable; then
+    echo "ERROR: an unexpectedly exited lifecycle monitor could still pass" >&2
+    exit 1
+fi
+
+sleep 30 &
+intentional_monitor_pid=$!
+soak_stop_event_monitor "$intentional_monitor_pid"
+
 steps_seen="$scratch/steps"
 cleanup_errors="$scratch/cleanup-errors.json"
 step_ok() { printf 'ok\n' >>"$steps_seen"; }
