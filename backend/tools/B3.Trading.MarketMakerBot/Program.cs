@@ -29,7 +29,8 @@ builder.Services
         "MarketMaker:Telemetry:SnapshotInterval must be positive.")
     .Validate(o => o.Telemetry.MarkMaxAge > TimeSpan.Zero,
         "MarketMaker:Telemetry:MarkMaxAge must be positive.")
-    .Validate(o => o.MarketData.WsUrl is null || Uri.TryCreate(o.MarketData.WsUrl, UriKind.Absolute, out _),
+    .Validate(o => string.IsNullOrWhiteSpace(o.MarketData.WsUrl) ||
+        Uri.TryCreate(o.MarketData.WsUrl, UriKind.Absolute, out _),
         "MarketMaker:MarketData:WsUrl, if set, must be an absolute URI.")
     .ValidateOnStart();
 
@@ -43,7 +44,8 @@ builder.Services.AddSingleton<MarketMakerMetrics>();
 builder.Services.AddSingleton<MarketDataFeed>(sp => new MarketDataFeed(
     sp.GetRequiredService<MarketPriceTracker>(),
     sp.GetRequiredService<VolatilitySpreadEstimator>(),
-    sp.GetRequiredService<ILoggerFactory>().CreateLogger("MarketDataFeed")));
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger("MarketDataFeed"),
+    sp.GetRequiredService<TimeProvider>()));
 builder.Services.AddHostedService<MarketMakerWorker>();
 builder.Services.AddHostedService<MarketMakerPnlReporter>();
 builder.Services.AddMarketMakerOpenTelemetry(builder.Configuration);

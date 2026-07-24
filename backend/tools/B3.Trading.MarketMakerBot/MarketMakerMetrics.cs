@@ -18,6 +18,8 @@ public sealed class MarketMakerMetrics : IDisposable
     private readonly VolatilitySpreadEstimator _volatilitySpread;
     private readonly IReadOnlyList<InstrumentConfig> _instruments;
     private readonly TimeSpan _markMaxAge;
+    private readonly TimeSpan _maxReferenceAge;
+    private readonly FeedLossPolicy _feedLossPolicy;
     private readonly Meter _meter;
     private readonly Counter<long> _ordersSubmitted;
     private readonly Counter<long> _ordersSubmitFailed;
@@ -37,6 +39,12 @@ public sealed class MarketMakerMetrics : IDisposable
     private readonly Counter<long> _bookDrivenRequotes;
     private readonly Counter<long> _bookDrivenRequoteSubmitFailed;
     private readonly Counter<long> _bookDrivenRequoteCancelRejected;
+    private readonly Counter<long> _feedAvailabilityTransitions;
+    private readonly Counter<long> _feedSuppressedDecisions;
+    private readonly Counter<long> _feedCancels;
+    private readonly Counter<long> _feedCancelRejected;
+    private readonly Counter<long> _feedCancelSubmitFailed;
+    private readonly Counter<long> _feedCancelRetries;
 
     public MarketMakerMetrics(
         MarketMakerPnlLedger ledger,
@@ -49,6 +57,8 @@ public sealed class MarketMakerMetrics : IDisposable
         _volatilitySpread = volatilitySpread;
         _instruments = options.Value.Instruments;
         _markMaxAge = options.Value.Telemetry.MarkMaxAge;
+        _maxReferenceAge = options.Value.MarketData.MaxReferenceAge;
+        _feedLossPolicy = options.Value.MarketData.FeedLossPolicy;
         _meter = new Meter(MeterName, "1.0.0");
         _ordersSubmitted = _meter.CreateCounter<long>("bot.orders.submitted");
         _ordersSubmitFailed = _meter.CreateCounter<long>("bot.orders.submit_failed");
@@ -70,6 +80,17 @@ public sealed class MarketMakerMetrics : IDisposable
             _meter.CreateCounter<long>("bot.orders.book_driven_requote_submit_failed");
         _bookDrivenRequoteCancelRejected =
             _meter.CreateCounter<long>("bot.orders.book_driven_requote_cancel_rejected");
+        _feedAvailabilityTransitions =
+            _meter.CreateCounter<long>("bot.market_data.availability_transition");
+        _feedSuppressedDecisions =
+            _meter.CreateCounter<long>("bot.market_data.quote_suppressed");
+        _feedCancels = _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel");
+        _feedCancelRejected =
+            _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_rejected");
+        _feedCancelSubmitFailed =
+            _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_submit_failed");
+        _feedCancelRetries =
+            _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_retry");
 
         _meter.CreateObservableGauge("bot.position.net_quantity", ObservePositions);
         _meter.CreateObservableGauge("bot.position.average_entry_price", ObserveAverageCosts);
@@ -81,6 +102,8 @@ public sealed class MarketMakerMetrics : IDisposable
         _meter.CreateObservableGauge("bot.pnl.realized", ObserveRealizedPnl);
         _meter.CreateObservableGauge("bot.pnl.unrealized", ObserveUnrealizedPnl);
         _meter.CreateObservableGauge("bot.pnl.total", ObserveTotalPnl);
+        _meter.CreateObservableGauge("bot.market_data.reference_age_seconds", ObserveReferenceAge);
+        _meter.CreateObservableGauge("bot.market_data.reference_eligible", ObserveReferenceEligibility);
     }
 
     public void RecordOrderSubmitted(string symbol, bool isBuy) =>
@@ -122,6 +145,29 @@ public sealed class MarketMakerMetrics : IDisposable
         _bookDrivenRequoteSubmitFailed.Add(1, SymbolTag(symbol));
     public void RecordBookDrivenRequoteCancelRejected(string symbol) =>
         _bookDrivenRequoteCancelRejected.Add(1, SymbolTag(symbol));
+    public void RecordFeedAvailabilityTransition(
+        string symbol,
+        bool available,
+        FeedUnavailableReason reason) =>
+        _feedAvailabilityTransitions.Add(
+            1,
+            SymbolTag(symbol),
+            new("available", available),
+            new("reason", FeedReason(reason)));
+    public void RecordFeedSuppressedDecision(string symbol, bool isBuy, FeedUnavailableReason reason) =>
+        _feedSuppressedDecisions.Add(
+            1,
+            SymbolTag(symbol),
+            SideTag(isBuy),
+            new("reason", FeedReason(reason)));
+    public void RecordFeedCancel(string symbol, bool isBuy) =>
+        _feedCancels.Add(1, SymbolTag(symbol), SideTag(isBuy));
+    public void RecordFeedCancelRejected(string symbol) =>
+        _feedCancelRejected.Add(1, SymbolTag(symbol));
+    public void RecordFeedCancelSubmitFailed(string symbol) =>
+        _feedCancelSubmitFailed.Add(1, SymbolTag(symbol));
+    public void RecordFeedCancelRetry(string symbol) =>
+        _feedCancelRetries.Add(1, SymbolTag(symbol));
 
     public void Dispose() => _meter.Dispose();
 
@@ -208,9 +254,58 @@ public sealed class MarketMakerMetrics : IDisposable
         }
     }
 
+    private IEnumerable<Measurement<double>> ObserveReferenceAge()
+    {
+        foreach (var instrument in _instruments)
+        {
+            var availability = _prices.GetAvailability(instrument.Symbol, _maxReferenceAge);
+            if (availability.ReferenceAge is not { } age ||
+                availability.LastValidMark is not { } mark)
+            {
+                continue;
+            }
+            yield return new Measurement<double>(
+                Math.Max(0d, age.TotalSeconds),
+                SymbolTag(instrument.Symbol),
+                new("source", ReferenceSource(mark.Source)));
+        }
+    }
+
+    private IEnumerable<Measurement<long>> ObserveReferenceEligibility()
+    {
+        if (_feedLossPolicy != FeedLossPolicy.PauseAndCancel)
+            yield break;
+        foreach (var instrument in _instruments)
+        {
+            var availability = _prices.GetAvailability(instrument.Symbol, _maxReferenceAge);
+            yield return new Measurement<long>(
+                availability.IsEligible ? 1 : 0,
+                SymbolTag(instrument.Symbol),
+                new("reason", FeedReason(availability.UnavailableReason)));
+        }
+    }
+
     private static KeyValuePair<string, object?> SymbolTag(string? symbol) =>
         new("symbol", string.IsNullOrWhiteSpace(symbol) ? UnknownSymbol : symbol);
 
     private static KeyValuePair<string, object?> SideTag(bool isBuy) =>
         new("side", isBuy ? "buy" : "sell");
+
+    private static string FeedReason(FeedUnavailableReason reason) => reason switch
+    {
+        FeedUnavailableReason.None => "none",
+        FeedUnavailableReason.Disconnected => "disconnected",
+        FeedUnavailableReason.AwaitingCurrentEpochReference => "awaiting_current_epoch_reference",
+        FeedUnavailableReason.SubscriptionError => "subscription_error",
+        FeedUnavailableReason.StaleReference => "stale_reference",
+        _ => "unknown",
+    };
+
+    private static string ReferenceSource(ReferencePriceSource source) => source switch
+    {
+        ReferencePriceSource.Trade => "trade",
+        ReferencePriceSource.TradingReferencePrice => "trading_reference_price",
+        ReferencePriceSource.LastTradePrice => "last_trade_price",
+        _ => "unknown",
+    };
 }

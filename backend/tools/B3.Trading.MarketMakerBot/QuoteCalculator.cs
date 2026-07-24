@@ -11,6 +11,7 @@ public enum QuoteSuppressionReason
 {
     None,
     InstrumentDelisted,
+    FeedUnavailable,
     NonPositivePrice,
     InvalidPriceCalculation,
 }

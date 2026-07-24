@@ -32,6 +32,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly MarketDataFeed _marketData;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<MarketMakerWorker> _log;
+    private readonly TimeProvider _clock;
     private long _nextClOrdId;
     private IEntryPointClient? _client;
     // Pricing-context changes are coalesced per configured symbol. The
@@ -45,11 +46,14 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly ConcurrentDictionary<string, byte> _pricingContextFailureRetries =
         new(StringComparer.Ordinal);
     private readonly HashSet<string> _configuredSymbols;
+    private readonly ConcurrentDictionary<string, FeedAvailabilityObservation> _feedAvailability =
+        new(StringComparer.Ordinal);
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
         MarketPriceTracker priceTracker, VolatilitySpreadEstimator volatilitySpread,
         MarketMakerPnlLedger pnlLedger, MarketMakerMetrics metrics,
-        MarketDataFeed marketData, ILoggerFactory loggerFactory, ILogger<MarketMakerWorker> log)
+        MarketDataFeed marketData, ILoggerFactory loggerFactory, ILogger<MarketMakerWorker> log,
+        TimeProvider? clock = null)
     {
         _options = options.Value;
         _tracker = tracker;
@@ -61,6 +65,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         _marketData = marketData;
         _loggerFactory = loggerFactory;
         _log = log;
+        _clock = clock ?? TimeProvider.System;
         _configuredSymbols = new HashSet<string>(
             _options.Instruments.Select(instrument => instrument.Symbol),
             StringComparer.Ordinal);
@@ -392,6 +397,13 @@ internal sealed class MarketMakerWorker : BackgroundService
                                 "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
                                 cancelReject.OrigClOrdId, r.Reason);
                         }
+                        else if (cancelReject.CancelReason == CancelReason.FeedUnavailable)
+                        {
+                            _metrics.RecordFeedCancelRejected(cancelReject.StuckSymbol);
+                            _log.LogWarning(
+                                "[mm-feed] feed-unavailable cancel rejected for clordid={ClOrdId} symbol={Symbol} reason={Reason}; retry remains guarded",
+                                cancelReject.OrigClOrdId, cancelReject.StuckSymbol, r.Reason);
+                        }
                         else
                         {
                             _log.LogWarning(
@@ -471,37 +483,48 @@ internal sealed class MarketMakerWorker : BackgroundService
     {
         while (!ct.IsCancellationRequested)
         {
-            try { await Task.Delay(_options.ReconcileInterval, ct); }
+            try { await Task.Delay(_options.ReconcileInterval, _clock, ct); }
             catch (OperationCanceledException) { return; }
 
-            await CancelStaleOrdersAsync(client, ct);
-            foreach (var change in _volatilitySpread.Refresh())
-            {
-                _log.LogInformation(
-                    "[mm-volatility] effective spread changed during window refresh symbol={Symbol} estimateTicks={MoveEstimateTicks} samples={SampleCount} ready={Ready} connected={Connected} previousAdditionalTicks={PreviousAdditionalTicks} additionalTicks={AdditionalTicks}",
-                    change.Symbol,
-                    change.Current.MoveEstimateTicks,
-                    change.Current.SampleCount,
-                    change.Current.IsReady,
-                    change.Current.IsConnected,
-                    change.PreviousAdditionalSpreadTicks,
-                    change.Current.AdditionalSpreadTicks);
-                SignalPricingContextChanged(change.Symbol, CancelReason.VolatilityStrategy);
-            }
-            // RFC #703 book-driven quoting makes cancel/resubmit cycles
-            // common rather than rare, so tracker housekeeping now runs
-            // every reconcile tick too — see OrderTracker.PruneClosed's
-            // doc comment for why this became necessary.
-            _orderLifecycle.Prune(_options.MaxOrderAge);
+            await ReconcileOnceAsync(client, ct);
+        }
+    }
 
-            foreach (var instr in _options.Instruments)
+    internal async Task ReconcileOnceAsync(IEntryPointClient client, CancellationToken ct)
+    {
+        await CancelStaleOrdersAsync(client, ct);
+        foreach (var change in _volatilitySpread.Refresh())
+        {
+            _log.LogInformation(
+                "[mm-volatility] effective spread changed during window refresh symbol={Symbol} estimateTicks={MoveEstimateTicks} samples={SampleCount} ready={Ready} connected={Connected} previousAdditionalTicks={PreviousAdditionalTicks} additionalTicks={AdditionalTicks}",
+                change.Symbol,
+                change.Current.MoveEstimateTicks,
+                change.Current.SampleCount,
+                change.Current.IsReady,
+                change.Current.IsConnected,
+                change.PreviousAdditionalSpreadTicks,
+                change.Current.AdditionalSpreadTicks);
+            SignalPricingContextChanged(change.Symbol, CancelReason.VolatilityStrategy);
+        }
+        _orderLifecycle.Prune(_options.MaxOrderAge);
+
+        foreach (var instr in _options.Instruments)
+        {
+            if (_priceTracker.IsDelisted(instr.Symbol))
+                continue;
+            if (_options.MarketData.FeedLossPolicy == FeedLossPolicy.PauseAndCancel)
             {
-                if (_priceTracker.IsDelisted(instr.Symbol)) continue;
-                if (!_tracker.HasOpenSide(instr.Symbol, isBuy: true))
-                    await QuoteSideAsync(client, instr, isBuy: true, ct);
-                if (!_tracker.HasOpenSide(instr.Symbol, isBuy: false))
-                    await QuoteSideAsync(client, instr, isBuy: false, ct);
+                var availability = ObserveFeedAvailability(instr.Symbol);
+                if (!availability.IsEligible)
+                {
+                    SignalPricingContextChanged(instr.Symbol, CancelReason.FeedUnavailable);
+                    continue;
+                }
             }
+            if (!_tracker.HasOpenSide(instr.Symbol, isBuy: true))
+                await QuoteSideAsync(client, instr, isBuy: true, ct);
+            if (!_tracker.HasOpenSide(instr.Symbol, isBuy: false))
+                await QuoteSideAsync(client, instr, isBuy: false, ct);
         }
     }
 
@@ -636,6 +659,8 @@ internal sealed class MarketMakerWorker : BackgroundService
             return false;
         }
 
+        if (reason == CancelReason.FeedUnavailable)
+            _metrics.RecordFeedCancelRetry(symbol);
         return EnqueuePricingContextChanged(symbol, reason);
     }
 
@@ -770,7 +795,9 @@ internal sealed class MarketMakerWorker : BackgroundService
                     reason,
                     reason == CancelReason.PriceDrift
                         ? _metrics.RecordBookDrivenRequoteSubmitFailed
-                        : static _ => { },
+                        : reason == CancelReason.FeedUnavailable
+                            ? _metrics.RecordFeedCancelSubmitFailed
+                            : static _ => { },
                     ct,
                     _options.MinRequoteInterval))
             {
@@ -783,6 +810,8 @@ internal sealed class MarketMakerWorker : BackgroundService
                 }
                 else if (isSuppressed)
                 {
+                    if (reason == CancelReason.FeedUnavailable)
+                        _metrics.RecordFeedCancel(symbol, isBuy);
                     _log.LogWarning(
                         "[mm] pricing-context suppression: cancelling clordid={ClOrdId} symbol={Symbol} side={Side} trigger={CancelReason} suppression={SuppressionReason}",
                         resting.ClOrdId, symbol, isBuy ? "buy" : "sell", reason, decision.SuppressionReason);
@@ -798,7 +827,9 @@ internal sealed class MarketMakerWorker : BackgroundService
 
         if (retryAfter is { } delay)
         {
-            await Task.Delay(delay, ct);
+            if (reason == CancelReason.FeedUnavailable)
+                _metrics.RecordFeedCancelRetry(symbol);
+            await Task.Delay(delay, _clock, ct);
             EnqueuePricingContextChanged(symbol, reason);
         }
     }
@@ -869,7 +900,11 @@ internal sealed class MarketMakerWorker : BackgroundService
     internal async Task QuoteSideAsync(IEntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
     {
         var decision = BuildQuoteDecision(instr, isBuy);
-        if (!decision.ShouldQuote || decision.Price is not { } price) return;
+        if (!decision.ShouldQuote || decision.Price is not { } price)
+        {
+            RecordSuppressedDecision(instr.Symbol, isBuy, decision);
+            return;
+        }
         // RFC #703 client-side safety cap (defense in depth against the
         // failure mode in pedrosakuma/B3MatchingPlatform#567): stop adding
         // NEW resting orders once the bot's own tracked open-order count
@@ -896,14 +931,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         // trading-host's pattern).
         if (!_tracker.TryRegisterSubmit(clOrdId, instr.Symbol, price, quantity, isBuy))
             return;
-        // A SymbolDelisted event can still land between the check above
-        // and here; re-checking right before submit shrinks that window.
-        // A residual race (delisted arriving during the SubmitAsync
-        // await itself) is accepted for this sandbox tool — worst case
-        // is one resting order on an already-halted symbol, which the
-        // reconcile loop's IsDelisted check then leaves alone (it won't
-        // re-quote it, but also won't cancel the stray one automatically).
-        if (_priceTracker.IsDelisted(instr.Symbol))
+        if (!IsSubmitEligible(instr.Symbol))
         {
             _orderLifecycle.Synchronize(() => _tracker.OnTerminal(clOrdId));
             return;
@@ -920,6 +948,11 @@ internal sealed class MarketMakerWorker : BackgroundService
         };
         try
         {
+            if (!IsSubmitEligible(instr.Symbol))
+            {
+                _orderLifecycle.Synchronize(() => _tracker.OnTerminal(clOrdId));
+                return;
+            }
             await client.SubmitAsync(req, ct);
             _metrics.RecordOrderSubmitted(instr.Symbol, isBuy);
         }
@@ -941,7 +974,30 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// </summary>
     internal QuoteDecision BuildQuoteDecision(InstrumentConfig instrument, bool isBuy)
     {
-        var hasLiveReference = _priceTracker.TryGetReferencePrice(instrument.Symbol, out var liveReference);
+        var strict = _options.MarketData.FeedLossPolicy == FeedLossPolicy.PauseAndCancel;
+        var availability = strict ? ObserveFeedAvailability(instrument.Symbol) : default;
+        decimal liveReference;
+        bool hasLiveReference;
+        if (strict)
+        {
+            if (availability.IsEligible &&
+                availability.LastValidMark is { Price: > 0m } strictMark)
+            {
+                hasLiveReference = true;
+                liveReference = strictMark.Price;
+            }
+            else
+            {
+                hasLiveReference = false;
+                liveReference = default;
+            }
+        }
+        else
+        {
+            hasLiveReference = _priceTracker.TryGetReferencePrice(
+                instrument.Symbol,
+                out liveReference);
+        }
         var referencePrice = hasLiveReference ? liveReference : instrument.RefPrice;
         var volatilitySpread = _volatilitySpread.GetSnapshot(instrument.Symbol);
         var effectiveHalfSpreadTicks = checked(
@@ -969,9 +1025,82 @@ internal sealed class MarketMakerWorker : BackgroundService
             AdditionalHalfSpreadTicks: volatilitySpread.AdditionalSpreadTicks,
             instrument.TickSize,
             _priceTracker.IsDelisted(instrument.Symbol)
-                ? QuoteSuppressionReason.InstrumentDelisted
-                : QuoteSuppressionReason.None));
+               ? QuoteSuppressionReason.InstrumentDelisted
+               : strict && !availability.IsEligible
+                   ? QuoteSuppressionReason.FeedUnavailable
+                   : QuoteSuppressionReason.None));
     }
+
+    private bool IsSubmitEligible(string symbol)
+    {
+        if (_priceTracker.IsDelisted(symbol))
+            return false;
+        return _options.MarketData.FeedLossPolicy != FeedLossPolicy.PauseAndCancel ||
+            ObserveFeedAvailability(symbol).IsEligible;
+    }
+
+    private ReferenceAvailability ObserveFeedAvailability(string symbol)
+    {
+        var current = _priceTracker.GetAvailability(symbol, _options.MarketData.MaxReferenceAge);
+        var observation = new FeedAvailabilityObservation(
+            current.IsEligible,
+            current.UnavailableReason,
+            current.ConnectionEpoch);
+        while (true)
+        {
+            if (!_feedAvailability.TryGetValue(symbol, out var previous))
+            {
+                if (!_feedAvailability.TryAdd(symbol, observation))
+                    continue;
+                PublishFeedAvailabilityTransition(symbol, current);
+                return current;
+            }
+            if (previous == observation)
+                return current;
+            if (_feedAvailability.TryUpdate(symbol, observation, previous))
+            {
+                PublishFeedAvailabilityTransition(symbol, current);
+                return current;
+            }
+        }
+    }
+
+    private void PublishFeedAvailabilityTransition(string symbol, ReferenceAvailability availability)
+    {
+        _metrics.RecordFeedAvailabilityTransition(
+            symbol,
+            availability.IsEligible,
+            availability.UnavailableReason);
+        _log.LogInformation(
+            "[mm-feed] symbol availability changed symbol={Symbol} available={Available} reason={Reason} epoch={Epoch} age={ReferenceAge} source={ReferenceSource}",
+            symbol,
+            availability.IsEligible,
+            availability.UnavailableReason,
+            availability.ConnectionEpoch,
+            availability.ReferenceAge,
+            availability.LastValidMark?.Source);
+    }
+
+    private void RecordSuppressedDecision(string symbol, bool isBuy, QuoteDecision decision)
+    {
+        if (decision.SuppressionReason != QuoteSuppressionReason.FeedUnavailable)
+            return;
+        var availability = ObserveFeedAvailability(symbol);
+        _metrics.RecordFeedSuppressedDecision(symbol, isBuy, availability.UnavailableReason);
+        _log.LogInformation(
+            "[mm-feed] quote decision suppressed symbol={Symbol} side={Side} reason={Reason} epoch={Epoch} age={ReferenceAge} source={ReferenceSource}",
+            symbol,
+            isBuy ? "buy" : "sell",
+            availability.UnavailableReason,
+            availability.ConnectionEpoch,
+            availability.ReferenceAge,
+            availability.LastValidMark?.Source);
+    }
+
+    private readonly record struct FeedAvailabilityObservation(
+        bool IsEligible,
+        FeedUnavailableReason Reason,
+        long ConnectionEpoch);
 
     private InstrumentConfig? FindInstrument(string symbol)
     {

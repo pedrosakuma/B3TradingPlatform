@@ -60,6 +60,17 @@ public class MarketPriceTrackerTests
     }
 
     [Fact]
+    public void OnInfoSnapshot_DoesNotUseLastTradeWhenPublishedReferenceIsInvalid()
+    {
+        var tracker = new MarketPriceTracker();
+        tracker.SetConnected(true);
+
+        tracker.OnInfoSnapshot("PETR4", tradingReferencePrice: 0m, lastTradePrice: 31m);
+
+        Assert.False(tracker.TryGetReferencePrice("PETR4", out _));
+    }
+
+    [Fact]
     public void IsDelisted_IsFalseByDefault_AndTrueAfterNotification()
     {
         var tracker = new MarketPriceTracker();
@@ -115,6 +126,86 @@ public class MarketPriceTrackerTests
         tracker.SetConnected(true);
         Assert.True(tracker.TryGetReferencePrice("PETR4", out var price));
         Assert.Equal(30m, price);
+    }
+
+    [Fact]
+    public void StrictAvailability_RequiresFreshCurrentEpochReference()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var tracker = new MarketPriceTracker(clock);
+        tracker.OnTrade("PETR4", 30m);
+
+        tracker.SetConnected(true);
+
+        var unavailable = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.False(unavailable.IsEligible);
+        Assert.Equal(FeedUnavailableReason.AwaitingCurrentEpochReference, unavailable.UnavailableReason);
+        Assert.Equal(1, unavailable.ConnectionEpoch);
+
+        tracker.OnTrade("PETR4", 31m);
+        var available = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.True(available.IsEligible);
+        Assert.Equal(1, available.LastValidMark?.ConnectionEpoch);
+        Assert.Equal(ReferencePriceSource.Trade, available.LastValidMark?.Source);
+        Assert.Equal(clock.GetUtcNow(), available.LastValidMark?.ObservedAtUtc);
+    }
+
+    [Fact]
+    public void StrictAvailability_RejectsPreviousEpochCacheAfterReconnect()
+    {
+        var tracker = new MarketPriceTracker();
+        tracker.SetConnected(true);
+        tracker.OnTrade("PETR4", 30m);
+        Assert.True(tracker.GetAvailability("PETR4", TimeSpan.FromMinutes(1)).IsEligible);
+
+        tracker.SetConnected(false);
+        Assert.Equal(
+            FeedUnavailableReason.Disconnected,
+            tracker.GetAvailability("PETR4", TimeSpan.FromMinutes(1)).UnavailableReason);
+        tracker.SetConnected(true);
+
+        var reconnected = tracker.GetAvailability("PETR4", TimeSpan.FromMinutes(1));
+        Assert.False(reconnected.IsEligible);
+        Assert.Equal(FeedUnavailableReason.AwaitingCurrentEpochReference, reconnected.UnavailableReason);
+        Assert.True(tracker.TryGetReferencePrice("PETR4", out var staticPolicyPrice));
+        Assert.Equal(30m, staticPolicyPrice);
+    }
+
+    [Fact]
+    public void StrictAvailability_BecomesStaleAtConfiguredAge()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var tracker = new MarketPriceTracker(clock);
+        tracker.SetConnected(true);
+        tracker.OnInfoSnapshot("PETR4", 30m, 29m);
+
+        clock.Advance(TimeSpan.FromSeconds(11));
+
+        var availability = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.False(availability.IsEligible);
+        Assert.Equal(FeedUnavailableReason.StaleReference, availability.UnavailableReason);
+        Assert.Equal(TimeSpan.FromSeconds(11), availability.ReferenceAge);
+        Assert.Equal(ReferencePriceSource.TradingReferencePrice, availability.LastValidMark?.Source);
+    }
+
+    [Fact]
+    public void SubscriptionError_IsPerSymbol_AndFreshUpdateRecoversIt()
+    {
+        var tracker = new MarketPriceTracker();
+        tracker.SetConnected(true);
+        tracker.OnTrade("PETR4", 30m);
+        tracker.OnInfoSnapshot("VALE3", null, 70m);
+        tracker.OnSubscriptionError("PETR4");
+
+        Assert.Equal(
+            FeedUnavailableReason.SubscriptionError,
+            tracker.GetAvailability("PETR4", TimeSpan.FromMinutes(1)).UnavailableReason);
+        var vale = tracker.GetAvailability("VALE3", TimeSpan.FromMinutes(1));
+        Assert.True(vale.IsEligible);
+        Assert.Equal(ReferencePriceSource.LastTradePrice, vale.LastValidMark?.Source);
+
+        tracker.OnTrade("PETR4", 31m);
+        Assert.True(tracker.GetAvailability("PETR4", TimeSpan.FromMinutes(1)).IsEligible);
     }
 
     [Fact]

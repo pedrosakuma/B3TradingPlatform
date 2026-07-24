@@ -46,6 +46,7 @@ spec:
           image: {{ include "b3-market-maker-bot.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            {{- $marketData := default (dict) .Values.marketData }}
             # ── FIXP session ─────────────────────────────────────────────
             - name: MarketMaker__Endpoint
               value: {{ .Values.session.endpoint | quote }}
@@ -61,9 +62,13 @@ spec:
               value: {{ .Values.session.senderLocation | quote }}
             - name: MarketMaker__EnteringTrader
               value: {{ .Values.session.enteringTrader | quote }}
-            # ── Market data (best-effort quote anchor) ──────────────────
+            # ── Market data + feed-loss policy ─────────────────────────
             - name: MarketMaker__MarketData__WsUrl
-              value: {{ .Values.marketData.wsUrl | quote }}
+              value: {{ dig "wsUrl" "" $marketData | quote }}
+            - name: MarketMaker__MarketData__FeedLossPolicy
+              value: {{ dig "feedLossPolicy" "StaticRefPrice" $marketData | quote }}
+            - name: MarketMaker__MarketData__MaxReferenceAge
+              value: {{ dig "maxReferenceAge" "00:00:30" $marketData | quote }}
             # ── Behaviour ────────────────────────────────────────────────
             - name: MarketMaker__StateDirectory
               value: /var/lib/b3-market-maker-bot

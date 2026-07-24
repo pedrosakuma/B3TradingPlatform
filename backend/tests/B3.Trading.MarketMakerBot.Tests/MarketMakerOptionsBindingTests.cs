@@ -44,6 +44,31 @@ public class MarketMakerOptionsBindingTests
         Assert.Equal(20, volatility.MaxAdditionalSpreadTicks);
     }
 
+    [Fact]
+    public void LegacyConfiguration_KeepsStaticFeedLossDefaults()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:MarketData:WsUrl"] = "",
+        });
+
+        Assert.Equal(FeedLossPolicy.StaticRefPrice, options.MarketData.FeedLossPolicy);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
+    }
+
+    [Fact]
+    public void PartialFeedPolicyOverride_KeepsFreshnessDefault()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:MarketData:FeedLossPolicy"] = "PauseAndCancel",
+            ["MarketMaker:MarketData:WsUrl"] = "wss://marketdata.test/ws",
+        });
+
+        Assert.Equal(FeedLossPolicy.PauseAndCancel, options.MarketData.FeedLossPolicy);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
+    }
+
     private static MarketMakerBotOptions Bind(Dictionary<string, string?> values)
     {
         var configuration = new ConfigurationBuilder()

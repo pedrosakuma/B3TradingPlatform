@@ -10,6 +10,25 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
         var failures = new List<string>();
         var symbols = new HashSet<string>(StringComparer.Ordinal);
 
+        if (!Enum.IsDefined(options.MarketData.FeedLossPolicy))
+        {
+            failures.Add("MarketMaker:MarketData:FeedLossPolicy is not supported.");
+        }
+        else if (options.MarketData.FeedLossPolicy == FeedLossPolicy.PauseAndCancel)
+        {
+            if (string.IsNullOrWhiteSpace(options.MarketData.WsUrl) ||
+                !Uri.TryCreate(options.MarketData.WsUrl, UriKind.Absolute, out _))
+            {
+                failures.Add(
+                    "MarketMaker:MarketData:WsUrl must be a nonblank absolute URI when FeedLossPolicy is PauseAndCancel.");
+            }
+            if (options.MarketData.MaxReferenceAge <= TimeSpan.Zero)
+            {
+                failures.Add(
+                    "MarketMaker:MarketData:MaxReferenceAge must be positive when FeedLossPolicy is PauseAndCancel.");
+            }
+        }
+
         for (var index = 0; index < options.Instruments.Count; index++)
         {
             var instrument = options.Instruments[index];

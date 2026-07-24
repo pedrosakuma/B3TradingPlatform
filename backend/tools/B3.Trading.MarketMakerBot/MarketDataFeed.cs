@@ -4,93 +4,209 @@ using Microsoft.Extensions.Logging;
 namespace B3.Trading.MarketMakerBot;
 
 /// <summary>
-/// Thin wrapper around B3MarketDataPlatform's WebSocket SDK
-/// (<see cref="MarketDataClient"/>) that feeds live reference prices
-/// (and delisting notices) into <see cref="MarketPriceTracker"/>.
-///
-/// Deliberately does NOT own instrument identity: <see
-/// cref="InstrumentConfig.SecurityId"/>/<see cref="InstrumentConfig.TickSize"/>/<see
-/// cref="InstrumentConfig.LotSize"/> stay config-driven because those
-/// are matching-platform's wire truth for FIXP order construction, and
-/// the market-data feed's own SecurityId numbering is a separate
-/// namespace that doesn't necessarily line up with it — conflating the
-/// two would be a correctness risk, not a simplification. Market data
-/// only sharpens the quote anchor and tells us when to stop quoting a
-/// symbol (<see cref="MarketDataClient.SymbolDelisted"/>); it never
-/// gates the bot's ability to submit an order in the first place. If
-/// <see cref="MarketDataOptions.WsUrl"/> is unset, or the feed fails to
-/// connect, the worker just keeps quoting off each instrument's
-/// configured <see cref="InstrumentConfig.RefPrice"/> — same
-/// degrade-gracefully shape as the trading-host's own market-data gate.
+/// Owns the market-data SDK lifecycle and translates feed events into
+/// per-symbol reference readiness. StaticRefPrice keeps the historical
+/// best-effort single-connect behavior. PauseAndCancel retries an initial
+/// connection failure in the background while strict quote eligibility remains
+/// false. Instrument SecurityId/tick/lot identity remains config-driven because
+/// the market-data and matching-platform identifier namespaces are independent;
+/// this component only supplies reference prices, delisting, and book signals.
 /// </summary>
 internal sealed class MarketDataFeed : IAsyncDisposable
 {
+    private static readonly TimeSpan InitialReconnectDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MaximumReconnectDelay = TimeSpan.FromSeconds(30);
+
     private readonly MarketPriceTracker _tracker;
     private readonly VolatilitySpreadEstimator _volatilitySpread;
     private readonly ILogger _log;
+    private readonly TimeProvider _clock;
+    private readonly IMarketDataClientFactory _clientFactory;
+    private readonly Func<TimeSpan, TimeProvider, CancellationToken, Task> _delayAsync;
     private readonly object _connectionGate = new();
-    private MarketDataClient? _client;
+    private IMarketDataClient? _client;
+    private CancellationTokenSource? _lifetime;
+    private Task? _connectLoop;
     private bool _connectionEligible;
+    private bool _started;
+    private FeedLossPolicy _feedLossPolicy;
+    private TimeSpan _maxReferenceAge = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// Raised for every order-level book delta (add/update/delete) the
-    /// venue reports for a subscribed symbol, carrying the venue's own
-    /// OrderId. RFC #703 book-driven quoting: <see
-    /// cref="MarketMakerWorker"/> subscribes to react to the market
-    /// moving instead of waiting solely on its own ER stream, but must
-    /// first filter out deltas its OWN resting orders caused (via <see
-    /// cref="OrderTracker.IsOwnOrder"/>) — this feed deliberately does
-    /// NOT know about the bot's own orders (same "no instrument-identity
-    /// smarts" boundary as the rest of this class), so it forwards every
-    /// delta and leaves the self-order filter to the subscriber.
-    /// </summary>
     public event Action<string, ulong>? BookOrderChanged;
-
-    /// <summary>
-    /// Raised after a symbol's quote availability changes in the local price
-    /// tracker. The feed exposes only the symbol; pricing/cancel policy remains
-    /// the worker's responsibility.
-    /// </summary>
     public event Action<string>? SymbolAvailabilityChanged;
-
-    /// <summary>Raised only when a symbol's effective dynamic spread tick count changes.</summary>
     public event Action<string>? VolatilitySpreadChanged;
-
-    /// <summary>
-    /// Raised once whenever live-reference eligibility changes. The worker fans
-    /// this out across configured symbols through its coalesced pricing channel.
-    /// </summary>
     public event Action? ConnectionEligibilityChanged;
 
     public MarketDataFeed(
         MarketPriceTracker tracker,
         VolatilitySpreadEstimator volatilitySpread,
-        ILogger log)
+        ILogger log,
+        TimeProvider? clock = null,
+        IMarketDataClientFactory? clientFactory = null,
+        Func<TimeSpan, TimeProvider, CancellationToken, Task>? delayAsync = null)
     {
         _tracker = tracker;
         _volatilitySpread = volatilitySpread;
         _log = log;
+        _clock = clock ?? TimeProvider.System;
+        _clientFactory = clientFactory ?? new SdkMarketDataClientFactory();
+        _delayAsync = delayAsync ?? ((delay, timeProvider, ct) =>
+            Task.Delay(delay, timeProvider, ct));
     }
 
-    public bool IsConnected => _client is not null;
-
-    public async Task StartAsync(MarketDataOptions options, IReadOnlyList<InstrumentConfig> instruments,
-        ILoggerFactory loggerFactory, CancellationToken ct)
+    public bool IsConnected
     {
+        get
+        {
+            lock (_connectionGate)
+                return _connectionEligible;
+        }
+    }
+
+    public async Task StartAsync(
+        MarketDataOptions options,
+        IReadOnlyList<InstrumentConfig> instruments,
+        ILoggerFactory loggerFactory,
+        CancellationToken ct)
+    {
+        lock (_connectionGate)
+        {
+            if (_started)
+                throw new InvalidOperationException("MarketDataFeed has already been started.");
+            _started = true;
+        }
+        _feedLossPolicy = options.FeedLossPolicy;
+        _maxReferenceAge = options.MaxReferenceAge;
         if (string.IsNullOrWhiteSpace(options.WsUrl))
         {
             _log.LogInformation("[mm] MarketData:WsUrl not set; quoting off static RefPrice anchors only.");
             return;
         }
 
+        if (options.FeedLossPolicy == FeedLossPolicy.StaticRefPrice)
+        {
+            try
+            {
+                await ConnectClientAsync(options, instruments, loggerFactory, strictSubscriptions: false, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "[mm] MarketData connect/subscribe to {WsUrl} failed; continuing with static RefPrice anchors only.",
+                    options.WsUrl);
+            }
+            return;
+        }
+
+        lock (_connectionGate)
+        {
+            _lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _connectLoop = ConnectStrictUntilReadyAsync(
+                options,
+                instruments,
+                loggerFactory,
+                _lifetime.Token);
+        }
+        await Task.CompletedTask;
+    }
+
+    private async Task ConnectStrictUntilReadyAsync(
+        MarketDataOptions options,
+        IReadOnlyList<InstrumentConfig> instruments,
+        ILoggerFactory loggerFactory,
+        CancellationToken ct)
+    {
+        var delay = InitialReconnectDelay;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await ConnectClientAsync(options, instruments, loggerFactory, strictSubscriptions: true, ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "[mm-feed] market-data connect/subscribe failed under PauseAndCancel; quotes remain paused; retrying in {Delay}",
+                    delay);
+            }
+
+            try
+            {
+                await _delayAsync(delay, _clock, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            delay = TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, MaximumReconnectDelay.Ticks));
+        }
+    }
+
+    private async Task ConnectClientAsync(
+        MarketDataOptions options,
+        IReadOnlyList<InstrumentConfig> instruments,
+        ILoggerFactory loggerFactory,
+        bool strictSubscriptions,
+        CancellationToken ct)
+    {
         var clientOptions = new MarketDataClientOptions
         {
-            Endpoint = new Uri(options.WsUrl),
+            Endpoint = new Uri(options.WsUrl!, UriKind.Absolute),
             AutoResubscribeOnReconnect = true,
             BackPressure = BackPressurePolicy.DropOldest,
         };
+        var client = _clientFactory.Create(clientOptions, loggerFactory);
+        Attach(client);
+        try
+        {
+            await client.ConnectAsync(ct).ConfigureAwait(false);
+            NotifyConnectionState(connected: true);
+            foreach (var instrument in instruments)
+            {
+                try
+                {
+                    await client.SubscribeAsync(
+                        instrument.Symbol,
+                        SubscribeFlags.Trades | SubscribeFlags.Info | SubscribeFlags.Book,
+                        ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) when (strictSubscriptions)
+                {
+                    NotifySubscribeError(instrument.Symbol, "subscribe-failed");
+                    _log.LogWarning(ex,
+                        "[mm-feed] market-data subscription failed for {Symbol}; that symbol remains paused.",
+                        instrument.Symbol);
+                }
+            }
 
-        var client = new MarketDataClient(clientOptions, loggerFactory.CreateLogger<MarketDataClient>());
+            lock (_connectionGate)
+                _client = client;
+            _log.LogInformation(
+                "[mm] MarketData connected to {WsUrl}; subscribed to {Count} instrument(s).",
+                options.WsUrl,
+                instruments.Count);
+        }
+        catch
+        {
+            Detach(client);
+            try { await client.DisposeAsync().ConfigureAwait(false); }
+            catch { /* best-effort cleanup of a failed attempt */ }
+            NotifyConnectionState(connected: false);
+            throw;
+        }
+    }
+
+    private void Attach(IMarketDataClient client)
+    {
         client.Trade += OnTrade;
         client.InfoSnapshot += OnInfoSnapshot;
         client.SymbolDelisted += OnSymbolDelisted;
@@ -99,45 +215,18 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         client.OrderAdded += OnOrderAdded;
         client.OrderUpdated += OnOrderUpdated;
         client.OrderDeleted += OnOrderDeleted;
+    }
 
-        try
-        {
-            await client.ConnectAsync(ct).ConfigureAwait(false);
-            foreach (var instr in instruments)
-            {
-                // Book (MBO) is required alongside Trades|Info: it's the
-                // only flag that carries order-level deltas with the
-                // venue's own OrderId, which BookOrderChanged's
-                // self-order filter depends on (see RFC #703).
-                await client.SubscribeAsync(instr.Symbol, SubscribeFlags.Trades | SubscribeFlags.Info | SubscribeFlags.Book, ct)
-                    .ConfigureAwait(false);
-            }
-            _client = client;
-            NotifyConnectionState(connected: true);
-            _log.LogInformation("[mm] MarketData connected to {WsUrl}; subscribed to {Count} instrument(s).",
-                options.WsUrl, instruments.Count);
-        }
-        catch (Exception ex)
-        {
-            // Covers OperationCanceledException too — on shutdown mid-
-            // connect/subscribe we still must unhook handlers and
-            // dispose the partially-initialized client before
-            // propagating, otherwise it leaks (never assigned to
-            // _client, so DisposeAsync above would be a no-op).
-            client.Trade -= OnTrade;
-            client.InfoSnapshot -= OnInfoSnapshot;
-            client.SymbolDelisted -= OnSymbolDelisted;
-            client.ConnectionStateChanged -= OnConnectionStateChanged;
-            client.SubscribeError -= OnSubscribeError;
-            client.OrderAdded -= OnOrderAdded;
-            client.OrderUpdated -= OnOrderUpdated;
-            client.OrderDeleted -= OnOrderDeleted;
-            await client.DisposeAsync().ConfigureAwait(false);
-            if (ex is OperationCanceledException) throw;
-            _log.LogWarning(ex,
-                "[mm] MarketData connect/subscribe to {WsUrl} failed; continuing with static RefPrice anchors only.",
-                options.WsUrl);
-        }
+    private void Detach(IMarketDataClient client)
+    {
+        client.Trade -= OnTrade;
+        client.InfoSnapshot -= OnInfoSnapshot;
+        client.SymbolDelisted -= OnSymbolDelisted;
+        client.ConnectionStateChanged -= OnConnectionStateChanged;
+        client.SubscribeError -= OnSubscribeError;
+        client.OrderAdded -= OnOrderAdded;
+        client.OrderUpdated -= OnOrderUpdated;
+        client.OrderDeleted -= OnOrderDeleted;
     }
 
     private void OnTrade(TradeEvent ev) => NotifyTrade(ev.Symbol, ev.Price);
@@ -146,11 +235,8 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         NotifyInfoSnapshot(ev.Symbol, ev.TradingReferencePrice, ev.LastTradePrice);
 
     private void OnOrderAdded(OrderAddedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
-
     private void OnOrderUpdated(OrderUpdatedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
-
     private void OnOrderDeleted(OrderDeletedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
-
     private void OnSymbolDelisted(SymbolDelistedEvent ev) => NotifySymbolDelisted(ev.Symbol);
 
     internal void NotifySymbolDelisted(string symbol)
@@ -162,39 +248,71 @@ internal sealed class MarketDataFeed : IAsyncDisposable
 
     internal void NotifyTrade(string symbol, decimal price)
     {
-        _tracker.OnTrade(symbol, price);
+        var before = StrictAvailability(symbol);
+        var updated = _tracker.OnTrade(symbol, price);
         PublishVolatilityChange(_volatilitySpread.OnTrade(symbol, price));
+        PublishStrictAvailabilityChange(symbol, before, updated);
     }
 
-    internal void NotifyInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice) =>
-        _tracker.OnInfoSnapshot(symbol, tradingReferencePrice, lastTradePrice);
+    internal void NotifyInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice)
+    {
+        var before = StrictAvailability(symbol);
+        var updated = _tracker.OnInfoSnapshot(symbol, tradingReferencePrice, lastTradePrice);
+        PublishStrictAvailabilityChange(symbol, before, updated);
+    }
 
     internal void NotifyConnectionState(bool connected)
     {
+        bool eligibilityChanged;
         lock (_connectionGate)
         {
-            var eligibilityChanged = _connectionEligible != connected;
+            eligibilityChanged = _connectionEligible != connected;
             _connectionEligible = connected;
-            _tracker.SetConnected(connected);
-            foreach (var change in _volatilitySpread.SetConnected(connected))
-                PublishVolatilityChange(change);
-            if (eligibilityChanged)
-                ConnectionEligibilityChanged?.Invoke();
         }
+
+        _tracker.SetConnected(connected);
+        foreach (var change in _volatilitySpread.SetConnected(connected))
+            PublishVolatilityChange(change);
+        if (eligibilityChanged)
+            ConnectionEligibilityChanged?.Invoke();
+    }
+
+    internal void NotifySubscribeError(string symbol, string errorCode)
+    {
+        var before = StrictAvailability(symbol);
+        _tracker.OnSubscriptionError(symbol);
+        _log.LogWarning("[mm] MarketData subscribe error for {Symbol}: {Error}", symbol, errorCode);
+        PublishStrictAvailabilityChange(symbol, before, updated: true);
     }
 
     private void OnConnectionStateChanged(ConnectionStateChangedEvent ev)
     {
         _log.LogInformation("[mm] MarketData connection state: {State}", ev.State);
-        // Only trust cached prices while genuinely Connected — a stale
-        // last-known price served through a Reconnecting/Faulted gap
-        // could anchor quotes far from the real market. See
-        // MarketPriceTracker.TryGetReferencePrice.
         NotifyConnectionState(ev.State == ConnectionState.Connected);
     }
 
     private void OnSubscribeError(SubscribeErrorEvent ev) =>
-        _log.LogWarning("[mm] MarketData subscribe error for {Symbol}: {Error}", ev.Symbol, ev.ErrorCode);
+        NotifySubscribeError(ev.Symbol, ev.ErrorCode.ToString());
+
+    private ReferenceAvailability? StrictAvailability(string symbol) =>
+        _feedLossPolicy == FeedLossPolicy.PauseAndCancel
+            ? _tracker.GetAvailability(symbol, _maxReferenceAge)
+            : null;
+
+    private void PublishStrictAvailabilityChange(
+        string symbol,
+        ReferenceAvailability? before,
+        bool updated)
+    {
+        if (!updated || before is null)
+            return;
+        var after = _tracker.GetAvailability(symbol, _maxReferenceAge);
+        if (before.Value.IsEligible != after.IsEligible ||
+            before.Value.UnavailableReason != after.UnavailableReason)
+        {
+            SymbolAvailabilityChanged?.Invoke(symbol);
+        }
+    }
 
     private void PublishVolatilityChange(VolatilitySpreadChange? change)
     {
@@ -214,16 +332,115 @@ internal sealed class MarketDataFeed : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_client is null) return;
-        _client.Trade -= OnTrade;
-        _client.InfoSnapshot -= OnInfoSnapshot;
-        _client.SymbolDelisted -= OnSymbolDelisted;
-        _client.ConnectionStateChanged -= OnConnectionStateChanged;
-        _client.SubscribeError -= OnSubscribeError;
-        _client.OrderAdded -= OnOrderAdded;
-        _client.OrderUpdated -= OnOrderUpdated;
-        _client.OrderDeleted -= OnOrderDeleted;
-        try { await _client.DisposeAsync().ConfigureAwait(false); }
+        CancellationTokenSource? lifetime;
+        Task? connectLoop;
+        lock (_connectionGate)
+        {
+            lifetime = _lifetime;
+            connectLoop = _connectLoop;
+            _lifetime = null;
+            _connectLoop = null;
+        }
+
+        lifetime?.Cancel();
+        if (connectLoop is not null)
+        {
+            try { await connectLoop.ConfigureAwait(false); }
+            catch (OperationCanceledException) { /* expected on shutdown */ }
+        }
+        lifetime?.Dispose();
+
+        IMarketDataClient? client;
+        lock (_connectionGate)
+        {
+            client = _client;
+            _client = null;
+        }
+        if (client is null)
+            return;
+        Detach(client);
+        try { await client.DisposeAsync().ConfigureAwait(false); }
         catch { /* best-effort cleanup on shutdown */ }
+        NotifyConnectionState(connected: false);
     }
+}
+
+internal interface IMarketDataClient : IAsyncDisposable
+{
+    event Action<TradeEvent>? Trade;
+    event Action<InfoSnapshotEvent>? InfoSnapshot;
+    event Action<SymbolDelistedEvent>? SymbolDelisted;
+    event Action<ConnectionStateChangedEvent>? ConnectionStateChanged;
+    event Action<SubscribeErrorEvent>? SubscribeError;
+    event Action<OrderAddedEvent>? OrderAdded;
+    event Action<OrderUpdatedEvent>? OrderUpdated;
+    event Action<OrderDeletedEvent>? OrderDeleted;
+
+    Task ConnectAsync(CancellationToken ct);
+    ValueTask SubscribeAsync(string symbol, SubscribeFlags flags, CancellationToken ct);
+}
+
+internal interface IMarketDataClientFactory
+{
+    IMarketDataClient Create(MarketDataClientOptions options, ILoggerFactory loggerFactory);
+}
+
+internal sealed class SdkMarketDataClientFactory : IMarketDataClientFactory
+{
+    public IMarketDataClient Create(MarketDataClientOptions options, ILoggerFactory loggerFactory) =>
+        new SdkMarketDataClient(
+            new MarketDataClient(options, loggerFactory.CreateLogger<MarketDataClient>()));
+}
+
+internal sealed class SdkMarketDataClient : IMarketDataClient
+{
+    private readonly MarketDataClient _inner;
+
+    public SdkMarketDataClient(MarketDataClient inner) => _inner = inner;
+
+    public event Action<TradeEvent>? Trade
+    {
+        add => _inner.Trade += value;
+        remove => _inner.Trade -= value;
+    }
+    public event Action<InfoSnapshotEvent>? InfoSnapshot
+    {
+        add => _inner.InfoSnapshot += value;
+        remove => _inner.InfoSnapshot -= value;
+    }
+    public event Action<SymbolDelistedEvent>? SymbolDelisted
+    {
+        add => _inner.SymbolDelisted += value;
+        remove => _inner.SymbolDelisted -= value;
+    }
+    public event Action<ConnectionStateChangedEvent>? ConnectionStateChanged
+    {
+        add => _inner.ConnectionStateChanged += value;
+        remove => _inner.ConnectionStateChanged -= value;
+    }
+    public event Action<SubscribeErrorEvent>? SubscribeError
+    {
+        add => _inner.SubscribeError += value;
+        remove => _inner.SubscribeError -= value;
+    }
+    public event Action<OrderAddedEvent>? OrderAdded
+    {
+        add => _inner.OrderAdded += value;
+        remove => _inner.OrderAdded -= value;
+    }
+    public event Action<OrderUpdatedEvent>? OrderUpdated
+    {
+        add => _inner.OrderUpdated += value;
+        remove => _inner.OrderUpdated -= value;
+    }
+    public event Action<OrderDeletedEvent>? OrderDeleted
+    {
+        add => _inner.OrderDeleted += value;
+        remove => _inner.OrderDeleted -= value;
+    }
+
+    public Task ConnectAsync(CancellationToken ct) => _inner.ConnectAsync(ct);
+    public ValueTask SubscribeAsync(string symbol, SubscribeFlags flags, CancellationToken ct) =>
+        _inner.SubscribeAsync(symbol, flags, ct);
+    public ValueTask DisposeAsync() => _inner.DisposeAsync();
 }

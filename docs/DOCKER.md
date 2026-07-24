@@ -202,7 +202,7 @@ injection vs. a real matching engine) and are not meant to compose.
 | Service | What it does |
 |---|---|
 | `trading-host` | stays `Mode=Real` (base default); `Trading__Sandbox__AllowSelfCashDeposit` flipped to `true` |
-| `market-maker-bot` | FIXP session 10102; one resting bid + ask per configured instrument; connects to the `marketdata` WS feed (best-effort) to anchor quotes on the live reference price instead of the static config `RefPrice` |
+| `market-maker-bot` | FIXP session 10102; one resting bid + ask per configured instrument; uses the `marketdata` WS feed with an explicit `StaticRefPrice` (default) or `PauseAndCancel` feed-loss policy |
 
 `market-maker-bot` is now published the same way as `trading-host`/`frontend`:
 CI builds+pushes a `candidate-<sha>` digest in the `trading-host` job,
@@ -236,6 +236,30 @@ that file's inline comments for the full list. `MarketMaker__Instruments`
 must line up with `docker/real/instruments-eqt.json`'s `SecurityId`s
 (matching-platform's wire truth), which is independent of whatever
 `SecurityId` numbering `marketdata` itself uses for the same symbols.
+
+Feed-loss behavior is explicit and defaults to the legacy-compatible static
+fallback:
+
+```yaml
+MarketMaker__MarketData__WsUrl: ws://marketdata:8080/ws
+MarketMaker__MarketData__FeedLossPolicy: StaticRefPrice
+MarketMaker__MarketData__MaxReferenceAge: "00:00:30"
+```
+
+`StaticRefPrice` preserves the previous behavior exactly: live references are
+used while the socket is connected, and the configured instrument `RefPrice`
+is used before the first update or while disconnected. A reconnect may
+immediately reuse the retained live cache.
+
+Set `FeedLossPolicy=PauseAndCancel` for strict operation. It requires a
+nonblank absolute `WsUrl` and positive `MaxReferenceAge`. Each symbol remains
+paused until it receives a valid reference in the current connection epoch;
+disconnect/reconnecting/faulted state, a subscription error, no current-epoch
+update, or an over-age update suppresses new orders and repeatedly drives both
+active sides through the normal cancel-ack lifecycle. Initial connection
+failures keep the process alive and retry in the background while quotes stay
+paused. Reconnect alone is not sufficient: a fresh reference for that symbol
+is required before both missing sides resume.
 
 Inventory skew is opt-in and defaults off independently for every
 instrument:
@@ -279,8 +303,8 @@ widening is disabled while disconnected: the existing `StaticRefPrice`
 fallback remains in force and quotes revert to the configured static spread.
 On reconnect, retained samples resume widening only if they are still inside
 `Window` and satisfy `MinSamples`; otherwise fresh valid trades must rebuild
-readiness. This is deliberately not the `PauseAndCancel` feed-loss policy
-tracked separately in #720.
+readiness. Under `PauseAndCancel`, the reference-readiness gate independently suppresses
+the symbol; retained volatility samples never bypass that gate.
 
 The standard OTLP meter exposes
 `bot.strategy.volatility_move_estimate_ticks` and
@@ -290,6 +314,7 @@ configured `symbol`; effective-tick changes also emit structured
 
 ### Out of scope
 
+- `KeepLastAndWiden` is not a supported feed-loss policy.
 - No live-order-book-depth reaction: quotes anchor on
   `TradingReferencePrice`/`LastTradePrice`, not the SDK's `BookFeed`
   top-of-book. A closer-to-the-book anchor is a reasonable follow-up.

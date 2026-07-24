@@ -130,6 +130,79 @@ public class MarketMakerBotOptionsValidatorTests
         Assert.True(_validator.Validate(null, options).Succeeded);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("relative/ws")]
+    public void Validate_PauseAndCancel_RequiresAbsoluteWsUrl(string? wsUrl)
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = wsUrl,
+            MaxReferenceAge = TimeSpan.FromSeconds(10),
+        };
+
+        var result = _validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Failures!, failure => failure.Contains("WsUrl", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_PauseAndCancel_RequiresPositiveMaxReferenceAge(int seconds)
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = "wss://marketdata.test/ws",
+            MaxReferenceAge = TimeSpan.FromSeconds(seconds),
+        };
+
+        Assert.False(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_StaticRefPrice_AllowsNoFeedAndInactiveFreshness()
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.StaticRefPrice,
+            WsUrl = null,
+            MaxReferenceAge = TimeSpan.Zero,
+        };
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_AcceptsPauseAndCancelWithAbsoluteFeedAndPositiveAge()
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = "wss://marketdata.test/ws",
+            MaxReferenceAge = TimeSpan.FromSeconds(10),
+        };
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_RejectsUnknownFeedLossPolicy()
+    {
+        var options = Options();
+        options.MarketData.FeedLossPolicy = (FeedLossPolicy)99;
+
+        Assert.False(_validator.Validate(null, options).Succeeded);
+    }
+
     public static TheoryData<VolatilitySpreadConfig> InvalidVolatilityConfigurations() => new()
     {
         EnabledVolatility(window: TimeSpan.Zero),
