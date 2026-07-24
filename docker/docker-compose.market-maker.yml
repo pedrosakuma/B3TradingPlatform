@@ -102,6 +102,10 @@ services:
       # Defensive safety net only — the primary re-quote path is
       # event-driven (fills/cancels/rejects), see MarketMakerWorker.
       MarketMaker__ReconcileInterval: "00:00:05"
+      # A successfully transmitted cancel whose ER is lost is retried only
+      # after this bounded acknowledgement window; MinRequoteInterval remains
+      # the secondary anti-churn guard.
+      MarketMaker__CancelAckTimeout: "00:00:10"
       # Gross/pre-fee process-local P&L snapshots. Unrealized P&L is
       # omitted unless the connected live mark is newer than MarkMaxAge.
       MarketMaker__Telemetry__SnapshotInterval: "00:00:30"

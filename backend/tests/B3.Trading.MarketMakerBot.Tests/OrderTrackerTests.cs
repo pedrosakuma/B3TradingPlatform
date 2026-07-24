@@ -569,6 +569,58 @@ public class OrderTrackerTests
         Assert.Equal(clock.GetUtcNow(), order.LastCancelAttemptAtUtc);
     }
 
+    [Fact]
+    public void ExpirePendingCancelAttempts_WaitsForTimeoutAndPreservesThrottleTimestamp()
+    {
+        var clock = new FakeClock(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(t.TryRegisterCancelAttempt(
+            cancelClOrdId: 90UL,
+            origClOrdId: 1UL,
+            reason: CancelReason.InventoryStrategy));
+        var attemptedAt = clock.GetUtcNow();
+
+        clock.Advance(TimeSpan.FromSeconds(10).Subtract(TimeSpan.FromTicks(1)));
+        Assert.Empty(t.ExpirePendingCancelAttempts(TimeSpan.FromSeconds(10), clock.GetUtcNow()));
+        Assert.True(t.TryGet(1UL, out var before) && before.PendingCancelClOrdId == 90UL);
+
+        clock.Advance(TimeSpan.FromTicks(1));
+        var expired = Assert.Single(
+            t.ExpirePendingCancelAttempts(TimeSpan.FromSeconds(10), clock.GetUtcNow()));
+
+        Assert.Equal(1UL, expired.OrigClOrdId);
+        Assert.Equal(90UL, expired.CancelClOrdId);
+        Assert.Equal(CancelReason.InventoryStrategy, expired.Reason);
+        Assert.Equal(attemptedAt, expired.AttemptedAtUtc);
+        Assert.True(t.TryGet(1UL, out var order) && order.IsOpen);
+        Assert.Null(order.PendingCancelClOrdId);
+        Assert.Equal(attemptedAt, order.LastCancelAttemptAtUtc);
+        Assert.True(t.TryResolveCancelAttempt(90UL, out var original, out var reason));
+        Assert.Equal(1UL, original);
+        Assert.Equal(CancelReason.InventoryStrategy, reason);
+        Assert.Empty(t.ExpirePendingCancelAttempts(TimeSpan.FromSeconds(10), clock.GetUtcNow()));
+    }
+
+    [Fact]
+    public async Task ExpirePendingCancelAttempts_ConcurrentCallsExpireOnlyOnce()
+    {
+        var clock = new FakeClock(DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+        var t = new OrderTracker(clock);
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true);
+        t.TryRegisterCancelAttempt(90UL, 1UL, reason: CancelReason.PriceDrift);
+        clock.Advance(TimeSpan.FromSeconds(10));
+
+        var results = await Task.WhenAll(
+            Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
+                t.ExpirePendingCancelAttempts(TimeSpan.FromSeconds(10), clock.GetUtcNow()))));
+
+        Assert.Equal(1, results.Sum(result => result.Count));
+        Assert.True(t.TryGet(1UL, out var order));
+        Assert.Null(order.PendingCancelClOrdId);
+    }
+
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now;

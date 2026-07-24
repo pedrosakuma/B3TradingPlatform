@@ -81,6 +81,22 @@ public class MarketMakerBotOptionsValidatorTests
         Assert.True(_validator.Validate(null, options).Succeeded);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_RequiresPositiveCancelAckTimeout(int seconds)
+    {
+        var options = Options();
+        options.CancelAckTimeout = TimeSpan.FromSeconds(seconds);
+
+        var result = _validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(
+            result.Failures!,
+            failure => failure.Contains("CancelAckTimeout", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Validate_DisabledVolatility_DoesNotValidateInactiveValues()
     {

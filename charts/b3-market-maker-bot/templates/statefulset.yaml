@@ -47,6 +47,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             {{- $marketData := default (dict) .Values.marketData }}
+            {{- $behaviour := default (dict) .Values.behaviour }}
             # ── FIXP session ─────────────────────────────────────────────
             - name: MarketMaker__Endpoint
               value: {{ .Values.session.endpoint | quote }}
@@ -73,7 +74,9 @@ spec:
             - name: MarketMaker__StateDirectory
               value: /var/lib/b3-market-maker-bot
             - name: MarketMaker__ReconcileInterval
-              value: {{ .Values.behaviour.reconcileInterval | quote }}
+              value: {{ dig "reconcileInterval" "00:00:05" $behaviour | quote }}
+            - name: MarketMaker__CancelAckTimeout
+              value: {{ dig "cancelAckTimeout" "00:00:10" $behaviour | quote }}
             # ── Position/P&L observability ────────────────────────────────
             - name: MarketMaker__Telemetry__SnapshotInterval
               value: {{ .Values.observability.snapshotInterval | quote }}

@@ -10,6 +10,9 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
         var failures = new List<string>();
         var symbols = new HashSet<string>(StringComparer.Ordinal);
 
+        if (options.CancelAckTimeout <= TimeSpan.Zero)
+            failures.Add("MarketMaker:CancelAckTimeout must be positive.");
+
         if (!Enum.IsDefined(options.MarketData.FeedLossPolicy))
         {
             failures.Add("MarketMaker:MarketData:FeedLossPolicy is not supported.");

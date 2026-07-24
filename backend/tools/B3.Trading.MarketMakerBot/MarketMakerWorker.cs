@@ -313,6 +313,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                                 : c.ClOrdID.Value);
                         var known = _tracker.TryGet(targetClOrdId, out var order);
                         _tracker.OnTerminal(targetClOrdId);
+                        _tracker.ForgetCancelAttempt(c.ClOrdID.Value);
                         _pnlLedger.MarkTerminal(targetClOrdId);
                         return (
                             Known: known,
@@ -341,13 +342,10 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // closing it here would let the next reconcile tick
                     // submit a duplicate order alongside it — the exact
                     // venue-flooding failure mode RFC #703 exists to
-                    // prevent. Worst case if this really was a miss-fill
-                    // (order already gone at the venue): that side stays
-                    // marked "open" — blocking further quoting on it —
-                    // until the bot restarts, at which point
-                    // cancel-on-disconnect and a fresh OrderTracker clear
-                    // the stuck state. A stuck side is an acceptable
-                    // trade-off against a duplicated resting order.
+                    // prevent. If the ER itself is lost, CancelAckTimeout
+                    // expires only the matching pending marker and allows
+                    // another guarded cancel attempt without ever freeing
+                    // the original side reservation prematurely.
                     var cancelReject = _orderLifecycle.Synchronize(() =>
                     {
                         if (!_tracker.TryResolveCancelAttempt(
@@ -367,7 +365,8 @@ internal sealed class MarketMakerWorker : BackgroundService
                         // reconcile tick / book delta is free to retry
                         // the cancel instead of treating one as
                         // permanently outstanding.
-                        _tracker.ClearPendingCancel(origClOrdId);
+                        _tracker.ClearPendingCancelIfMatches(origClOrdId, r.ClOrdID.Value);
+                        _tracker.ForgetCancelAttempt(r.ClOrdID.Value);
                         var stuckKnown = _tracker.TryGet(origClOrdId, out var stuck);
                         var stuckSymbol = stuckKnown ? stuck.Symbol : "?";
                         return (
@@ -492,6 +491,7 @@ internal sealed class MarketMakerWorker : BackgroundService
 
     internal async Task ReconcileOnceAsync(IEntryPointClient client, CancellationToken ct)
     {
+        ExpirePendingCancelAcknowledgements();
         await CancelStaleOrdersAsync(client, ct);
         foreach (var change in _volatilitySpread.Refresh())
         {
@@ -521,10 +521,32 @@ internal sealed class MarketMakerWorker : BackgroundService
                     continue;
                 }
             }
+
             if (!_tracker.HasOpenSide(instr.Symbol, isBuy: true))
                 await QuoteSideAsync(client, instr, isBuy: true, ct);
             if (!_tracker.HasOpenSide(instr.Symbol, isBuy: false))
                 await QuoteSideAsync(client, instr, isBuy: false, ct);
+        }
+    }
+
+    private void ExpirePendingCancelAcknowledgements()
+    {
+        var expired = _tracker.ExpirePendingCancelAttempts(
+            _options.CancelAckTimeout,
+            _tracker.UtcNow);
+        foreach (var attempt in expired)
+        {
+            _metrics.RecordCancelAcknowledgementExpired(attempt.Symbol, attempt.Reason);
+            _log.LogWarning(
+                "[mm] cancel acknowledgement expired cancelClOrdId={CancelClOrdId} origClOrdId={OrigClOrdId} symbol={Symbol} side={Side} trigger={CancelReason} age={Age}; guarded retry enabled",
+                attempt.CancelClOrdId,
+                attempt.OrigClOrdId,
+                attempt.Symbol,
+                attempt.IsBuy ? "buy" : "sell",
+                attempt.Reason,
+                attempt.ExpiredAtUtc - attempt.AttemptedAtUtc);
+            if (IsPricingContextReason(attempt.Reason))
+                SignalPricingContextChanged(attempt.Symbol, attempt.Reason);
         }
     }
 
@@ -540,8 +562,9 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// cancel of an unknown/already-terminal order via <c>OrderRejected</c>
     /// keyed on the CANCEL request's own (freshly-generated) ClOrdID —
     /// <see cref="OrderTracker.RegisterCancelAttempt"/> aliases that id to
-    /// the original tracked order so the reject still resolves and frees
-    /// the stale reservation, instead of retrying identically forever.
+    /// the original tracked order so the reject still resolves without
+    /// freeing a potentially-resting reservation; bounded retries continue
+    /// through the normal cancel guard.
     /// internal (not private) so <c>MarketMakerWorkerTests</c> can drive
     /// it directly with a <see cref="FakeEntryPointClient"/>-equivalent
     /// and an <see cref="OrderTracker"/> constructed with a fake

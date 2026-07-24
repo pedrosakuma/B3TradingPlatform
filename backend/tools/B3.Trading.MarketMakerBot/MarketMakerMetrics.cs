@@ -45,6 +45,7 @@ public sealed class MarketMakerMetrics : IDisposable
     private readonly Counter<long> _feedCancelRejected;
     private readonly Counter<long> _feedCancelSubmitFailed;
     private readonly Counter<long> _feedCancelRetries;
+    private readonly Counter<long> _cancelAcknowledgementsExpired;
 
     public MarketMakerMetrics(
         MarketMakerPnlLedger ledger,
@@ -91,6 +92,8 @@ public sealed class MarketMakerMetrics : IDisposable
             _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_submit_failed");
         _feedCancelRetries =
             _meter.CreateCounter<long>("bot.orders.feed_unavailable_cancel_retry");
+        _cancelAcknowledgementsExpired =
+            _meter.CreateCounter<long>("bot.orders.cancel_ack_expired");
 
         _meter.CreateObservableGauge("bot.position.net_quantity", ObservePositions);
         _meter.CreateObservableGauge("bot.position.average_entry_price", ObserveAverageCosts);
@@ -168,6 +171,11 @@ public sealed class MarketMakerMetrics : IDisposable
         _feedCancelSubmitFailed.Add(1, SymbolTag(symbol));
     public void RecordFeedCancelRetry(string symbol) =>
         _feedCancelRetries.Add(1, SymbolTag(symbol));
+    public void RecordCancelAcknowledgementExpired(string symbol, CancelReason reason) =>
+        _cancelAcknowledgementsExpired.Add(
+            1,
+            SymbolTag(symbol),
+            new("reason", CancelReasonName(reason)));
 
     public void Dispose() => _meter.Dispose();
 
@@ -298,6 +306,16 @@ public sealed class MarketMakerMetrics : IDisposable
         FeedUnavailableReason.AwaitingCurrentEpochReference => "awaiting_current_epoch_reference",
         FeedUnavailableReason.SubscriptionError => "subscription_error",
         FeedUnavailableReason.StaleReference => "stale_reference",
+        _ => "unknown",
+    };
+
+    private static string CancelReasonName(CancelReason reason) => reason switch
+    {
+        CancelReason.StaleOrder => "stale_order",
+        CancelReason.PriceDrift => "price_drift",
+        CancelReason.InventoryStrategy => "inventory_strategy",
+        CancelReason.VolatilityStrategy => "volatility_strategy",
+        CancelReason.FeedUnavailable => "feed_unavailable",
         _ => "unknown",
     };
 

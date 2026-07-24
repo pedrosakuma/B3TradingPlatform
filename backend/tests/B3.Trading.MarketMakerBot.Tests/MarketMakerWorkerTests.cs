@@ -1131,6 +1131,125 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task Reconcile_LostFeedCancelAckExpiresAndRetriesButNotBeforeTimeout()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new FakeClock(t0);
+        var (worker, tracker, client, instrument, prices) = CreateWorker(clock, options =>
+        {
+            EnablePauseAndCancel(options);
+            options.CancelAckTimeout = TimeSpan.FromSeconds(10);
+            options.MinRequoteInterval = TimeSpan.FromMilliseconds(250);
+        });
+        prices.SetConnected(true, t0);
+        prices.OnTrade(instrument.Symbol, 31m, t0);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var original = client.SubmittedOrders.Single().ClOrdID.Value;
+        clock.Advance(TimeSpan.FromSeconds(1));
+        prices.SetConnected(false, clock.GetUtcNow());
+        await worker.ReactToPricingContextChangeAsync(
+            client, instrument.Symbol, CancelReason.FeedUnavailable, CancellationToken.None);
+        var firstCancel = client.SubmittedCancels.Single().ClOrdID.Value;
+
+        clock.Advance(TimeSpan.FromSeconds(10).Subtract(TimeSpan.FromTicks(1)));
+        await worker.ReconcileOnceAsync(client, CancellationToken.None);
+        Assert.Single(client.SubmittedCancels);
+        Assert.True(tracker.TryGet(original, out var before) &&
+            before.PendingCancelClOrdId == firstCancel);
+
+        clock.Advance(TimeSpan.FromTicks(1));
+        await worker.ReconcileOnceAsync(client, CancellationToken.None);
+        Assert.True(tracker.TryGet(original, out var expired));
+        Assert.Null(expired.PendingCancelClOrdId);
+        Assert.True(tracker.TryResolveCancelAttempt(firstCancel, out _));
+
+        await worker.ReactToPricingContextChangeAsync(
+            client, instrument.Symbol, CancelReason.FeedUnavailable, CancellationToken.None);
+
+        Assert.Equal(2, client.SubmittedCancels.Count);
+        Assert.NotEqual(firstCancel, client.SubmittedCancels[1].ClOrdID.Value);
+    }
+
+    [Fact]
+    public async Task LateExpiredCancelAckWithOrigClOrdIdClosesAndRequotesOnlyOnce()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new FakeClock(t0);
+        var (worker, tracker, client, instrument, prices) = CreateWorker(clock, options =>
+        {
+            options.CancelAckTimeout = TimeSpan.FromSeconds(10);
+            options.MinRequoteInterval = TimeSpan.FromMilliseconds(250);
+        });
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var original = client.SubmittedOrders.Single().ClOrdID.Value;
+        prices.SetConnected(true, t0);
+        prices.OnTrade(instrument.Symbol, 31m, t0);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await worker.ReactToPricingContextChangeAsync(
+            client, instrument.Symbol, CancelReason.PriceDrift, CancellationToken.None);
+        var cancelId = client.SubmittedCancels.Single().ClOrdID.Value;
+        clock.Advance(TimeSpan.FromSeconds(10));
+        await worker.ReconcileOnceAsync(client, CancellationToken.None);
+
+        var lateAck = new OrderCancelled
+        {
+            ClOrdID = new ClOrdID(cancelId),
+            OrigClOrdID = new ClOrdID(original),
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = clock.GetUtcNow(),
+        };
+        await worker.HandleEventAsync(client, lateAck, CancellationToken.None);
+        await worker.HandleEventAsync(client, lateAck, CancellationToken.None);
+
+        Assert.False(tracker.TryGet(original, out var closed) && closed.IsOpen);
+        Assert.Equal(3, client.SubmittedOrders.Count);
+        Assert.False(tracker.TryResolveCancelAttempt(cancelId, out _));
+    }
+
+    [Fact]
+    public async Task LateExpiredCancelRejectLeavesOriginalOpenAndAllowsFutureRetry()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new FakeClock(t0);
+        var (worker, tracker, client, instrument, prices) = CreateWorker(clock, options =>
+        {
+            options.CancelAckTimeout = TimeSpan.FromSeconds(10);
+            options.MinRequoteInterval = TimeSpan.FromMilliseconds(250);
+        });
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var original = client.SubmittedOrders.Single().ClOrdID.Value;
+        prices.SetConnected(true, t0);
+        prices.OnTrade(instrument.Symbol, 31m, t0);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await worker.ReactToPricingContextChangeAsync(
+            client, instrument.Symbol, CancelReason.PriceDrift, CancellationToken.None);
+        var expiredCancel = client.SubmittedCancels.Single().ClOrdID.Value;
+        clock.Advance(TimeSpan.FromSeconds(10));
+        await worker.ReconcileOnceAsync(client, CancellationToken.None);
+        await worker.ReactToPricingContextChangeAsync(
+            client, instrument.Symbol, CancelReason.PriceDrift, CancellationToken.None);
+        var retryCancel = client.SubmittedCancels[1].ClOrdID.Value;
+
+        await worker.HandleEventAsync(client, new OrderRejected
+        {
+            ClOrdID = new ClOrdID(expiredCancel),
+            OrderId = 0,
+            RejectCode = 1,
+            Reason = "late reject",
+            SeqNum = 1,
+            SendingTime = clock.GetUtcNow(),
+        }, CancellationToken.None);
+
+        Assert.True(tracker.TryGet(original, out var open) && open.IsOpen);
+        Assert.Equal(retryCancel, open.PendingCancelClOrdId);
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.False(tracker.TryResolveCancelAttempt(expiredCancel, out _));
+        Assert.Equal(2, client.SubmittedCancels.Count);
+    }
+
+    [Fact]
     public async Task ReactToBookChangeAsync_PriceDriftedPastDeviation_CancelsRestingOrder()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);

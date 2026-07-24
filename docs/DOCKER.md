@@ -261,6 +261,20 @@ failures keep the process alive and retry in the background while quotes stay
 paused. Reconnect alone is not sufficient: a fresh reference for that symbol
 is required before both missing sides resume.
 
+Cancel acknowledgements are also bounded:
+
+```yaml
+MarketMaker__CancelAckTimeout: "00:00:10"
+```
+
+If a transmitted cancel's execution report is lost, the bot expires only that
+matching pending marker after this positive timeout and retries through the
+existing reconcile/coalescing guards. The original order remains tracked as
+open until an authoritative cancel/fill ER arrives. Late cancel acknowledgements
+still close it, while late rejects of expired cancel IDs are recognized as
+cancel rejects and cannot free the original order as if they rejected a new
+submit. `MinRequoteInterval` continues to throttle strategy/feed retries.
+
 Inventory skew is opt-in and defaults off independently for every
 instrument:
 

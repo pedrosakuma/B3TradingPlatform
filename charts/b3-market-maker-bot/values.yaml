@@ -76,6 +76,9 @@ behaviour:
   # Defensive safety net only — the primary re-quote path is event-driven
   # (fills/cancels/rejects), see MarketMakerWorker.
   reconcileInterval: "00:00:05"
+  # Clears a lost cancel acknowledgement's pending marker after this window,
+  # retaining a bounded correlation tombstone so late ERs remain safe.
+  cancelAckTimeout: "00:00:10"
 
 # ── Position/P&L observability ───────────────────────────────────────────────
 observability:

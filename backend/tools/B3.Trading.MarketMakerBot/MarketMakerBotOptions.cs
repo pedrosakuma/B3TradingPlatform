@@ -96,6 +96,13 @@ public sealed class MarketMakerBotOptions
     /// </summary>
     public TimeSpan MinRequoteInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>
+    /// Maximum time a submitted cancel may remain without a terminal
+    /// acknowledgement before its pending marker expires and guarded retry is
+    /// allowed. The original order remains open until an authoritative ER.
+    /// </summary>
+    public TimeSpan CancelAckTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
     [Required, MinLength(1)]
     public List<InstrumentConfig> Instruments { get; set; } = new();
 

@@ -246,6 +246,7 @@ public class MarketMakerMetricsTests
         metrics.RecordFeedCancelRejected("PETR4");
         metrics.RecordFeedCancelSubmitFailed("PETR4");
         metrics.RecordFeedCancelRetry("PETR4");
+        metrics.RecordCancelAcknowledgementExpired("PETR4", CancelReason.FeedUnavailable);
         prices.SetConnected(true);
         prices.OnInfoSnapshot("PETR4", 30m, null);
         listener.RecordObservableInstruments();
@@ -256,6 +257,7 @@ public class MarketMakerMetricsTests
         Assert.Contains("bot.orders.feed_unavailable_cancel_rejected", counters);
         Assert.Contains("bot.orders.feed_unavailable_cancel_submit_failed", counters);
         Assert.Contains("bot.orders.feed_unavailable_cancel_retry", counters);
+        Assert.Contains("bot.orders.cancel_ack_expired", counters);
         Assert.Contains("bot.market_data.reference_age_seconds", gauges);
     }
 
