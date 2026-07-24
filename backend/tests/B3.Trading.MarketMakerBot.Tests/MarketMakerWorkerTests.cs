@@ -42,6 +42,49 @@ public class MarketMakerWorkerTests
         return (worker, tracker, new FakeEntryPointClient(), instrument);
     }
 
+    /// <summary>
+    /// Variant of <see cref="CreateWorker"/> for
+    /// <see cref="MarketMakerWorker.CancelStaleOrdersAsync"/>/<see
+    /// cref="MarketMakerWorker.ReactToBookChangeAsync"/> tests: takes an
+    /// explicit <see cref="TimeProvider"/> (wired into the
+    /// <see cref="OrderTracker"/>, which is the only place the worker
+    /// reads the clock from — see <see cref="OrderTracker.UtcNow"/>) and
+    /// an <paramref name="configure"/> callback for the staleness/requote
+    /// tunables those two methods depend on, and also hands back the
+    /// <see cref="MarketPriceTracker"/> so tests can move the live
+    /// reference price.
+    /// </summary>
+    private static (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client,
+        InstrumentConfig Instrument, MarketPriceTracker PriceTracker) CreateWorker(
+        TimeProvider clock, Action<MarketMakerBotOptions>? configure = null)
+    {
+        var instrument = new InstrumentConfig
+        {
+            Symbol = "PETR4",
+            SecurityId = 1,
+            RefPrice = 30m,
+            TickSize = 0.01m,
+            LotSize = 100,
+            QuoteLots = 1,
+            SpreadTicks = 5,
+        };
+        var options = new MarketMakerBotOptions
+        {
+            EnteringFirm = 1,
+            SessionId = 1,
+            AccessKey = "test",
+            Instruments = [instrument],
+        };
+        configure?.Invoke(options);
+        var tracker = new OrderTracker(clock);
+        var priceTracker = new MarketPriceTracker();
+        var loggerFactory = NullLoggerFactory.Instance;
+        var marketData = new MarketDataFeed(priceTracker, NullLogger.Instance);
+        var worker = new MarketMakerWorker(Options.Create(options), tracker, priceTracker, marketData,
+            loggerFactory, NullLogger<MarketMakerWorker>.Instance);
+        return (worker, tracker, new FakeEntryPointClient(), instrument, priceTracker);
+    }
+
     [Fact]
     public async Task QuoteSideAsync_SubmitsOneRestingOrderPerSide()
     {
@@ -320,5 +363,111 @@ public class MarketMakerWorkerTests
 
         Assert.False(tracker.HasOpenSide("PETR4", isBuy: true));
         Assert.Single(client.SubmittedOrders); // no immediate requote.
+    }
+
+    [Fact]
+    public async Task CancelStaleOrdersAsync_OrderOlderThanMaxAge_SubmitsCancel()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, _) = CreateWorker(clock,
+            o => o.MaxOrderAge = TimeSpan.FromMinutes(5));
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await worker.CancelStaleOrdersAsync(client, CancellationToken.None);
+
+        Assert.Single(client.SubmittedCancels);
+        Assert.Equal(clOrdId, client.SubmittedCancels[0].OrigClOrdID.Value);
+        // Still open — only cancelled, not yet closed (that's the venue's
+        // OrderCancelled/OrderRejected ER via HandleEventAsync).
+        Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
+        Assert.True(tracker.TryGet(clOrdId, out var order));
+        Assert.NotNull(order.PendingCancelClOrdId);
+    }
+
+    [Fact]
+    public async Task CancelStaleOrdersAsync_OrderWithinMaxAge_DoesNotCancel()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, _) = CreateWorker(clock,
+            o => o.MaxOrderAge = TimeSpan.FromMinutes(5));
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        await worker.CancelStaleOrdersAsync(client, CancellationToken.None);
+
+        Assert.Empty(client.SubmittedCancels);
+    }
+
+    [Fact]
+    public async Task ReactToBookChangeAsync_PriceDriftedPastDeviation_CancelsRestingOrder()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, priceTracker) = CreateWorker(clock,
+            o => o.MinRequoteInterval = TimeSpan.Zero);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+        Assert.Equal(29.95m, tracker.TryGet(clOrdId, out var resting) ? resting.Price : 0m);
+
+        // Reference price moves far enough that the buy target (refPrice
+        // - 5 ticks) now sits well past RequoteDeviationTicks (2 ticks =
+        // 0.02) away from the still-resting 29.95 quote.
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 31m);
+        clock.Advance(TimeSpan.FromMinutes(1)); // clear MinRequoteInterval's own throttle path.
+        await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
+
+        Assert.Single(client.SubmittedCancels);
+        Assert.Equal(clOrdId, client.SubmittedCancels[0].OrigClOrdID.Value);
+        Assert.True(tracker.TryGet(clOrdId, out var order) && order.PendingCancelClOrdId is not null);
+    }
+
+    [Fact]
+    public async Task ReactToBookChangeAsync_PriceWithinDeviation_DoesNotCancel()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, _, client, instrument, priceTracker) = CreateWorker(clock,
+            o => o.MinRequoteInterval = TimeSpan.Zero);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        // A tiny move that rounds back to the exact same tick price
+        // shouldn't trigger a cancel at all.
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 30.001m);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
+
+        Assert.Empty(client.SubmittedCancels);
+    }
+
+    [Fact]
+    public async Task ReactToBookChangeAsync_WithinMinRequoteInterval_ThrottlesCancel()
+    {
+        // A big price move right after submission must not immediately
+        // cancel a quote that hasn't even settled yet — the same
+        // venue-flooding shape RFC #703 exists to prevent.
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var (worker, tracker, client, instrument, priceTracker) = CreateWorker(clock,
+            o => o.MinRequoteInterval = TimeSpan.FromSeconds(30));
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
+
+        priceTracker.SetConnected(true);
+        priceTracker.OnTrade(instrument.Symbol, 31m);
+        // No clock advance: still inside MinRequoteInterval of the
+        // original submission.
+        await worker.ReactToBookChangeAsync(client, instrument.Symbol, CancellationToken.None);
+
+        Assert.Empty(client.SubmittedCancels);
+        Assert.True(tracker.TryGet(clOrdId, out var order) && order.PendingCancelClOrdId is null);
+    }
+
+    private sealed class FakeClock : TimeProvider
+    {
+        private DateTimeOffset _now;
+        public FakeClock(DateTimeOffset start) => _now = start;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan delta) => _now += delta;
     }
 }

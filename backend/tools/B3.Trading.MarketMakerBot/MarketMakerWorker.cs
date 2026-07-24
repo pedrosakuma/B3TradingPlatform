@@ -381,8 +381,12 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// <see cref="OrderTracker.RegisterCancelAttempt"/> aliases that id to
     /// the original tracked order so the reject still resolves and frees
     /// the stale reservation, instead of retrying identically forever.
+    /// internal (not private) so <c>MarketMakerWorkerTests</c> can drive
+    /// it directly with a <see cref="FakeEntryPointClient"/>-equivalent
+    /// and an <see cref="OrderTracker"/> constructed with a fake
+    /// <see cref="TimeProvider"/> — see #711's follow-up.
     /// </summary>
-    private async Task CancelStaleOrdersAsync(IEntryPointClient client, CancellationToken ct)
+    internal async Task CancelStaleOrdersAsync(IEntryPointClient client, CancellationToken ct)
     {
         var stale = _tracker.FindStale(_options.MaxOrderAge, _tracker.UtcNow);
         foreach (var o in stale)
@@ -474,8 +478,10 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// burst of book updates from repeatedly cancelling a quote that
     /// hasn't even settled yet, the same venue-flooding shape RFC #703
     /// exists to prevent.
+    /// internal (not private) so <c>MarketMakerWorkerTests</c> can drive
+    /// it directly — see #711's follow-up.
     /// </summary>
-    private async Task ReactToBookChangeAsync(IEntryPointClient client, string symbol, CancellationToken ct)
+    internal async Task ReactToBookChangeAsync(IEntryPointClient client, string symbol, CancellationToken ct)
     {
         var instr = FindInstrument(symbol);
         if (instr is null || _priceTracker.IsDelisted(symbol)) return;
