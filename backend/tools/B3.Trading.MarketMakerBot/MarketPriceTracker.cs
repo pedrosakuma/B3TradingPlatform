@@ -15,6 +15,7 @@ public sealed class MarketPriceTracker
     private readonly TimeProvider _clock;
     private bool _connected;
     private long _connectionEpoch;
+    private DateTimeOffset? _connectionStartedAtUtc;
 
     public MarketPriceTracker(TimeProvider? clock = null)
     {
@@ -55,7 +56,7 @@ public sealed class MarketPriceTracker
             }
 
             mark = found;
-            var age = _clock.GetUtcNow() - mark.ObservedAtUtc;
+            var age = _clock.GetUtcNow() - mark.ReceivedAtUtc;
             return age >= TimeSpan.Zero && age <= maxAge;
         }
     }
@@ -63,20 +64,24 @@ public sealed class MarketPriceTracker
     /// <summary>
     /// Strict per-symbol readiness. Eligibility requires a connected socket, no
     /// subscription error in the current epoch, a valid update stamped with the
-    /// current epoch, and an age inside <paramref name="maxAge"/>.
+    /// current epoch, and an age inside <paramref name="maxAge"/>. An update
+    /// received exactly at the epoch start and a mark whose age equals maxAge
+    /// are eligible; timestamps ahead of the local clock are rejected.
     /// </summary>
     public ReferenceAvailability GetAvailability(string symbol, TimeSpan maxAge)
     {
         lock (_gate)
         {
             _symbols.TryGetValue(symbol, out var state);
-            var mark = state?.LastValidMark;
-            TimeSpan? age = mark is { } value ? _clock.GetUtcNow() - value.ObservedAtUtc : null;
+            var currentEpochMark = state?.CurrentEpochMark;
+            var mark = currentEpochMark ?? state?.LastValidMark;
+            TimeSpan? age = mark is { } value ? _clock.GetUtcNow() - value.ReceivedAtUtc : null;
             var reason = !_connected
                 ? FeedUnavailableReason.Disconnected
                 : state?.SubscriptionErrorEpoch == _connectionEpoch
                     ? FeedUnavailableReason.SubscriptionError
-                    : mark is null || mark.Value.ConnectionEpoch != _connectionEpoch
+                    : currentEpochMark is null ||
+                        currentEpochMark.Value.ConnectionEpoch != _connectionEpoch
                         ? FeedUnavailableReason.AwaitingCurrentEpochReference
                         : age < TimeSpan.Zero || age > maxAge
                             ? FeedUnavailableReason.StaleReference
@@ -86,6 +91,7 @@ public sealed class MarketPriceTracker
                 reason,
                 _connected,
                 _connectionEpoch,
+                _connectionStartedAtUtc,
                 mark,
                 age);
         }
@@ -116,19 +122,41 @@ public sealed class MarketPriceTracker
     }
 
     public bool OnTrade(string symbol, decimal price) =>
-        Update(symbol, price, ReferencePriceSource.Trade);
+        OnTrade(symbol, price, _clock.GetUtcNow());
+
+    public bool OnTrade(string symbol, decimal price, DateTimeOffset receivedAtUtc) =>
+        Update(symbol, price, ReferencePriceSource.Trade, receivedAtUtc);
 
     /// <summary>
     /// Prefers the venue's TradingReferencePrice, falling back to
     /// LastTradePrice only when the former is absent.
     /// </summary>
     public bool OnInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice)
+        => OnInfoSnapshot(
+            symbol,
+            tradingReferencePrice,
+            lastTradePrice,
+            _clock.GetUtcNow());
+
+    public bool OnInfoSnapshot(
+        string symbol,
+        decimal? tradingReferencePrice,
+        decimal? lastTradePrice,
+        DateTimeOffset receivedAtUtc)
     {
         if (tradingReferencePrice is { } reference)
             return reference > 0m &&
-                Update(symbol, reference, ReferencePriceSource.TradingReferencePrice);
+                Update(
+                    symbol,
+                    reference,
+                    ReferencePriceSource.TradingReferencePrice,
+                    receivedAtUtc);
         return lastTradePrice is > 0m &&
-            Update(symbol, lastTradePrice.Value, ReferencePriceSource.LastTradePrice);
+            Update(
+                symbol,
+                lastTradePrice.Value,
+                ReferencePriceSource.LastTradePrice,
+                receivedAtUtc);
     }
 
     public void OnSymbolDelisted(string symbol)
@@ -148,7 +176,7 @@ public sealed class MarketPriceTracker
     /// StaticRefPrice, but strict eligibility requires a fresh mark stamped in
     /// the new epoch.
     /// </summary>
-    public bool SetConnected(bool connected)
+    public bool SetConnected(bool connected, DateTimeOffset? changedAtUtc = null)
     {
         lock (_gate)
         {
@@ -156,25 +184,46 @@ public sealed class MarketPriceTracker
                 return false;
             _connected = connected;
             if (connected)
+            {
                 _connectionEpoch++;
+                _connectionStartedAtUtc = changedAtUtc ?? _clock.GetUtcNow();
+                foreach (var state in _symbols.Values)
+                    state.CurrentEpochMark = null;
+            }
             return true;
         }
     }
 
-    private bool Update(string symbol, decimal price, ReferencePriceSource source)
+    private bool Update(
+        string symbol,
+        decimal price,
+        ReferencePriceSource source,
+        DateTimeOffset receivedAtUtc)
     {
         if (price <= 0m)
             return false;
 
         lock (_gate)
         {
-            var state = GetOrAdd(symbol);
-            state.LastValidMark = new MarketMark(
+            var now = _clock.GetUtcNow();
+            var belongsToCurrentEpoch = _connected &&
+                _connectionStartedAtUtc is { } epochStart &&
+                receivedAtUtc >= epochStart &&
+                receivedAtUtc <= now;
+            var mark = new MarketMark(
                 price,
-                _clock.GetUtcNow(),
+                receivedAtUtc,
                 source,
-                _connectionEpoch);
-            state.SubscriptionErrorEpoch = null;
+                belongsToCurrentEpoch ? _connectionEpoch : 0);
+            var state = GetOrAdd(symbol);
+            state.LastValidMark = mark;
+            if (belongsToCurrentEpoch &&
+                (state.CurrentEpochMark is not { } current ||
+                    mark.ReceivedAtUtc >= current.ReceivedAtUtc))
+            {
+                state.CurrentEpochMark = mark;
+                state.SubscriptionErrorEpoch = null;
+            }
             return true;
         }
     }
@@ -192,12 +241,13 @@ public sealed class MarketPriceTracker
     private sealed class SymbolReferenceState
     {
         public MarketMark? LastValidMark { get; set; }
+        public MarketMark? CurrentEpochMark { get; set; }
         public long? SubscriptionErrorEpoch { get; set; }
     }
 
     public readonly record struct MarketMark(
         decimal Price,
-        DateTimeOffset ObservedAtUtc,
+        DateTimeOffset ReceivedAtUtc,
         ReferencePriceSource Source = ReferencePriceSource.Trade,
         long ConnectionEpoch = 0);
 }
@@ -223,5 +273,6 @@ public readonly record struct ReferenceAvailability(
     FeedUnavailableReason UnavailableReason,
     bool IsConnected,
     long ConnectionEpoch,
+    DateTimeOffset? ConnectionStartedAtUtc,
     MarketPriceTracker.MarketMark? LastValidMark,
     TimeSpan? ReferenceAge);

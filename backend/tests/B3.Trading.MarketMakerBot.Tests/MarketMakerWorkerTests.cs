@@ -1444,6 +1444,38 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task PauseAndCancel_OnlyFreshCurrentEpochReceiveTimestampRestoresQuotes()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new FakeClock(t0);
+        var (worker, _, client, instrument, prices) = CreateWorker(clock, EnablePauseAndCancel);
+        prices.SetConnected(true, t0);
+        prices.OnTrade(instrument.Symbol, 30m, t0);
+        prices.SetConnected(false, t0.AddSeconds(1));
+        clock.Advance(TimeSpan.FromSeconds(2));
+        prices.SetConnected(true, t0.AddSeconds(2));
+
+        prices.OnTrade(instrument.Symbol, 29m, t0);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        Assert.Empty(client.SubmittedOrders);
+
+        clock.Advance(TimeSpan.FromSeconds(20));
+        prices.OnInfoSnapshot(instrument.Symbol, 31m, null, t0.AddSeconds(3));
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+        Assert.Empty(client.SubmittedOrders);
+
+        prices.OnInfoSnapshot(instrument.Symbol, 32m, null, clock.GetUtcNow());
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        await worker.QuoteSideAsync(client, instrument, isBuy: false, CancellationToken.None);
+
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.Equal(31.95m, client.SubmittedOrders.Single(order => order.Side == Side.Buy).Price);
+        Assert.Equal(32.05m, client.SubmittedOrders.Single(order => order.Side == Side.Sell).Price);
+    }
+
+    [Fact]
     public async Task PauseAndCancel_StaleReferenceOnReconcileCancelsBothSides()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);

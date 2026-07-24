@@ -229,10 +229,15 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         client.OrderDeleted -= OnOrderDeleted;
     }
 
-    private void OnTrade(TradeEvent ev) => NotifyTrade(ev.Symbol, ev.Price);
+    private void OnTrade(TradeEvent ev) =>
+        NotifyTrade(ev.Symbol, ev.Price, NormalizeSdkUtc(ev.ReceivedUtc));
 
     private void OnInfoSnapshot(InfoSnapshotEvent ev) =>
-        NotifyInfoSnapshot(ev.Symbol, ev.TradingReferencePrice, ev.LastTradePrice);
+        NotifyInfoSnapshot(
+            ev.Symbol,
+            ev.TradingReferencePrice,
+            ev.LastTradePrice,
+            NormalizeSdkUtc(ev.ReceivedUtc));
 
     private void OnOrderAdded(OrderAddedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
     private void OnOrderUpdated(OrderUpdatedEvent ev) => BookOrderChanged?.Invoke(ev.Symbol, ev.OrderId);
@@ -246,22 +251,30 @@ internal sealed class MarketDataFeed : IAsyncDisposable
         SymbolAvailabilityChanged?.Invoke(symbol);
     }
 
-    internal void NotifyTrade(string symbol, decimal price)
+    internal void NotifyTrade(string symbol, decimal price, DateTimeOffset? receivedAtUtc = null)
     {
         var before = StrictAvailability(symbol);
-        var updated = _tracker.OnTrade(symbol, price);
+        var updated = _tracker.OnTrade(symbol, price, receivedAtUtc ?? _clock.GetUtcNow());
         PublishVolatilityChange(_volatilitySpread.OnTrade(symbol, price));
         PublishStrictAvailabilityChange(symbol, before, updated);
     }
 
-    internal void NotifyInfoSnapshot(string symbol, decimal? tradingReferencePrice, decimal? lastTradePrice)
+    internal void NotifyInfoSnapshot(
+        string symbol,
+        decimal? tradingReferencePrice,
+        decimal? lastTradePrice,
+        DateTimeOffset? receivedAtUtc = null)
     {
         var before = StrictAvailability(symbol);
-        var updated = _tracker.OnInfoSnapshot(symbol, tradingReferencePrice, lastTradePrice);
+        var updated = _tracker.OnInfoSnapshot(
+            symbol,
+            tradingReferencePrice,
+            lastTradePrice,
+            receivedAtUtc ?? _clock.GetUtcNow());
         PublishStrictAvailabilityChange(symbol, before, updated);
     }
 
-    internal void NotifyConnectionState(bool connected)
+    internal void NotifyConnectionState(bool connected, DateTimeOffset? changedAtUtc = null)
     {
         bool eligibilityChanged;
         lock (_connectionGate)
@@ -270,7 +283,7 @@ internal sealed class MarketDataFeed : IAsyncDisposable
             _connectionEligible = connected;
         }
 
-        _tracker.SetConnected(connected);
+        _tracker.SetConnected(connected, changedAtUtc);
         foreach (var change in _volatilitySpread.SetConnected(connected))
             PublishVolatilityChange(change);
         if (eligibilityChanged)
@@ -288,11 +301,16 @@ internal sealed class MarketDataFeed : IAsyncDisposable
     private void OnConnectionStateChanged(ConnectionStateChangedEvent ev)
     {
         _log.LogInformation("[mm] MarketData connection state: {State}", ev.State);
-        NotifyConnectionState(ev.State == ConnectionState.Connected);
+        NotifyConnectionState(
+            ev.State == ConnectionState.Connected,
+            NormalizeSdkUtc(ev.ChangedUtc));
     }
 
     private void OnSubscribeError(SubscribeErrorEvent ev) =>
         NotifySubscribeError(ev.Symbol, ev.ErrorCode.ToString());
+
+    private static DateTimeOffset NormalizeSdkUtc(DateTime value) =>
+        new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
 
     private ReferenceAvailability? StrictAvailability(string symbol) =>
         _feedLossPolicy == FeedLossPolicy.PauseAndCancel

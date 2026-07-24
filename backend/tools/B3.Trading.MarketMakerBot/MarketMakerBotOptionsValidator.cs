@@ -14,18 +14,26 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
         {
             failures.Add("MarketMaker:MarketData:FeedLossPolicy is not supported.");
         }
-        else if (options.MarketData.FeedLossPolicy == FeedLossPolicy.PauseAndCancel)
+        else
         {
-            if (string.IsNullOrWhiteSpace(options.MarketData.WsUrl) ||
-                !Uri.TryCreate(options.MarketData.WsUrl, UriKind.Absolute, out _))
+            if (!string.IsNullOrWhiteSpace(options.MarketData.WsUrl) &&
+                !MarketDataOptionsValidation.TryGetWebSocketUri(options.MarketData.WsUrl, out _))
             {
                 failures.Add(
-                    "MarketMaker:MarketData:WsUrl must be a nonblank absolute URI when FeedLossPolicy is PauseAndCancel.");
+                    "MarketMaker:MarketData:WsUrl, if set, must be an absolute ws:// or wss:// URI.");
             }
-            if (options.MarketData.MaxReferenceAge <= TimeSpan.Zero)
+            if (options.MarketData.FeedLossPolicy == FeedLossPolicy.PauseAndCancel)
             {
-                failures.Add(
-                    "MarketMaker:MarketData:MaxReferenceAge must be positive when FeedLossPolicy is PauseAndCancel.");
+                if (string.IsNullOrWhiteSpace(options.MarketData.WsUrl))
+                {
+                    failures.Add(
+                        "MarketMaker:MarketData:WsUrl must be nonblank when FeedLossPolicy is PauseAndCancel.");
+                }
+                if (options.MarketData.MaxReferenceAge <= TimeSpan.Zero)
+                {
+                    failures.Add(
+                        "MarketMaker:MarketData:MaxReferenceAge must be positive when FeedLossPolicy is PauseAndCancel.");
+                }
             }
         }
 
@@ -107,5 +115,16 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);
+    }
+}
+
+internal static class MarketDataOptionsValidation
+{
+    internal static bool TryGetWebSocketUri(string value, out Uri? uri)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out uri))
+            return false;
+        return string.Equals(uri.Scheme, Uri.UriSchemeWs, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(uri.Scheme, Uri.UriSchemeWss, StringComparison.OrdinalIgnoreCase);
     }
 }

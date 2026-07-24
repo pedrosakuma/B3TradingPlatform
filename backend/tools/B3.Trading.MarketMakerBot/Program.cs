@@ -30,8 +30,8 @@ builder.Services
     .Validate(o => o.Telemetry.MarkMaxAge > TimeSpan.Zero,
         "MarketMaker:Telemetry:MarkMaxAge must be positive.")
     .Validate(o => string.IsNullOrWhiteSpace(o.MarketData.WsUrl) ||
-        Uri.TryCreate(o.MarketData.WsUrl, UriKind.Absolute, out _),
-        "MarketMaker:MarketData:WsUrl, if set, must be an absolute URI.")
+        MarketDataOptionsValidation.TryGetWebSocketUri(o.MarketData.WsUrl, out _),
+        "MarketMaker:MarketData:WsUrl, if set, must be an absolute ws:// or wss:// URI.")
     .ValidateOnStart();
 
 builder.Services.AddSingleton<IValidateOptions<MarketMakerBotOptions>, MarketMakerBotOptionsValidator>();

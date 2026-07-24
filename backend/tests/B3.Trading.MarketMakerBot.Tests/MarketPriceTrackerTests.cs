@@ -147,7 +147,8 @@ public class MarketPriceTrackerTests
         Assert.True(available.IsEligible);
         Assert.Equal(1, available.LastValidMark?.ConnectionEpoch);
         Assert.Equal(ReferencePriceSource.Trade, available.LastValidMark?.Source);
-        Assert.Equal(clock.GetUtcNow(), available.LastValidMark?.ObservedAtUtc);
+        Assert.Equal(clock.GetUtcNow(), available.LastValidMark?.ReceivedAtUtc);
+        Assert.Equal(clock.GetUtcNow(), available.ConnectionStartedAtUtc);
     }
 
     [Fact]
@@ -186,6 +187,93 @@ public class MarketPriceTrackerTests
         Assert.Equal(FeedUnavailableReason.StaleReference, availability.UnavailableReason);
         Assert.Equal(TimeSpan.FromSeconds(11), availability.ReferenceAge);
         Assert.Equal(ReferencePriceSource.TradingReferencePrice, availability.LastValidMark?.Source);
+    }
+
+    [Fact]
+    public void StrictAvailability_DelayedPreviousEpochEventAfterReconnectDoesNotRestore()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new ManualTimeProvider(t0);
+        var tracker = new MarketPriceTracker(clock);
+        tracker.SetConnected(true, t0);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        tracker.OnTrade("PETR4", 30m, t0.AddSeconds(1));
+        tracker.SetConnected(false, t0.AddSeconds(2));
+        clock.Advance(TimeSpan.FromSeconds(2));
+        tracker.SetConnected(true, t0.AddSeconds(3));
+
+        tracker.OnTrade("PETR4", 29m, t0.AddSeconds(1));
+
+        var delayed = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.False(delayed.IsEligible);
+        Assert.Equal(FeedUnavailableReason.AwaitingCurrentEpochReference, delayed.UnavailableReason);
+        Assert.Equal(t0.AddSeconds(3), delayed.ConnectionStartedAtUtc);
+        Assert.Equal(t0.AddSeconds(1), delayed.LastValidMark?.ReceivedAtUtc);
+        Assert.Equal(0, delayed.LastValidMark?.ConnectionEpoch);
+
+        tracker.OnTrade("PETR4", 31m, t0.AddSeconds(3));
+        var restored = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.True(restored.IsEligible);
+        Assert.Equal(31m, restored.LastValidMark?.Price);
+        Assert.Equal(2, restored.LastValidMark?.ConnectionEpoch);
+    }
+
+    [Fact]
+    public void StrictAvailability_DelayedDispatchArrivingAlreadyStaleDoesNotRestore()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new ManualTimeProvider(t0);
+        var tracker = new MarketPriceTracker(clock);
+        tracker.SetConnected(true, t0);
+        clock.Advance(TimeSpan.FromSeconds(20));
+
+        tracker.OnInfoSnapshot("PETR4", 30m, null, t0.AddSeconds(1));
+
+        var availability = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.False(availability.IsEligible);
+        Assert.Equal(FeedUnavailableReason.StaleReference, availability.UnavailableReason);
+        Assert.Equal(TimeSpan.FromSeconds(19), availability.ReferenceAge);
+        Assert.Equal(t0.AddSeconds(1), availability.LastValidMark?.ReceivedAtUtc);
+    }
+
+    [Fact]
+    public void StrictAvailability_EpochAndMaxAgeBoundariesAreInclusive()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new ManualTimeProvider(t0);
+        var tracker = new MarketPriceTracker(clock);
+        tracker.SetConnected(true, t0);
+        tracker.OnTrade("PETR4", 30m, t0);
+        clock.Advance(TimeSpan.FromSeconds(10));
+
+        Assert.True(tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).IsEligible);
+
+        clock.Advance(TimeSpan.FromTicks(1));
+        Assert.Equal(
+            FeedUnavailableReason.StaleReference,
+            tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).UnavailableReason);
+    }
+
+    [Fact]
+    public void StrictAvailability_FutureTimestampNeverBecomesEligibleWithoutNewEvent()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new ManualTimeProvider(t0);
+        var tracker = new MarketPriceTracker(clock);
+        tracker.SetConnected(true, t0);
+
+        tracker.OnTrade("PETR4", 30m, t0.AddSeconds(1));
+        Assert.Equal(
+            FeedUnavailableReason.AwaitingCurrentEpochReference,
+            tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).UnavailableReason);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(
+            FeedUnavailableReason.AwaitingCurrentEpochReference,
+            tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).UnavailableReason);
+
+        tracker.OnTrade("PETR4", 31m, clock.GetUtcNow());
+        Assert.True(tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).IsEligible);
     }
 
     [Fact]

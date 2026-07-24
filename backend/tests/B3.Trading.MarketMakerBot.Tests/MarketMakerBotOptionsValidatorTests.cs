@@ -151,6 +151,50 @@ public class MarketMakerBotOptionsValidatorTests
     }
 
     [Theory]
+    [InlineData("http://marketdata.test/ws")]
+    [InlineData("https://marketdata.test/ws")]
+    [InlineData("file:///marketdata.sock")]
+    public void Validate_RejectsNonWebSocketSchemesForEitherPolicy(string wsUrl)
+    {
+        foreach (var policy in Enum.GetValues<FeedLossPolicy>())
+        {
+            var options = Options();
+            options.MarketData = new MarketDataOptions
+            {
+                FeedLossPolicy = policy,
+                WsUrl = wsUrl,
+                MaxReferenceAge = TimeSpan.FromSeconds(10),
+            };
+
+            var result = _validator.Validate(null, options);
+
+            Assert.False(result.Succeeded);
+            Assert.Contains(result.Failures!, failure => failure.Contains("ws:// or wss://", StringComparison.Ordinal));
+        }
+        Assert.False(MarketDataOptionsValidation.TryGetWebSocketUri(wsUrl, out _));
+    }
+
+    [Theory]
+    [InlineData("ws://marketdata.test/ws")]
+    [InlineData("wss://marketdata.test/ws")]
+    [InlineData("WS://marketdata.test/ws")]
+    [InlineData("WSS://marketdata.test/ws")]
+    public void Validate_AcceptsWebSocketSchemesCaseInsensitively(string wsUrl)
+    {
+        var options = Options();
+        options.MarketData = new MarketDataOptions
+        {
+            FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+            WsUrl = wsUrl,
+            MaxReferenceAge = TimeSpan.FromSeconds(10),
+        };
+
+        Assert.True(_validator.Validate(null, options).Succeeded);
+        Assert.True(MarketDataOptionsValidation.TryGetWebSocketUri(wsUrl, out var uri));
+        Assert.NotNull(uri);
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(-1)]
     public void Validate_PauseAndCancel_RequiresPositiveMaxReferenceAge(int seconds)

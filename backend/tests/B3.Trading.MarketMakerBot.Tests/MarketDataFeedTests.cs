@@ -348,6 +348,64 @@ public class MarketDataFeedTests
         Assert.True(tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).IsEligible);
     }
 
+    [Fact]
+    public async Task SdkCallbacks_PreserveReceivedUtcAndRejectQueuedPreviousEpochEvent()
+    {
+        var t0 = DateTimeOffset.Parse("2026-07-24T00:00:00Z");
+        var clock = new ManualTimeProvider(t0);
+        var tracker = new MarketPriceTracker(clock);
+        var options = Options.Create(new MarketMakerBotOptions
+        {
+            Instruments = [new InstrumentConfig { Symbol = "PETR4" }],
+        });
+        var estimator = new VolatilitySpreadEstimator(options, clock);
+        var client = new FakeMarketDataClient();
+        await using var feed = new MarketDataFeed(
+            tracker,
+            estimator,
+            NullLogger.Instance,
+            clock,
+            new FakeMarketDataClientFactory(client));
+        await feed.StartAsync(
+            new MarketDataOptions
+            {
+                WsUrl = "ws://marketdata.test/ws",
+                FeedLossPolicy = FeedLossPolicy.PauseAndCancel,
+                MaxReferenceAge = TimeSpan.FromSeconds(10),
+            },
+            options.Value.Instruments,
+            NullLoggerFactory.Instance,
+            CancellationToken.None);
+        client.RaiseTrade(new TradeEvent(1, "PETR4", 30m, 100, 1, t0.UtcDateTime));
+        Assert.True(tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10)).IsEligible);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        client.RaiseConnectionState(new ConnectionStateChangedEvent(
+            ConnectionState.Reconnecting,
+            null,
+            t0.AddSeconds(1).UtcDateTime));
+        client.RaiseConnectionState(new ConnectionStateChangedEvent(
+            ConnectionState.Connected,
+            null,
+            t0.AddSeconds(2).UtcDateTime));
+        client.RaiseTrade(new TradeEvent(1, "PETR4", 29m, 100, 2, t0.UtcDateTime));
+
+        var delayed = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.Equal(FeedUnavailableReason.AwaitingCurrentEpochReference, delayed.UnavailableReason);
+        Assert.Equal(t0, delayed.LastValidMark?.ReceivedAtUtc);
+
+        client.RaiseInfoSnapshot(new InfoSnapshotEvent
+        {
+            Symbol = "PETR4",
+            TradingReferencePrice = 31m,
+            ReceivedUtc = t0.AddSeconds(2).UtcDateTime,
+        });
+        var restored = tracker.GetAvailability("PETR4", TimeSpan.FromSeconds(10));
+        Assert.True(restored.IsEligible);
+        Assert.Equal(t0.AddSeconds(2), restored.LastValidMark?.ReceivedAtUtc);
+        Assert.Equal(ReferencePriceSource.TradingReferencePrice, restored.LastValidMark?.Source);
+    }
+
     private sealed class FakeMarketDataClientFactory(params FakeMarketDataClient[] clients)
         : IMarketDataClientFactory
     {
@@ -434,5 +492,10 @@ public class MarketDataFeedTests
             Disposed = true;
             return ValueTask.CompletedTask;
         }
+
+        public void RaiseTrade(TradeEvent value) => _trade?.Invoke(value);
+        public void RaiseInfoSnapshot(InfoSnapshotEvent value) => _infoSnapshot?.Invoke(value);
+        public void RaiseConnectionState(ConnectionStateChangedEvent value) =>
+            _connectionStateChanged?.Invoke(value);
     }
 }
