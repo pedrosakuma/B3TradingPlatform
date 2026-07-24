@@ -171,8 +171,13 @@ internal sealed class MarketMakerWorker : BackgroundService
         switch (ev)
         {
             case UpModels.OrderAccepted a:
+                // LeavesQty is not guaranteed to be populated on this ER
+                // shape — confirmed empirically the venue omits it
+                // entirely on the New ack — so it must never be defaulted
+                // to zero via `??` (see OrderTracker.OnAccepted's doc
+                // comment for the duplicate-order bug this caused).
                 _tracker.SetOrderId(a.ClOrdID.Value, a.OrderId);
-                _tracker.OnAccepted(a.ClOrdID.Value, (long)(a.LeavesQty ?? 0UL));
+                _tracker.OnAccepted(a.ClOrdID.Value, a.LeavesQty is { } aLeaves ? (long)aLeaves : null);
                 break;
             case UpModels.OrderTrade t:
                 {
@@ -180,11 +185,17 @@ internal sealed class MarketMakerWorker : BackgroundService
                     var known = _tracker.TryGet(t.ClOrdID.Value, out var o);
                     var symbol = known ? o.Symbol : "?";
                     MarketMakerMetrics.Fills.Add(1, new KeyValuePair<string, object?>("symbol", symbol));
-                    _tracker.OnTrade(t.ClOrdID.Value, (long)(t.LeavesQty ?? 0UL));
+                    // The authoritative "is this order done" signal is
+                    // OrderStatus (Filled vs PartiallyFilled), not
+                    // LeavesQty — same rationale as OrderAccepted above;
+                    // an absent/null LeavesQty on a partial fill must not
+                    // be misread as "fully filled".
+                    var isFilled = t.OrderStatus == UpModels.OrderStatus.Filled;
+                    _tracker.OnTrade(t.ClOrdID.Value, isFilled, t.LeavesQty is { } tLeaves ? (long)tLeaves : null);
                     // Fully filled → immediately re-quote the same side so
                     // our side of the book never goes empty. Partial fills
                     // stay resting (still working at the same price).
-                    if (known && (t.LeavesQty ?? 0UL) == 0UL)
+                    if (known && isFilled)
                         await RequoteAsync(client, o.Symbol, o.IsBuy, ct);
                     break;
                 }
@@ -281,8 +292,28 @@ internal sealed class MarketMakerWorker : BackgroundService
                     break;
                 }
             case UpModels.OrderModified m:
+                // The bot never sends a ReplaceOrderRequest (it only ever
+                // submits New/Cancel), so ANY OrderModified/ExecType=Replaced
+                // it receives is, by construction, unsolicited from its own
+                // perspective — the venue restating the order for reasons
+                // the bot didn't ask for and doesn't model (e.g. a priority
+                // timestamp reset). Mirroring B3.Trading.Application's own
+                // hard-learned lesson for the same ExecType (see
+                // ExecutionReportProcessor's ExecKind.Replaced case, #122:
+                // "unsolicited Replaced ER ... leave the original alone"),
+                // this must NOT feed LeavesQty into OnAccepted/Close: the
+                // SDK gives no documented guarantee that LeavesQty is
+                // present (as opposed to null-defaulted-to-zero via `??`)
+                // on this particular ER shape, and wrongly treating an
+                // absent/stale value as "fully filled" here closes the
+                // tracker's view of a still-genuinely-resting order —
+                // freeing its (symbol, side) reservation without the venue
+                // ever actually cancelling it, so the next reconcile tick
+                // adds a duplicate resting order alongside the original
+                // (see pedrosakuma/B3EntryPointClient#228). Only the
+                // venue OrderId denormalization is safe to apply
+                // unconditionally.
                 _tracker.SetOrderId(m.ClOrdID.Value, m.OrderId);
-                _tracker.OnAccepted(m.ClOrdID.Value, (long)(m.LeavesQty ?? 0UL));
                 break;
         }
     }

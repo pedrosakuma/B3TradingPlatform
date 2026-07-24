@@ -39,11 +39,11 @@ public class OrderTrackerTests
     }
 
     [Fact]
-    public void OnTrade_LeavesZero_ClosesOrder()
+    public void OnTrade_Filled_ClosesOrder()
     {
         var t = new OrderTracker();
         t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, true);
-        t.OnTrade(1UL, leaves: 0);
+        t.OnTrade(1UL, isFilled: true, leaves: 0);
         Assert.Equal(0, t.InFlightCount("PETR4"));
     }
 
@@ -52,8 +52,34 @@ public class OrderTrackerTests
     {
         var t = new OrderTracker();
         t.TryRegisterSubmit(1UL, "PETR4", 30m, 200, true);
-        t.OnTrade(1UL, leaves: 100);
+        t.OnTrade(1UL, isFilled: false, leaves: 100);
         Assert.Equal(1, t.InFlightCount("PETR4"));
+    }
+
+    [Fact]
+    public void OnTrade_FilledWithNullLeaves_StillCloses()
+    {
+        // Regression guard: isFilled (derived from the ER's authoritative
+        // OrderStatus) drives closing, not the informational leaves value
+        // — a Filled trade must close even if LeavesQty wasn't supplied.
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, true);
+        t.OnTrade(1UL, isFilled: true, leaves: null);
+        Assert.Equal(0, t.InFlightCount("PETR4"));
+    }
+
+    [Fact]
+    public void OnTrade_PartialFillWithNullLeaves_DoesNotMiscloseOrder()
+    {
+        // Regression test for the duplicate-order bug: a PartiallyFilled
+        // trade ER with an absent/null LeavesQty must NOT be treated as
+        // "zero remaining" — it must leave the order open, exactly like
+        // OnAccepted_AcceptedWithNullLeaves_StaysOpen below.
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 200, true);
+        t.OnTrade(1UL, isFilled: false, leaves: null);
+        Assert.Equal(1, t.InFlightCount("PETR4"));
+        Assert.True(t.HasOpenSide("PETR4", isBuy: true));
     }
 
     [Fact]
@@ -72,6 +98,26 @@ public class OrderTrackerTests
         t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, true);
         t.OnAccepted(1UL, leaves: 100);
         Assert.Equal(1, t.InFlightCount("PETR4"));
+    }
+
+    [Fact]
+    public void OnAccepted_NullLeaves_StaysOpenUsingRegisteredQuantity()
+    {
+        // Regression test for the duplicate-order bug (RFC #703 follow-up):
+        // the real venue's OrderAccepted (ExecType=New) empirically omits
+        // LeavesQty entirely. A null value here must never be treated as
+        // "zero remaining" — doing so incorrectly closed the tracker's
+        // view of a still-genuinely-resting order, freeing its (symbol,
+        // side) reservation so the next ReconcileLoopAsync tick submitted
+        // a duplicate order alongside it (see pedrosakuma/B3EntryPointClient#228).
+        var t = new OrderTracker();
+        t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, true);
+        t.OnAccepted(1UL, leaves: null);
+
+        Assert.Equal(1, t.InFlightCount("PETR4"));
+        Assert.True(t.HasOpenSide("PETR4", isBuy: true));
+        Assert.True(t.TryGet(1UL, out var order));
+        Assert.Equal(100, order.Leaves); // falls back to the registered quantity, not 0.
     }
 
     [Fact]

@@ -355,23 +355,50 @@ public sealed class OrderTracker
             }
     }
 
-    public void OnAccepted(ulong clOrdId, long leaves)
+    /// <summary>
+    /// Records the venue's New-status acceptance of a just-submitted
+    /// order. <paramref name="leaves"/> is <c>null</c> when the ER
+    /// doesn't carry a LeavesQty value at all — confirmed empirically
+    /// against the real venue, whose OrderAccepted (ExecType=New) omits
+    /// LeavesQty/CumQty entirely rather than echoing the submitted
+    /// quantity. A null value here must NEVER be treated as "zero
+    /// remaining"/filled: OrderAccepted's ExecType is always New (a
+    /// fill is only ever reported via a subsequent OrderTrade), so this
+    /// always keeps the order open — closing it here based on a
+    /// null-defaulted-to-zero leaves value was the root cause of an
+    /// unbounded duplicate-order bug (the reservation was freed for a
+    /// still-genuinely-resting order, so the next ReconcileLoopAsync
+    /// tick submitted a duplicate alongside it; see
+    /// pedrosakuma/B3EntryPointClient#228). <see cref="TryRegisterSubmit"/>
+    /// already seeds Leaves with the submitted quantity, so omitting the
+    /// update here when unknown keeps that accurate best-effort value.
+    /// </summary>
+    public void OnAccepted(ulong clOrdId, long? leaves)
     {
         if (_orders.TryGetValue(clOrdId, out var o))
         {
-            o.Leaves = leaves;
-            if (leaves > 0) o.IsOpen = true;
-            else Close(o);
+            if (leaves is { } l) o.Leaves = l;
+            o.IsOpen = true;
         }
     }
 
-    public void OnTrade(ulong clOrdId, long leaves)
+    /// <summary>
+    /// Records a trade (fill) execution report. <paramref name="isFilled"/>
+    /// — derived by the caller from the ER's authoritative OrderStatus
+    /// field (Filled vs PartiallyFilled), NOT from LeavesQty — is what
+    /// decides whether the order closes. <paramref name="leaves"/> is
+    /// purely informational (best-effort display/staleness-guard value)
+    /// and, like <see cref="OnAccepted"/>, a <c>null</c> value here is
+    /// never treated as zero: an absent LeavesQty on a PartiallyFilled
+    /// trade must not misclose a still-resting order.
+    /// </summary>
+    public void OnTrade(ulong clOrdId, bool isFilled, long? leaves)
     {
         if (_orders.TryGetValue(clOrdId, out var o))
         {
-            o.Leaves = leaves;
-            if (leaves > 0) o.IsOpen = true;
-            else Close(o);
+            if (leaves is { } l) o.Leaves = l;
+            if (isFilled) Close(o);
+            else o.IsOpen = true;
         }
     }
 
