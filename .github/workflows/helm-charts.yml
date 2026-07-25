@@ -91,7 +91,7 @@ jobs:
         if: matrix.chart == 'b3-market-maker-bot'
         run: |
           helm template ci charts/b3-market-maker-bot \
-            --set-json 'behaviour={"cancelAckTimeout":"00:00:15"}'
+            --set-json 'behaviour={"cancelAckTimeout":"00:00:15","startupCleanupTimeout":"00:03:00"}'
 
       - name: Assert market-maker default image is promoted
         if: matrix.chart == 'b3-market-maker-bot'

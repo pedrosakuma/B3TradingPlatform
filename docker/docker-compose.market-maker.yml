@@ -109,6 +109,10 @@ services:
       # after this bounded acknowledgement window; MinRequoteInterval remains
       # the secondary anti-churn guard.
       MarketMaker__CancelAckTimeout: "00:00:10"
+      # Startup mass-cancel may drain the venue's full 100k-order cap before
+      # the peer sequence fence confirms there was no follow-up SystemBusy
+      # reject. Keep this separate from normal single-cancel recovery.
+      MarketMaker__StartupCleanupTimeout: "00:05:00"
       # Gross/pre-fee process-local P&L snapshots. Unrealized P&L is
       # omitted unless the connected live mark is newer than MarkMaxAge.
       MarketMaker__Telemetry__SnapshotInterval: "00:00:30"

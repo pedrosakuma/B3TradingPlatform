@@ -79,6 +79,10 @@ behaviour:
   # Clears a lost cancel acknowledgement's pending marker after this window,
   # retaining a bounded correlation tombstone so late ERs remain safe.
   cancelAckTimeout: "00:00:10"
+  # Startup cleanup can produce up to 100k cancellation ERs. The bot waits
+  # for their ordered FIXP stream and the peer sequence fence without
+  # weakening the normal single-cancel retry window above.
+  startupCleanupTimeout: "00:05:00"
 
 # ── Position/P&L observability ───────────────────────────────────────────────
 observability:

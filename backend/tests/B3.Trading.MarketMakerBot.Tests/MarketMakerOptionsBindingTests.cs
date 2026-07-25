@@ -84,6 +84,18 @@ public class MarketMakerOptionsBindingTests
         Assert.Equal(TimeSpan.FromMilliseconds(250), options.MinRequoteInterval);
     }
 
+    [Fact]
+    public void StartupCleanupTimeoutOverrideBindsWithoutChangingCancelAckTimeout()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:StartupCleanupTimeout"] = "00:03:00",
+        });
+
+        Assert.Equal(TimeSpan.FromMinutes(3), options.StartupCleanupTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(10), options.CancelAckTimeout);
+    }
+
     private static MarketMakerBotOptions Bind(Dictionary<string, string?> values)
     {
         var configuration = new ConfigurationBuilder()

@@ -275,6 +275,23 @@ still close it, while late rejects of expired cancel IDs are recognized as
 cancel rejects and cannot free the original order as if they rejected a new
 submit. `MinRequoteInterval` continues to throttle strategy/feed retries.
 
+Startup cleanup has a separate, deliberately longer bound:
+
+```yaml
+MarketMaker__StartupCleanupTimeout: "00:05:00"
+```
+
+After FIXP establishment, the bot mass-cancels all orders owned by the session
+before starting market data or submitting quotes. Matching acknowledges the
+request before enqueueing the cancel work, so the bot also waits for the
+ordered peer sequence fence that rules out a correlated `SystemBusy`
+`BusinessReject`. A legacy session can contain 100,000 orders; their bounded
+SDK event stream is drained sequentially and matching suppresses its sequence
+heartbeat while cancellation ER traffic is active. Five minutes leaves
+production headroom for that burst without weakening the 10-second
+single-order cancel retry policy. Timeout, rejection, or event-stream failure
+terminates startup without quoting.
+
 Inventory skew is opt-in and defaults off independently for every
 instrument:
 
