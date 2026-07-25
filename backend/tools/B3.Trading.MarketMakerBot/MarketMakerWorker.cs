@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using B3.EntryPoint.Client.Fixp;
 using UpModels = B3.EntryPoint.Client.Models;
 using UpState = B3.EntryPoint.Client.State;
 
@@ -45,7 +46,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _pricingContextFailureRetries =
         new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<ulong, TaskCompletionSource<UpModels.MassActionExecuted>>
+    private readonly ConcurrentDictionary<ulong, StartupCleanupAwaiter>
         _massActionReports = new();
     private readonly HashSet<string> _configuredSymbols;
     private readonly ConcurrentDictionary<string, FeedAvailabilityObservation> _feedAvailability =
@@ -178,17 +179,33 @@ internal sealed class MarketMakerWorker : BackgroundService
         var receive = ReceiveLoopAsync(client, ct);
 
         await CleanupLegacySessionOrdersAsync(client, receive, ct);
+        await Task.Yield();
+        await ThrowIfReceiveLoopStoppedAsync(receive);
 
         // Market data and all normal quoting deliberately start only after
         // the venue has accepted the session-scoped cleanup.
-        await _marketData.StartAsync(_options.MarketData, _options.Instruments, _loggerFactory, ct);
+        await AwaitWhileReceiveLoopActiveAsync(
+            operationToken => _marketData.StartAsync(
+                _options.MarketData,
+                _options.Instruments,
+                _loggerFactory,
+                operationToken),
+            receive,
+            ct);
 
         foreach (var instr in _options.Instruments)
         {
-            await QuoteSideAsync(client, instr, isBuy: true, ct);
-            await QuoteSideAsync(client, instr, isBuy: false, ct);
+            await AwaitWhileReceiveLoopActiveAsync(
+                operationToken => QuoteSideAsync(client, instr, isBuy: true, operationToken),
+                receive,
+                ct);
+            await AwaitWhileReceiveLoopActiveAsync(
+                operationToken => QuoteSideAsync(client, instr, isBuy: false, operationToken),
+                receive,
+                ct);
         }
 
+        await ThrowIfReceiveLoopStoppedAsync(receive);
         return receive;
     }
 
@@ -197,6 +214,10 @@ internal sealed class MarketMakerWorker : BackgroundService
         Task receiveLoop,
         CancellationToken ct)
     {
+        var keepAlive = client.KeepAlive
+            ?? throw new InvalidOperationException(
+                "FIXP keep-alive scheduler is unavailable after session establishment.");
+        var outboundSeqNum = await AwaitNextOutboundSequenceAsync(keepAlive, receiveLoop, ct);
         var clOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
         var request = new UpModels.MassActionRequest
         {
@@ -204,49 +225,54 @@ internal sealed class MarketMakerWorker : BackgroundService
             ActionType = UpModels.MassActionType.CancelOrders,
             Scope = UpModels.MassActionScope.AllOrdersForATradingSession,
         };
-        var reportSource = new TaskCompletionSource<UpModels.MassActionExecuted>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_massActionReports.TryAdd(clOrdId, reportSource))
+        var cleanupAwaiter = new StartupCleanupAwaiter(outboundSeqNum);
+        if (!_massActionReports.TryAdd(clOrdId, cleanupAwaiter))
             throw new InvalidOperationException($"Duplicate startup cleanup ClOrdID {clOrdId}.");
+        EventHandler<SequenceFrameEventArgs> peerSequenceHandler =
+            (_, args) => cleanupAwaiter.ObservePeerSequence(args.NextSeqNo);
+        keepAlive.SequenceFrameReceived += peerSequenceHandler;
 
         try
         {
             _log.LogInformation(
-                "[mm] cancelling legacy orders for FIXP session before starting market data or quoting clordid={ClOrdId}",
-                clOrdId);
+                "[mm] cancelling legacy orders for FIXP session before starting market data or quoting clordid={ClOrdId} outboundSeqNum={OutboundSeqNum}",
+                clOrdId,
+                outboundSeqNum);
 
             // SDK 0.17.0 returns a transport-level synthetic MassActionReport,
             // while the real venue report is published as MassActionExecuted.
-            // Require both so a write failure and a venue rejection each fail
-            // startup closed.
+            // Matching writes ACCEPTED before attempting EnqueueMassCancel and
+            // follows it with BusinessReject(SystemBusy) on enqueue/WAL failure.
+            // Require a sequence fence beyond ACCEPTED so that follow-up cannot
+            // race normal quoting.
             var requestTask = client.MassActionAsync(request, ct);
-            var cleanup = CompleteCleanupAsync(requestTask, reportSource.Task);
-            var timeout = Task.Delay(_options.CancelAckTimeout, _clock, ct);
+            var cleanup = CompleteCleanupAsync(requestTask, cleanupAwaiter.Completion);
+            var timeout = Task.Delay(_options.StartupCleanupTimeout, _clock, ct);
             await Task.WhenAny(cleanup, receiveLoop, timeout);
+
+            if (receiveLoop.IsCompleted)
+            {
+                await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+            }
 
             if (cleanup.IsCompleted)
             {
                 var report = await cleanup;
+                await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
                 _log.LogInformation(
-                    "[mm] startup legacy-order cleanup accepted reportId={ReportId} clordid={ClOrdId}",
+                    "[mm] startup legacy-order cleanup completed reportId={ReportId} clordid={ClOrdId}",
                     report.MassActionReportId,
                     clOrdId);
                 return;
             }
 
             ct.ThrowIfCancellationRequested();
-            if (receiveLoop.IsCompleted)
-            {
-                await receiveLoop;
-                throw new InvalidOperationException(
-                    "FIXP event stream ended before the startup mass-action report arrived.");
-            }
-
             throw new TimeoutException(
-                $"Startup mass-action report did not arrive within {_options.CancelAckTimeout}.");
+                $"Startup mass-action completion fence did not arrive within {_options.StartupCleanupTimeout}.");
         }
         finally
         {
+            keepAlive.SequenceFrameReceived -= peerSequenceHandler;
             _massActionReports.TryRemove(clOrdId, out _);
         }
 
@@ -272,13 +298,89 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
+    private async Task<ulong> AwaitNextOutboundSequenceAsync(
+        IKeepAliveScheduler keepAlive,
+        Task receiveLoop,
+        CancellationToken ct)
+    {
+        var source = new TaskCompletionSource<ulong>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<SequenceFrameEventArgs> handler =
+            (_, args) => source.TrySetResult(args.NextSeqNo);
+        keepAlive.SequenceFrameSent += handler;
+        try
+        {
+            var timeout = Task.Delay(_options.CancelAckTimeout, _clock, ct);
+            await Task.WhenAny(source.Task, receiveLoop, timeout);
+            if (receiveLoop.IsCompleted)
+                await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+            if (source.Task.IsCompleted)
+                return await source.Task;
+            ct.ThrowIfCancellationRequested();
+            throw new TimeoutException(
+                $"FIXP outbound sequence fence did not arrive within {_options.CancelAckTimeout}.");
+        }
+        finally
+        {
+            keepAlive.SequenceFrameSent -= handler;
+        }
+    }
+
+    private static async Task AwaitWhileReceiveLoopActiveAsync(
+        Func<CancellationToken, Task> operationFactory,
+        Task receiveLoop,
+        CancellationToken ct)
+    {
+        await Task.Yield();
+        await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+        using var operationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var operation = operationFactory(operationCts.Token);
+        await Task.WhenAny(operation, receiveLoop);
+        if (receiveLoop.IsCompleted)
+        {
+            operationCts.Cancel();
+            try { await operation; }
+            catch (OperationCanceledException) when (operationCts.IsCancellationRequested) { }
+            await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+        }
+        await operation;
+        await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+    }
+
+    private static async Task ThrowIfReceiveLoopStoppedAsync(Task receiveLoop)
+    {
+        if (!receiveLoop.IsCompleted) return;
+        await receiveLoop;
+        throw new InvalidOperationException("FIXP event stream ended during market-maker startup.");
+    }
+
     private async Task ReceiveLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
-        await foreach (var ev in client.Events(ct).ConfigureAwait(false))
+        await using var events = client.Events(ct).GetAsyncEnumerator(ct);
+        ulong lastProcessedSeqNum = 0;
+        while (true)
         {
+            var moveNext = events.MoveNextAsync().AsTask();
+            if (!moveNext.IsCompleted)
+            {
+                // Give an immediately-following stream completion/fault a
+                // chance to settle before treating this pending MoveNext as
+                // proof that the receive loop remains live past the event.
+                await Task.Yield();
+                if (!moveNext.IsCompleted)
+                {
+                    foreach (var pendingCleanup in _massActionReports.Values)
+                        pendingCleanup.ObserveReceivePoll(lastProcessedSeqNum);
+                }
+            }
+            if (!await moveNext.ConfigureAwait(false))
+                return;
+
+            var ev = events.Current;
             try
             {
                 await HandleEventAsync(client, ev, ct);
+                lastProcessedSeqNum = ev.SeqNum;
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
@@ -302,8 +404,12 @@ internal sealed class MarketMakerWorker : BackgroundService
         switch (ev)
         {
             case UpModels.MassActionExecuted massAction:
-                if (_massActionReports.TryGetValue(massAction.ClOrdID.Value, out var reportSource))
-                    reportSource.TrySetResult(massAction);
+                if (_massActionReports.TryGetValue(massAction.ClOrdID.Value, out var cleanupAwaiter))
+                    cleanupAwaiter.ObserveMassActionReport(massAction);
+                break;
+            case UpModels.BusinessReject businessReject:
+                foreach (var pendingCleanup in _massActionReports.Values)
+                    pendingCleanup.ObserveBusinessReject(businessReject);
                 break;
             case UpModels.OrderAccepted a:
                 // LeavesQty is not guaranteed to be populated on this ER
@@ -556,6 +662,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                 _orderLifecycle.Synchronize(() => _tracker.SetOrderId(m.ClOrdID.Value, m.OrderId));
                 break;
         }
+
     }
 
     private async Task RequoteAsync(IEntryPointClient client, string symbol, bool isBuy, CancellationToken ct)
@@ -1219,6 +1326,81 @@ internal sealed class MarketMakerWorker : BackgroundService
         bool IsEligible,
         FeedUnavailableReason Reason,
         long ConnectionEpoch);
+
+    private sealed class StartupCleanupAwaiter
+    {
+        private readonly object _gate = new();
+        private readonly ulong _outboundSeqNum;
+        private readonly TaskCompletionSource<UpModels.MassActionExecuted> _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private UpModels.MassActionExecuted? _acceptedReport;
+        private ulong _highestPeerNextSeqNo;
+        private ulong _receivePollAfterSeqNum;
+
+        public StartupCleanupAwaiter(ulong outboundSeqNum) =>
+            _outboundSeqNum = outboundSeqNum;
+
+        public Task<UpModels.MassActionExecuted> Completion => _completion.Task;
+
+        public void ObserveMassActionReport(UpModels.MassActionExecuted report)
+        {
+            if (report.Response != UpModels.MassActionResponse.Accepted)
+            {
+                _completion.TrySetException(new InvalidOperationException(
+                    $"Startup mass action was rejected: {report.RejectReason?.ToString() ?? "unknown"}."));
+                return;
+            }
+
+            lock (_gate)
+            {
+                _acceptedReport = report;
+                TryCompleteLocked();
+            }
+        }
+
+        public void ObserveBusinessReject(UpModels.BusinessReject reject)
+        {
+            if (reject.RefSeqNum != _outboundSeqNum) return;
+            _completion.TrySetException(new InvalidOperationException(
+                $"Startup mass action received BusinessReject reason={reject.RejectReason}: {reject.Text ?? "unknown"}."));
+        }
+
+        public void ObservePeerSequence(ulong nextSeqNo)
+        {
+            lock (_gate)
+            {
+                if (nextSeqNo > _highestPeerNextSeqNo)
+                    _highestPeerNextSeqNo = nextSeqNo;
+                TryCompleteLocked();
+            }
+        }
+
+        public void ObserveReceivePoll(ulong afterSeqNum)
+        {
+            lock (_gate)
+            {
+                if (afterSeqNum > _receivePollAfterSeqNum)
+                    _receivePollAfterSeqNum = afterSeqNum;
+                TryCompleteLocked();
+            }
+        }
+
+        private void TryCompleteLocked()
+        {
+            // Matching suppresses Sequence heartbeats while outbound business
+            // traffic is active. Its next advertised app sequence therefore
+            // fences the synchronous enqueue decision: a follow-up BMR would
+            // consume one of the sequence numbers below NextSeqNo. Requiring
+            // the receive loop to be polling after that range ensures every
+            // such event has been handled before startup can proceed.
+            if (_acceptedReport is { } accepted &&
+                _highestPeerNextSeqNo > accepted.SeqNum &&
+                _receivePollAfterSeqNum >= _highestPeerNextSeqNo - 1)
+            {
+                _completion.TrySetResult(accepted);
+            }
+        }
+    }
 
     private InstrumentConfig? FindInstrument(string symbol)
     {

@@ -55,6 +55,7 @@ public class MarketMakerOptionsBindingTests
         Assert.Equal(FeedLossPolicy.StaticRefPrice, options.MarketData.FeedLossPolicy);
         Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
         Assert.Equal(TimeSpan.FromSeconds(10), options.CancelAckTimeout);
+        Assert.Equal(TimeSpan.FromMinutes(5), options.StartupCleanupTimeout);
     }
 
     [Fact]

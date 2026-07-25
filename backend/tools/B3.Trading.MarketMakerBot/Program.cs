@@ -26,6 +26,8 @@ builder.Services
     .Validate(o => o.MaxOrderAge > TimeSpan.Zero, "MarketMaker:MaxOrderAge must be positive.")
     .Validate(o => o.MinRequoteInterval > TimeSpan.Zero, "MarketMaker:MinRequoteInterval must be positive.")
     .Validate(o => o.CancelAckTimeout > TimeSpan.Zero, "MarketMaker:CancelAckTimeout must be positive.")
+    .Validate(o => o.StartupCleanupTimeout > TimeSpan.Zero,
+        "MarketMaker:StartupCleanupTimeout must be positive.")
     .Validate(o => o.Telemetry.SnapshotInterval > TimeSpan.Zero,
         "MarketMaker:Telemetry:SnapshotInterval must be positive.")
     .Validate(o => o.Telemetry.MarkMaxAge > TimeSpan.Zero,

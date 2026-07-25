@@ -103,6 +103,14 @@ public sealed class MarketMakerBotOptions
     /// </summary>
     public TimeSpan CancelAckTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Maximum startup wait for the session mass-cancel report, its
+    /// BusinessReject exclusion fence, and the resulting cancellation ER
+    /// burst. Sized separately from a single-order cancel because a legacy
+    /// session may contain up to the venue's 100k open-order cap.
+    /// </summary>
+    public TimeSpan StartupCleanupTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
     [Required, MinLength(1)]
     public List<InstrumentConfig> Instruments { get; set; } = new();
 

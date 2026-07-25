@@ -138,6 +138,7 @@ public class MarketMakerWorkerTests : IDisposable
         client.MassActionHandler = (request, _) =>
         {
             client.Publish(MassActionEvent(request, MassActionResponse.Accepted));
+            client.PublishPeerSequence(nextSeqNo: 2);
             return Task.FromResult(MassActionSendResult(request));
         };
 
@@ -153,6 +154,90 @@ public class MarketMakerWorkerTests : IDisposable
 
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => receive);
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_AcceptedThenCorrelatedBusinessRejectFailsClosed()
+    {
+        var (worker, _, client, _) = CreateWorker();
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (request, _) =>
+        {
+            client.Publish(MassActionEvent(request, MassActionResponse.Accepted));
+            client.Publish(new BusinessReject
+            {
+                SeqNum = 2,
+                SendingTime = DateTimeOffset.UtcNow,
+                RefSeqNum = 41,
+                RejectReason = 8,
+                Text = "MassCancel dispatch queue full",
+            });
+            return Task.FromResult(MassActionSendResult(request));
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => worker.PrepareConnectedSessionAsync(client, cts.Token));
+
+        Assert.Contains("BusinessReject", error.Message, StringComparison.Ordinal);
+        Assert.Empty(client.SubmittedOrders);
+        cts.Cancel();
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_AcceptedThenEventStreamCompletionFailsClosed()
+    {
+        var (worker, _, client, _) = CreateWorker();
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (request, _) =>
+        {
+            client.Publish(MassActionEvent(request, MassActionResponse.Accepted));
+            client.PublishPeerSequence(nextSeqNo: 2);
+            client.CompleteEvents();
+            return Task.FromResult(MassActionSendResult(request));
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => worker.PrepareConnectedSessionAsync(client, cts.Token));
+
+        Assert.Contains("event stream ended", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(client.SubmittedOrders);
+        cts.Cancel();
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_EventStreamCompletionDuringQuoteCancelsPriming()
+    {
+        var (worker, _, client, _) = CreateWorker();
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (request, _) =>
+        {
+            client.Publish(MassActionEvent(request, MassActionResponse.Accepted));
+            client.PublishPeerSequence(nextSeqNo: 2);
+            return Task.FromResult(MassActionSendResult(request));
+        };
+        var submitCancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.SubmitHandler = async (_, operationToken) =>
+        {
+            client.CompleteEvents();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, operationToken);
+            }
+            catch (OperationCanceledException) when (operationToken.IsCancellationRequested)
+            {
+                submitCancelled.TrySetResult(true);
+                throw;
+            }
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => worker.PrepareConnectedSessionAsync(client, cts.Token));
+
+        Assert.Contains("event stream ended", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(await submitCancelled.Task.WaitAsync(TimeSpan.FromSeconds(1)));
+        Assert.Single(client.SubmittedOrders);
+        cts.Cancel();
     }
 
     [Fact]

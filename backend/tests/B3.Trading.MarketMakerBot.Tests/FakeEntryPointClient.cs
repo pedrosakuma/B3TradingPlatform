@@ -20,6 +20,7 @@ namespace B3.Trading.MarketMakerBot.Tests;
 /// </summary>
 internal sealed class FakeEntryPointClient : IEntryPointClient
 {
+    private readonly FakeKeepAliveScheduler _keepAlive = new();
     public List<NewOrderRequest> SubmittedOrders { get; } = new();
     public List<CancelOrderRequest> SubmittedCancels { get; } = new();
     public List<MassActionRequest> SubmittedMassActions { get; } = new();
@@ -97,7 +98,7 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
     }
     public FixpClientState State => throw new NotSupportedException();
     public IList<IPreTradeGate> RiskGates => throw new NotSupportedException();
-    public IKeepAliveScheduler KeepAlive => throw new NotSupportedException();
+    public IKeepAliveScheduler KeepAlive => _keepAlive;
     public IRetransmitRequestHandler Retransmit => throw new NotSupportedException();
     public event EventHandler<TerminatedEventArgs>? Terminated
     {
@@ -107,4 +108,36 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     public void Publish(EntryPointEvent ev) => _events.Writer.TryWrite(ev);
+    public void PublishPeerSequence(ulong nextSeqNo) => _keepAlive.PublishReceived(nextSeqNo);
+    public void CompleteEvents() => _events.Writer.TryComplete();
+
+    private sealed class FakeKeepAliveScheduler : IKeepAliveScheduler
+    {
+        private EventHandler<SequenceFrameEventArgs>? _sequenceFrameSent;
+
+        public TimeSpan KeepAliveInterval => TimeSpan.FromSeconds(1);
+        public ulong NextOutboundSeqNum { get; set; } = 41;
+
+        public event EventHandler<SequenceFrameEventArgs>? SequenceFrameSent
+        {
+            add
+            {
+                _sequenceFrameSent += value;
+                value?.Invoke(this, new SequenceFrameEventArgs(
+                    NextOutboundSeqNum,
+                    DateTimeOffset.UtcNow));
+            }
+            remove => _sequenceFrameSent -= value;
+        }
+
+        public event EventHandler<SequenceFrameEventArgs>? SequenceFrameReceived;
+
+        public void Start() { }
+        public void Stop() { }
+
+        public void PublishReceived(ulong nextSeqNo) =>
+            SequenceFrameReceived?.Invoke(this, new SequenceFrameEventArgs(
+                nextSeqNo,
+                DateTimeOffset.UtcNow));
+    }
 }
