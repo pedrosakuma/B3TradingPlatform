@@ -65,6 +65,180 @@ soak_metric_sample() {
     '
 }
 
+soak_duration_to_seconds() {
+    local duration="$1"
+    [[ "$duration" =~ ^([0-9]+):([0-5][0-9]):([0-5][0-9])$ ]] || return 1
+    printf '%s\n' "$((10#${BASH_REMATCH[1]} * 3600 +
+        10#${BASH_REMATCH[2]} * 60 +
+        10#${BASH_REMATCH[3]}))"
+}
+
+soak_validate_strict_refresh_timing() {
+    local max_age_seconds="$1" interval_seconds="$2" margin_seconds="$3"
+    local telemetry_cycle_seconds="$4"
+    ((max_age_seconds > 0)) &&
+        ((interval_seconds > 0)) &&
+        ((margin_seconds >= telemetry_cycle_seconds)) &&
+        ((interval_seconds + margin_seconds < max_age_seconds))
+}
+
+soak_evaluate_strict_freshness() {
+    jq -c '
+      . as $evidence |
+      ($evidence.configuredSymbols // []) as $symbols |
+      ($evidence.refreshes // []) as $refreshes |
+      ($evidence.metricSamples // []) as $samples |
+      ($evidence.maxReferenceAgeSeconds // 0) as $maxAge |
+      ($evidence.refreshIntervalSeconds // 0) as $interval |
+      ($evidence.refreshMarginSeconds // 0) as $margin |
+      ["outage-settled","outage-hold","reconnected-no-reference"] as $excludedPhases |
+      [
+        $samples[] |
+        select(.metric == "bot_market_data_reference_eligible_current") |
+        select(.phase as $phase | $excludedPhases | index($phase) | not) |
+        . as $eligible |
+        [
+          $samples[] |
+          select(.timestamp_utc == $eligible.timestamp_utc) |
+          select(.phase == $eligible.phase) |
+          select(.metric == "bot_market_data_reference_age_seconds") |
+          select(.labels.symbol == $eligible.labels.symbol)
+        ] as $ageRows |
+        {
+          timestampUtc: $eligible.timestamp_utc,
+          phase: $eligible.phase,
+          symbol: $eligible.labels.symbol,
+          eligible: $eligible.value,
+          referenceAgeSeconds: (
+            if ($ageRows | length) == 0 then null
+            else ($ageRows | map(.value) | min)
+            end
+          ),
+          passed: (
+            $eligible.value == 1 and
+            ($ageRows | length) > 0 and
+            ($ageRows | map(.value) | min) < $maxAge
+          )
+        }
+      ] as $observations |
+      def segment_phases($segment):
+        if $segment == "pre-outage" then
+          ["initial","warmup","warmup-complete","pre-outage-stabilization","pre-outage"]
+        else ["recovered","duration","final"]
+        end;
+      [
+        $symbols[] as $symbol |
+        {
+          symbol: $symbol,
+          count: ([$refreshes[] | select(.symbol == $symbol)] | length),
+          timestampsUtc: [
+            $refreshes[] | select(.symbol == $symbol) | .timestampUtc
+          ],
+          segments: [
+            ["pre-outage","post-recovery"][] as $segment |
+            ([
+              $refreshes[] |
+              select(.symbol == $symbol and .segment == $segment)
+            ]) as $segmentRows |
+            ($segmentRows | map(.timestampUtc | fromdateiso8601) | sort) as $times |
+            ([
+              $observations[] |
+              select(.symbol == $symbol) |
+              select(.phase as $phase | segment_phases($segment) | index($phase)) |
+              (.timestampUtc | fromdateiso8601)
+            ] | sort) as $windowTimes |
+            (
+              if ($times | length) == 0 or ($windowTimes | length) == 0 then []
+              else
+                ([range(1; $times | length) |
+                  $times[.] - $times[. - 1]]) +
+                [([0, ($times[0] - $windowTimes[0])] | max)] +
+                [([0, (($windowTimes | last) - ($times | last))] | max)]
+              end
+            ) as $gaps |
+            {
+              segment: $segment,
+              count: ($times | length),
+              timestampsUtc: ($segmentRows | map(.timestampUtc)),
+              directionCounts: {
+                tradingBuys: (
+                  [$segmentRows[] | select(.direction == "trading-buys")] | length
+                ),
+                counterpartyBuys: (
+                  [$segmentRows[] | select(.direction == "counterparty-buys")] | length
+                )
+              },
+              windowStartUtc: (
+                if ($windowTimes | length) == 0 then null
+                else ($windowTimes[0] | todateiso8601)
+                end
+              ),
+              windowEndUtc: (
+                if ($windowTimes | length) == 0 then null
+                else (($windowTimes | last) | todateiso8601)
+                end
+              ),
+              maxGapSeconds: (
+                if ($gaps | length) == 0 then null else ($gaps | max) end
+              ),
+              passed: (
+                ($times | length) > 0 and
+                ($windowTimes | length) > 0 and
+                ($gaps | length) > 0 and
+                ($gaps | max) <= ($interval + $margin) and
+                ($gaps | max) < $maxAge and
+                (([
+                  ([$segmentRows[] | select(.direction == "trading-buys")] | length) -
+                    ([$segmentRows[] | select(.direction == "counterparty-buys")] | length),
+                  ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) -
+                    ([$segmentRows[] | select(.direction == "trading-buys")] | length)
+                ] | max) <= 1)
+              )
+            }
+          ]
+        }
+      ] as $refreshSummary |
+      [
+        $symbols[] as $symbol |
+        {
+          symbol: $symbol,
+          sampleCount: ([$observations[] | select(.symbol == $symbol)] | length),
+          failedSamples: [
+            $observations[] |
+            select(.symbol == $symbol and (.passed | not))
+          ],
+          passed: (
+            ([$observations[] | select(.symbol == $symbol)] | length) > 0 and
+            all($observations[] | select(.symbol == $symbol); .passed)
+          )
+        }
+      ] as $symbolFreshness |
+      {
+        passed: (
+          ($symbols | length) > 0 and
+          $interval > 0 and
+          $margin > 0 and
+          ($interval + $margin) < $maxAge and
+          all($refreshSummary[]; .count > 0 and all(.segments[]; .passed)) and
+          all($symbolFreshness[]; .passed)
+        ),
+        expected: {
+          configuredSymbols: $symbols,
+          maxReferenceAgeSeconds: $maxAge,
+          refreshIntervalSeconds: $interval,
+          refreshMarginSeconds: $margin,
+          maximumPermittedObservedGapSeconds: ($interval + $margin),
+          excludedIntentionalPhases: $excludedPhases,
+          requirement:
+            "every configured symbol remains eligible and below MaxReferenceAge outside intentional outage/reconnect phases"
+        },
+        refreshSummary: $refreshSummary,
+        symbolFreshness: $symbolFreshness,
+        observations: $observations
+      }
+    '
+}
+
 soak_run_required_phase_step() {
     local phase="$1" step="$2" function_name="$3" status
     shift 3

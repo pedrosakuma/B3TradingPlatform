@@ -57,6 +57,9 @@ Operator controls:
   SOAK_RECOVERY_CROSS_ATTEMPTS=3
   SOAK_RECOVERY_CROSS_INTERVAL_SECONDS=10
   SOAK_RECONNECT_STALE_HOLD_SECONDS=<derived export+scrape cycle>
+  SOAK_STRICT_REFRESH_INTERVAL_SECONDS=<derived from MaxReferenceAge>
+  SOAK_STRICT_REFRESH_MARGIN_SECONDS=<derived telemetry+execution margin>
+  SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS=5
   SOAK_PRE_OUTAGE_STABILIZATION_CYCLES=2
   SOAK_PRE_OUTAGE_STABILIZATION_INTERVAL_SECONDS=<derived export+scrape cycle>
   SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS=<derived>
@@ -124,6 +127,16 @@ require_uint MM_SOAK_METRIC_EXPORT_INTERVAL_MS "$metric_export_interval_ms"
 readonly prometheus_scrape_interval_seconds=5
 readonly metric_export_interval_seconds="$(((metric_export_interval_ms + 999) / 1000))"
 readonly full_telemetry_cycle_seconds="$((metric_export_interval_seconds + prometheus_scrape_interval_seconds))"
+readonly max_reference_age="${MM_SOAK_MAX_REFERENCE_AGE:-00:00:30}"
+max_reference_age_seconds="$(soak_duration_to_seconds "$max_reference_age")" || {
+    echo "ERROR: MM_SOAK_MAX_REFERENCE_AGE must use HH:MM:SS, got '$max_reference_age'" >&2
+    exit 3
+}
+readonly max_reference_age_seconds
+readonly strict_refresh_cycle_budget_seconds="${SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS:-5}"
+readonly strict_refresh_margin_seconds="${SOAK_STRICT_REFRESH_MARGIN_SECONDS:-$((full_telemetry_cycle_seconds + strict_refresh_cycle_budget_seconds))}"
+readonly derived_strict_refresh_interval_seconds="$(((max_reference_age_seconds - strict_refresh_margin_seconds) / 2))"
+readonly strict_refresh_interval_seconds="${SOAK_STRICT_REFRESH_INTERVAL_SECONDS:-$derived_strict_refresh_interval_seconds}"
 readonly pre_outage_stabilization_cycles="${SOAK_PRE_OUTAGE_STABILIZATION_CYCLES:-2}"
 require_uint SOAK_PRE_OUTAGE_STABILIZATION_CYCLES "$pre_outage_stabilization_cycles"
 readonly pre_outage_stabilization_interval_seconds="${SOAK_PRE_OUTAGE_STABILIZATION_INTERVAL_SECONDS:-$full_telemetry_cycle_seconds}"
@@ -136,15 +149,16 @@ readonly inventory_bias_lots="${SOAK_INVENTORY_BIAS_LOTS:-12}"
 readonly fill_timeout_seconds="${SOAK_FILL_TIMEOUT_SECONDS:-20}"
 readonly trading_user="${SOAK_TRADING_USER:-alice}"
 readonly counterparty_user="${SOAK_COUNTERPARTY_USER:-bob}"
+readonly admin_user="${SOAK_ADMIN_USER:-soak-admin}"
 readonly symbol="${SOAK_SYMBOL:-PETR4}"
 readonly quantity="${SOAK_QUANTITY:-100}"
 readonly marketable_buy_price="${SOAK_MARKETABLE_BUY_PRICE:-32.80}"
 readonly marketable_sell_price="${SOAK_MARKETABLE_SELL_PRICE:-29.30}"
 readonly reference_cross_price="${SOAK_REFERENCE_CROSS_PRICE:-30.00}"
 readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-100000.00}"
-readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-0}"
+readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-$deposit_amount}"
 
-for identity in "$trading_user" "$counterparty_user"; do
+for identity in "$trading_user" "$counterparty_user" "$admin_user"; do
     [[ "$identity" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
         echo "ERROR: soak identities must match ^[A-Za-z0-9][A-Za-z0-9._-]*$" >&2
         exit 3
@@ -154,24 +168,42 @@ done
     echo "ERROR: SOAK_TRADING_USER and SOAK_COUNTERPARTY_USER must differ" >&2
     exit 3
 }
+[[ "$admin_user" != "$trading_user" && "$admin_user" != "$counterparty_user" ]] || {
+    echo "ERROR: SOAK_ADMIN_USER must differ from the trading and counterparty users" >&2
+    exit 3
+}
 
 require_uint SOAK_WARMUP_SECONDS "$warmup_seconds"
 require_uint SOAK_DURATION_SECONDS "$duration_seconds"
 require_uint SOAK_SAMPLE_INTERVAL_SECONDS "$sample_interval_seconds"
+require_uint SOAK_WORKLOAD_INTERVAL_SECONDS "$workload_interval_seconds"
 require_uint SOAK_OUTAGE_SECONDS "$outage_seconds"
 require_uint SOAK_RECOVERY_TIMEOUT_SECONDS "$recovery_timeout_seconds"
 require_uint SOAK_RECOVERY_CROSS_ATTEMPTS "$recovery_cross_attempts"
 require_uint SOAK_RECOVERY_CROSS_INTERVAL_SECONDS "$recovery_cross_interval_seconds"
 require_uint SOAK_INVENTORY_BIAS_LOTS "$inventory_bias_lots"
 require_uint SOAK_FILL_TIMEOUT_SECONDS "$fill_timeout_seconds"
+require_uint SOAK_STRICT_REFRESH_INTERVAL_SECONDS "$strict_refresh_interval_seconds"
+require_uint SOAK_STRICT_REFRESH_MARGIN_SECONDS "$strict_refresh_margin_seconds"
+require_uint SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS "$strict_refresh_cycle_budget_seconds"
 require_bool SOAK_KEEP_STACK "$keep_stack"
 require_bool SOAK_BUILD_IMAGES "$build_images"
 require_bool SOAK_WITH_GRAFANA "$with_grafana"
 (( sample_interval_seconds > 0 )) || { echo "ERROR: sample interval must be positive" >&2; exit 3; }
+(( workload_interval_seconds > 0 )) || { echo "ERROR: workload interval must be positive" >&2; exit 3; }
 (( duration_seconds > 0 )) || { echo "ERROR: duration must be positive" >&2; exit 3; }
 (( recovery_cross_attempts > 0 )) || { echo "ERROR: recovery cross attempts must be positive" >&2; exit 3; }
 (( recovery_cross_interval_seconds > 0 )) || { echo "ERROR: recovery cross interval must be positive" >&2; exit 3; }
 (( metric_export_interval_ms > 0 )) || { echo "ERROR: metric export interval must be positive" >&2; exit 3; }
+(( strict_refresh_cycle_budget_seconds > 0 )) || { echo "ERROR: strict refresh cycle budget must be positive" >&2; exit 3; }
+soak_validate_strict_refresh_timing \
+    "$max_reference_age_seconds" \
+    "$strict_refresh_interval_seconds" \
+    "$strict_refresh_margin_seconds" \
+    "$full_telemetry_cycle_seconds" || {
+    echo "ERROR: strict refresh timing must satisfy interval>0, margin>=one telemetry cycle, and interval+margin<MaxReferenceAge (${strict_refresh_interval_seconds}+${strict_refresh_margin_seconds}<${max_reference_age_seconds})" >&2
+    exit 3
+}
 (( pre_outage_stabilization_cycles >= 2 )) || {
     echo "ERROR: pre-outage stabilization requires at least two full telemetry cycles" >&2
     exit 3
@@ -206,6 +238,7 @@ export MM_SOAK_PROJECT_NAME="$project_name"
 export TRADING_SEED_USER="${TRADING_SEED_USER:-$trading_user}"
 export TRADING_SEED_USER_2="${TRADING_SEED_USER_2:-$counterparty_user}"
 export MM_SOAK_COUNTERPARTY_USER="$counterparty_user"
+export MM_SOAK_ADMIN_USER="$admin_user"
 export TRADING_HOST_PORT="${SOAK_TRADING_HOST_PORT:-15000}"
 export FRONTEND_PORT="${SOAK_FRONTEND_PORT:-18080}"
 export MARKETDATA_PORT="${SOAK_MARKETDATA_PORT:-18081}"
@@ -216,6 +249,8 @@ export ALERTMANAGER_PORT="${SOAK_ALERTMANAGER_PORT:-19093}"
 export ALERT_RECEIVER_PORT="${SOAK_ALERT_RECEIVER_PORT:-18093}"
 export GRAFANA_PORT="${SOAK_GRAFANA_PORT:-13000}"
 export MM_SOAK_SUBNET="${SOAK_SUBNET:-192.168.64.0/24}"
+export MM_SOAK_MAX_REFERENCE_AGE="$max_reference_age"
+export MM_SOAK_MARK_MAX_AGE="$max_reference_age"
 if $build_images; then
     export TRADING_IMAGE="${SOAK_TRADING_IMAGE:-${project_name}-trading-host:dev}"
     export MARKET_MAKER_BOT_IMAGE="${SOAK_MARKET_MAKER_BOT_IMAGE:-${project_name}-market-maker-bot:dev}"
@@ -273,8 +308,10 @@ if ! jq -e \
     --arg inventorySkew "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
     --arg volatilitySpread "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" \
     --arg feedLossPolicy "$MM_SOAK_FEED_LOSS_POLICY" \
+    --arg maxReferenceAge "$MM_SOAK_MAX_REFERENCE_AGE" \
     --arg tradingUser "$trading_user" \
-    --arg counterpartyUser "$counterparty_user" '
+    --arg counterpartyUser "$counterparty_user" \
+    --arg adminUser "$admin_user" '
       .services["trading-host"].environment as $hostEnvironment |
       .services["trading-host"].environment.Trading__Auth__Mode == "Local" and
       .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled == "true" and
@@ -285,7 +322,13 @@ if ! jq -e \
       ([$hostEnvironment | to_entries[] |
         select(.key | test("^Trading__Auth__Users__[0-9]+__Username$")) |
         select(.value == $counterpartyUser)] | length) == 1 and
+      ([$hostEnvironment | to_entries[] |
+        select(.key | test("^Trading__Auth__Users__[0-9]+__Username$")) |
+        select(.value == $adminUser)] | length) == 1 and
+      $hostEnvironment.Trading__Auth__Users__8__Role == "admin" and
       .services["market-maker-bot"].environment.MarketMaker__MarketData__FeedLossPolicy == $feedLossPolicy and
+      .services["market-maker-bot"].environment.MarketMaker__MarketData__MaxReferenceAge == $maxReferenceAge and
+      .services["market-maker-bot"].environment.MarketMaker__Telemetry__MarkMaxAge == $maxReferenceAge and
       ([.services["market-maker-bot"].environment
           | to_entries[]
           | select(.key | test("^MarketMaker__Instruments__[0-9]+__InventorySkew__Enabled$"))
@@ -349,16 +392,20 @@ sanitized_rendered_config="$(jq --arg counterpartyUser "$counterparty_user" '
 
 if ! identity_mappings_json="$(jq -ce \
     --arg tradingUser "$trading_user" \
-    --arg counterpartyUser "$counterparty_user" '
+    --arg counterpartyUser "$counterparty_user" \
+    --arg adminUser "$admin_user" '
       .services.tradingHost as $host |
       ($host.seedUsers | map(select(.username == $tradingUser))) as $trading |
       ($host.seedUsers | map(select(.username == $counterpartyUser))) as $counterparty |
+      ($host.seedUsers | map(select(.username == $adminUser))) as $admin |
       if ($trading | length) == 1 and ($counterparty | length) == 1 and
+         ($admin | length) == 1 and $admin[0].role == "admin" and
          $host.workloadRisk.counterparty == $counterpartyUser and
          $host.workloadRisk.allowShortSell == "true"
       then {
         trading: $trading[0],
         counterparty: $counterparty[0],
+        diagnosticsAdmin: $admin[0],
         risk: {
           counterparty: $counterpartyUser,
           allowShortSell: true
@@ -386,6 +433,8 @@ configured_instruments_json="$(jq --arg targetSymbol "$symbol" --argjson targetP
    ($config["MarketMaker__Instruments__" + ($index | tostring) + "__Symbol"]) as $symbol | {
     symbol: $symbol,
     quantity: ($config["MarketMaker__Instruments__" + ($index | tostring) + "__LotSize"] | tonumber),
+    tickSize: ($config["MarketMaker__Instruments__" + ($index | tostring) + "__TickSize"] | tonumber),
+    spreadTicks: ($config["MarketMaker__Instruments__" + ($index | tostring) + "__SpreadTicks"] | tonumber),
     referencePrice: (
       if $symbol == $targetSymbol then $targetPrice
       else ($config["MarketMaker__Instruments__" + ($index | tostring) + "__RefPrice"] | tonumber)
@@ -394,7 +443,9 @@ configured_instruments_json="$(jq --arg targetSymbol "$symbol" --argjson targetP
   }]
 ' <<<"$sanitized_rendered_config")"
 if [[ "${#configured_symbols[@]}" -ne 3 ]] ||
-    ! jq -e --arg symbol "$symbol" 'any(.symbol == $symbol)' >/dev/null <<<"$configured_instruments_json"; then
+    ! jq -e --arg symbol "$symbol" '
+      all(.tickSize > 0 and .spreadTicks > 1) and any(.symbol == $symbol)
+    ' >/dev/null <<<"$configured_instruments_json"; then
     echo "ERROR: rendered profile must contain PETR4/target plus exactly three configured symbols" >&2
     exit 3
 fi
@@ -468,9 +519,10 @@ if [[ -d "$artifacts_dir" && -n "$(ls -A "$artifacts_dir")" ]]; then
     exit 3
 fi
 if $dry_run; then
-    printf 'PASS: profile=%s project=%s authMode=Local inventorySkew=%s volatilitySpread=%s feedLossPolicy=%s artifacts=%s manifest=%s\n' \
+    printf 'PASS: profile=%s project=%s authMode=Local inventorySkew=%s volatilitySpread=%s feedLossPolicy=%s maxReferenceAge=%ss strictRefreshInterval=%ss strictRefreshMargin=%ss artifacts=%s manifest=%s\n' \
         "$profile" "$project_name" "$MM_SOAK_INVENTORY_SKEW_ENABLED" \
         "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" "$MM_SOAK_FEED_LOSS_POLICY" \
+        "$max_reference_age_seconds" "$strict_refresh_interval_seconds" "$strict_refresh_margin_seconds" \
         "$artifacts_dir_relative" "${suite_manifest_relative:-none}"
     exit 0
 fi
@@ -490,6 +542,8 @@ readonly samples_csv="${artifacts_dir}/samples.csv"
 readonly metric_presence_jsonl="${artifacts_dir}/metric-presence.jsonl"
 readonly metric_presence_csv="${artifacts_dir}/metric-presence.csv"
 readonly workload_csv="${artifacts_dir}/workload.csv"
+readonly strict_refresh_jsonl="${artifacts_dir}/strict-refreshes.jsonl"
+readonly strict_refresh_csv="${artifacts_dir}/strict-refreshes.csv"
 readonly runtime_jsonl="${artifacts_dir}/runtime.jsonl"
 readonly runtime_csv="${artifacts_dir}/runtime.csv"
 readonly runtime_events_jsonl="${artifacts_dir}/runtime-events.jsonl"
@@ -497,10 +551,13 @@ readonly checks_tsv="${artifacts_dir}/checks.tsv"
 readonly cleanup_errors_file="${artifacts_dir}/cleanup-errors.json"
 printf 'timestamp_utc,phase,accountingPeriodPresent,accountingPeriodStartedAtUtc,metric,symbol,side,reason,available,source,present,value\n' >"$samples_csv"
 printf 'timestamp_utc,phase,metric,symbol,required,present,seriesCount,value\n' >"$metric_presence_csv"
-printf 'timestamp_utc,phase,user,side,clOrdId,fillLatencySeconds\n' >"$workload_csv"
+printf 'timestamp_utc,phase,symbol,user,side,clOrdId,fillLatencySeconds\n' >"$workload_csv"
+printf 'timestamp_utc,segment,phase,symbol,direction,seller,buyer,priceSource,quantity,price,sellClOrdId,buyClOrdId,fillLatencySeconds\n' \
+    >"$strict_refresh_csv"
 printf 'timestamp_utc,phase,service,containerId,imageId,startedAtUtc,restartCount,status\n' >"$runtime_csv"
 : >"$samples_jsonl"
 : >"$metric_presence_jsonl"
+: >"$strict_refresh_jsonl"
 : >"$runtime_jsonl"
 : >"$runtime_events_jsonl"
 : >"$checks_tsv"
@@ -707,7 +764,7 @@ if [[ -n "$suite_manifest" ]]; then
 fi
 configured_symbols_json="$(printf '%s\n' "${configured_symbols[@]}" | jq -R . | jq -s .)"
 jq -n \
-    --arg schemaVersion "7" \
+    --arg schemaVersion "8" \
     --arg runId "$run_id" \
     --arg profile "$profile" \
     --arg projectName "$project_name" \
@@ -729,6 +786,11 @@ jq -n \
     --argjson metricExportIntervalMilliseconds "$metric_export_interval_ms" \
     --argjson prometheusScrapeIntervalSeconds "$prometheus_scrape_interval_seconds" \
     --argjson fullTelemetryCycleSeconds "$full_telemetry_cycle_seconds" \
+    --arg maxReferenceAge "$max_reference_age" \
+    --argjson maxReferenceAgeSeconds "$max_reference_age_seconds" \
+    --argjson strictRefreshIntervalSeconds "$strict_refresh_interval_seconds" \
+    --argjson strictRefreshMarginSeconds "$strict_refresh_margin_seconds" \
+    --argjson strictRefreshCycleBudgetSeconds "$strict_refresh_cycle_budget_seconds" \
     --argjson preOutageStabilizationCycles "$pre_outage_stabilization_cycles" \
     --argjson preOutageStabilizationIntervalSeconds "$pre_outage_stabilization_interval_seconds" \
     --argjson preOutageStabilizationTimeoutSeconds "$pre_outage_stabilization_timeout_seconds" \
@@ -775,6 +837,11 @@ jq -n \
         metricExportIntervalMilliseconds: $metricExportIntervalMilliseconds,
         prometheusScrapeIntervalSeconds: $prometheusScrapeIntervalSeconds,
         fullTelemetryCycleSeconds: $fullTelemetryCycleSeconds,
+        maxReferenceAge: $maxReferenceAge,
+        maxReferenceAgeSeconds: $maxReferenceAgeSeconds,
+        strictRefreshIntervalSeconds: $strictRefreshIntervalSeconds,
+        strictRefreshMarginSeconds: $strictRefreshMarginSeconds,
+        strictRefreshCycleBudgetSeconds: $strictRefreshCycleBudgetSeconds,
         preOutageStabilizationCycles: $preOutageStabilizationCycles,
         preOutageStabilizationIntervalSeconds: $preOutageStabilizationIntervalSeconds,
         preOutageStabilizationTimeoutSeconds: $preOutageStabilizationTimeoutSeconds,
@@ -783,11 +850,24 @@ jq -n \
       },
       workload: {
         identities: $identities,
-        symbol: $symbol,
-        quantity: $quantity,
-        marketableBuyPrice: $marketableBuyPrice,
-        marketableSellPrice: $marketableSellPrice,
-        referenceCrossPrice: $referenceCrossPrice,
+        primaryTarget: {
+          symbol: $symbol,
+          quantity: $quantity,
+          marketableBuyPrice: $marketableBuyPrice,
+          marketableSellPrice: $marketableSellPrice,
+          intervalSeconds: $workloadIntervalSeconds,
+          evidenceArtifact: "workload.csv"
+        },
+        strictRefresh: {
+          configuredInstruments: $configuredInstruments,
+          referenceCrossPrice: $referenceCrossPrice,
+          intervalSeconds: $strictRefreshIntervalSeconds,
+          marginSeconds: $strictRefreshMarginSeconds,
+          cycleBudgetSeconds: $strictRefreshCycleBudgetSeconds,
+          maxReferenceAge: $maxReferenceAge,
+          maxReferenceAgeSeconds: $maxReferenceAgeSeconds,
+          evidenceArtifacts: ["strict-refreshes.csv","strict-refreshes.jsonl","strict-freshness.json"]
+        },
         inventoryBiasLots: $inventoryBiasLots,
         deposits: {
           tradingUser: $depositAmount,
@@ -1039,7 +1119,7 @@ capture_service_runtime_snapshot() {
 
 capture_runtime_state initial
 if ! soak_child_environment_is_secret_free \
-    trading_password counterparty_password trading_token counterparty_token; then
+    trading_password counterparty_password trading_token counterparty_token admin_token; then
     log "ERROR: refusing to launch docker events with credentials visible in its child environment"
     exit 1
 fi
@@ -1059,7 +1139,7 @@ while IFS= read -r -d '' environment_entry; do
     runtime_event_environment+="${environment_entry}"$'\n'
 done <"/proc/${runtime_event_monitor_pid}/environ"
 if ! soak_environment_snapshot_is_secret_free runtime_event_environment \
-    trading_password counterparty_password trading_token counterparty_token; then
+    trading_password counterparty_password trading_token counterparty_token admin_token; then
     log "ERROR: docker events process environment contains credential material"
     exit 1
 fi
@@ -1212,6 +1292,9 @@ readonly trading_token
 counterparty_token="$(login "$counterparty_user" "$counterparty_password")"
 export -n counterparty_token
 readonly counterparty_token
+admin_token="$(login "$admin_user" "$trading_password")"
+export -n admin_token
+readonly admin_token
 
 deposit() {
     local token="$1" amount="$2" request_body
@@ -1224,15 +1307,118 @@ deposit() {
 deposit "$trading_token" "$deposit_amount"
 deposit "$counterparty_token" "$counterparty_deposit_amount"
 
+strict_primary_reference_pending=false
+strict_primary_reference_baseline=
+strict_primary_reference_direction=
+
+read_live_refresh_price() {
+    local refresh_symbol="$1" empty_request_body="" response live_row updated_nanoseconds
+    local started=$SECONDS
+    while ((SECONDS - started < max_reference_age_seconds)); do
+        response="$(soak_curl_json_request \
+            GET \
+            "${base_url}/api/admin/marketdata/reference-prices?symbols=${refresh_symbol}" \
+            admin_token \
+            empty_request_body)" || return 1
+        live_row="$(jq -ce \
+            --arg symbol "$refresh_symbol" '
+              .symbols[] |
+              select(.symbol == $symbol) |
+              .live |
+              select(.price != null and .updatedUtc != null)
+            ' <<<"$response" 2>/dev/null || true)"
+        if [[ -n "$live_row" ]]; then
+            updated_nanoseconds="$(date -u -d "$(jq -r '.updatedUtc' <<<"$live_row")" +%s%N)" ||
+                return 1
+            jq -er '.price' <<<"$live_row"
+            return
+        fi
+        sleep 0.25
+    done
+    log "ERROR: no live reference is available for strict refresh symbol '$refresh_symbol'"
+    return 1
+}
+
+resolve_live_refresh_price() {
+    local refresh_symbol="$1" started=$SECONDS price tick_size wait_budget
+    wait_budget="$max_reference_age_seconds"
+    if [[ "$refresh_symbol" == "$symbol" ]] &&
+        $strict_primary_reference_pending; then
+        wait_budget="$full_telemetry_cycle_seconds"
+    fi
+    while ((SECONDS - started < wait_budget)); do
+        price="$(read_live_refresh_price "$refresh_symbol")" || return 1
+        if [[ "$refresh_symbol" != "$symbol" ]] ||
+            ! $strict_primary_reference_pending ||
+            awk -v actual="$price" \
+                -v baseline="$strict_primary_reference_baseline" \
+                -v direction="$strict_primary_reference_direction" '
+                  BEGIN {
+                    if (direction == "Buy")
+                      exit !(actual > baseline)
+                    if (direction == "Sell")
+                      exit !(actual < baseline)
+                    exit 1
+                  }
+                '; then
+            if [[ "$refresh_symbol" == "$symbol" ]] &&
+                $strict_primary_reference_pending; then
+                tick_size="$(jq -er \
+                    --arg symbol "$refresh_symbol" \
+                    '.[] | select(.symbol == $symbol) | .tickSize' \
+                    <<<"$configured_instruments_json")" || return 1
+                price="$(awk \
+                    -v price="$price" \
+                    -v tick="$tick_size" \
+                    -v direction="$strict_primary_reference_direction" '
+                      BEGIN {
+                        adjusted = direction == "Buy" ? price - tick : price + tick
+                        printf "%.8f\n", adjusted
+                      }
+                    ')" || return 1
+            fi
+            printf '%s\n' "$price"
+            return 0
+        fi
+        sleep 0.25
+    done
+    if [[ "$refresh_symbol" == "$symbol" ]] &&
+        $strict_primary_reference_pending; then
+        log "WARN: $refresh_symbol primary $strict_primary_reference_direction fill did not advance the live reference; using an interior-tick maintenance price after the full drain window"
+        price="$(read_live_refresh_price "$refresh_symbol")" || return 1
+        tick_size="$(jq -er \
+            --arg symbol "$refresh_symbol" \
+            '.[] | select(.symbol == $symbol) | .tickSize' \
+            <<<"$configured_instruments_json")" || return 1
+        price="$(awk \
+            -v price="$price" \
+            -v tick="$tick_size" \
+            -v direction="$strict_primary_reference_direction" '
+              BEGIN {
+                adjusted = direction == "Buy" ? price - tick : price + tick
+                printf "%.8f\n", adjusted
+              }
+            ')" || return 1
+        printf '%s\n' "$price"
+        return 0
+    fi
+    log "ERROR: no fresh live reference is available for strict refresh symbol '$refresh_symbol'"
+    return 1
+}
+
 wait_order_filled() {
     local token="$1" clordid="$2" expected_quantity="${3:-$quantity}"
     local started orders status cum empty_request_body=""
     started=$SECONDS
     while (( SECONDS - started < fill_timeout_seconds )); do
         orders="$(soak_curl_json_request \
-            GET "${base_url}/api/orders" token empty_request_body)"
-        status="$(jq -r --arg id "$clordid" '.[] | select((.clOrdId|tostring)==$id) | .status' <<<"$orders" | tail -n1)"
-        cum="$(jq -r --arg id "$clordid" '.[] | select((.clOrdId|tostring)==$id) | .cumulativeQuantity' <<<"$orders" | tail -n1)"
+            GET "${base_url}/api/orders" token empty_request_body)" || return 1
+        status="$(jq -r --arg id "$clordid" \
+            '.[] | select((.clOrdId|tostring)==$id) | .status' \
+            <<<"$orders" | tail -n1)" || return 1
+        cum="$(jq -r --arg id "$clordid" \
+            '.[] | select((.clOrdId|tostring)==$id) | .cumulativeQuantity' \
+            <<<"$orders" | tail -n1)" || return 1
         if [[ "$status" == "Filled" && "$cum" == "$expected_quantity" ]]; then
             printf '%s\n' "$((SECONDS - started))"
             return 0
@@ -1249,61 +1435,126 @@ wait_order_filled() {
 
 submit_order() {
     local token="$1" user="$2" side="$3" price="$4" phase="$5"
-    local response clordid latency request_body
+    local response clordid latency request_body reference_baseline
+    if [[ "$profile" == "pause-and-cancel" ]]; then
+        reference_baseline="$(read_live_refresh_price "$symbol")" || return 1
+    fi
     request_body="$(jq -cn \
         --arg symbol "$symbol" \
         --arg side "$side" \
         --argjson quantity "$quantity" \
         --argjson price "$price" \
-        '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')"
+        '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" ||
+        return 1
     response="$(soak_curl_json_request \
-        POST "${base_url}/api/orders" token request_body)"
+        POST "${base_url}/api/orders" token request_body)" || return 1
     [[ "$(jq -r '.status // ""' <<<"$response")" != "Rejected" ]] || {
         log "ERROR: $side order was rejected: $response"
         return 1
     }
-    clordid="$(jq -er '.clOrdId | tostring' <<<"$response")"
-    latency="$(wait_order_filled "$token" "$clordid")"
-    printf '%s,%s,%s,%s,%s,%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase" "$user" "$side" "$clordid" "$latency" \
-        >>"$workload_csv"
+    clordid="$(jq -er '.clOrdId | tostring' <<<"$response")" || return 1
+    latency="$(wait_order_filled "$token" "$clordid")" || return 1
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase" "$symbol" "$user" "$side" "$clordid" "$latency" \
+        >>"$workload_csv" || return 1
+    if [[ "$profile" == "pause-and-cancel" ]]; then
+        strict_primary_reference_baseline="$reference_baseline"
+        strict_primary_reference_direction="$side"
+        strict_primary_reference_pending=true
+        strict_refresh_next_due=$SECONDS
+    fi
 }
 
 submit_recovery_cross() {
-    local cross_symbol="$1" cross_quantity="$2" cross_price="$3" phase="${4:-feed-recovery-cross}"
-    local sell_response buy_response sell_id buy_id latency request_body token
+    local cross_symbol="$1" cross_quantity="$2" cross_price="$3"
+    local phase="${4:-feed-recovery-cross}" segment="${5:-post-recovery}"
+    local price_source="${6:-configured-reference}" direction="${7:-trading-buys}"
+    local sell_response buy_response sell_id buy_id latency request_body token timestamp refresh_row
+    local seller buyer sell_token_variable buy_token_variable
+    if [[ "$direction" == "trading-buys" ]]; then
+        seller="$counterparty_user"
+        buyer="$trading_user"
+        sell_token_variable=counterparty_token
+        buy_token_variable=trading_token
+    elif [[ "$direction" == "counterparty-buys" ]]; then
+        seller="$trading_user"
+        buyer="$counterparty_user"
+        sell_token_variable=trading_token
+        buy_token_variable=counterparty_token
+    else
+        log "ERROR: unsupported strict refresh direction '$direction'"
+        return 1
+    fi
     request_body="$(jq -cn \
         --arg symbol "$cross_symbol" \
         --argjson quantity "$cross_quantity" \
         --argjson price "$cross_price" \
-        '{symbol:$symbol,side:"Sell",type:"Limit",quantity:$quantity,price:$price}')"
-    token="$counterparty_token"
+        '{symbol:$symbol,side:"Sell",type:"Limit",quantity:$quantity,price:$price}')" ||
+        return 1
+    token="${!sell_token_variable}"
     sell_response="$(soak_curl_json_request \
-        POST "${base_url}/api/orders" token request_body)"
+        POST "${base_url}/api/orders" token request_body)" || return 1
     [[ "$(jq -r '.status // ""' <<<"$sell_response")" != "Rejected" ]] || {
         log "ERROR: recovery-cross sell for $cross_symbol was rejected: $sell_response"
         return 1
     }
-    sell_id="$(jq -er '.clOrdId | tostring' <<<"$sell_response")"
+    sell_id="$(jq -er '.clOrdId | tostring' <<<"$sell_response")" || return 1
 
     request_body="$(jq -cn \
         --arg symbol "$cross_symbol" \
         --argjson quantity "$cross_quantity" \
         --argjson price "$cross_price" \
-        '{symbol:$symbol,side:"Buy",type:"Limit",quantity:$quantity,price:$price}')"
-    token="$trading_token"
+        '{symbol:$symbol,side:"Buy",type:"Limit",quantity:$quantity,price:$price}')" ||
+        return 1
+    token="${!buy_token_variable}"
     buy_response="$(soak_curl_json_request \
-        POST "${base_url}/api/orders" token request_body)"
+        POST "${base_url}/api/orders" token request_body)" || return 1
     [[ "$(jq -r '.status // ""' <<<"$buy_response")" != "Rejected" ]] || {
         log "ERROR: recovery-cross buy for $cross_symbol was rejected: $buy_response"
         return 1
     }
-    buy_id="$(jq -er '.clOrdId | tostring' <<<"$buy_response")"
-    latency="$(wait_order_filled "$trading_token" "$buy_id" "$cross_quantity")"
-    wait_order_filled "$counterparty_token" "$sell_id" "$cross_quantity" >/dev/null
-    printf '%s,%s,%s,%s,%s,%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase-$cross_symbol" \
-        "$trading_user" Buy "$buy_id" "$latency" >>"$workload_csv"
+    buy_id="$(jq -er '.clOrdId | tostring' <<<"$buy_response")" || return 1
+    latency="$(wait_order_filled "$token" "$buy_id" "$cross_quantity")" || return 1
+    token="${!sell_token_variable}"
+    wait_order_filled "$token" "$sell_id" "$cross_quantity" >/dev/null ||
+        return 1
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+    refresh_row="$(jq -cn \
+        --arg timestampUtc "$timestamp" \
+        --arg segment "$segment" \
+        --arg phase "$phase" \
+        --arg symbol "$cross_symbol" \
+        --arg direction "$direction" \
+        --arg seller "$seller" \
+        --arg buyer "$buyer" \
+        --arg priceSource "$price_source" \
+        --argjson quantity "$cross_quantity" \
+        --argjson price "$cross_price" \
+        --arg sellClOrdId "$sell_id" \
+        --arg buyClOrdId "$buy_id" \
+        --argjson fillLatencySeconds "$latency" '
+          {
+            timestampUtc: $timestampUtc,
+            segment: $segment,
+            phase: $phase,
+            symbol: $symbol,
+            direction: $direction,
+            seller: $seller,
+            buyer: $buyer,
+            priceSource: $priceSource,
+            quantity: $quantity,
+            price: $price,
+            sellClOrdId: $sellClOrdId,
+            buyClOrdId: $buyClOrdId,
+            fillLatencySeconds: $fillLatencySeconds
+          }
+        ')" || return 1
+    printf '%s\n' "$refresh_row" >>"$strict_refresh_jsonl" || return 1
+    jq -r '[
+      .timestampUtc,.segment,.phase,.symbol,.direction,.seller,.buyer,
+      .priceSource,.quantity,.price,
+      .sellClOrdId,.buyClOrdId,.fillLatencySeconds
+    ] | @csv' <<<"$refresh_row" >>"$strict_refresh_csv" || return 1
 }
 
 prom_query() {
@@ -1406,6 +1657,7 @@ wait_accounting_period() {
     local started current
     started=$SECONDS
     while (( SECONDS - started < 60 )); do
+        refresh_strict_symbols_if_due accounting-wait-refresh || return 1
         current="$(current_accounting_period)"
         if [[ -n "$current" ]]; then
             accounting_period_started_at_utc="$current"
@@ -1665,6 +1917,7 @@ wait_metric_equals() {
     started=$SECONDS
     next_runtime_check=$SECONDS
     while (( SECONDS - started < timeout )); do
+        refresh_strict_symbols_if_due metric-wait-refresh || return 1
         if (( SECONDS >= next_runtime_check )); then
             capture_runtime_state metric-wait || return 1
             next_runtime_check=$((SECONDS + 10))
@@ -1742,10 +1995,66 @@ capture_outage_telemetry_snapshot() {
     ' || return 1
 }
 
+strict_refresh_next_due=0
+strict_refresh_segment=pre-outage
+strict_refresh_paused=false
+strict_refresh_cycle_count=0
+
+run_strict_refresh_cycle() {
+    local phase="$1" segment="$2" price_mode="${3:-live}"
+    local refresh_symbol refresh_quantity refresh_price configured_price price_source refresh_rows direction
+    local primary_reference_pending
+    [[ "$profile" == "pause-and-cancel" ]] || return 0
+    if ((strict_refresh_cycle_count % 2 == 0)); then
+        direction=trading-buys
+    else
+        direction=counterparty-buys
+    fi
+    refresh_rows="$(jq -r '.[] | [.symbol,.quantity,.referencePrice] | @tsv' \
+        <<<"$configured_instruments_json")" || return 1
+    while IFS=$'\t' read -r refresh_symbol refresh_quantity configured_price; do
+        if [[ "$price_mode" == "live" ]]; then
+            primary_reference_pending="$strict_primary_reference_pending"
+            refresh_price="$(resolve_live_refresh_price "$refresh_symbol")" || return 1
+            if [[ "$refresh_symbol" == "$symbol" ]]; then
+                strict_primary_reference_pending=false
+            fi
+            if [[ "$refresh_symbol" == "$symbol" && "$primary_reference_pending" == "true" ]]; then
+                price_source=trading-host-live-reference-interior-tick
+            else
+                price_source=trading-host-live-reference
+            fi
+        else
+            refresh_price="$configured_price"
+            price_source=configured-reference
+        fi
+        submit_recovery_cross \
+            "$refresh_symbol" \
+            "$refresh_quantity" \
+            "$refresh_price" \
+            "$phase" \
+            "$segment" \
+            "$price_source" \
+            "$direction" || return 1
+    done <<<"$refresh_rows"
+    strict_refresh_cycle_count=$((strict_refresh_cycle_count + 1))
+    strict_refresh_next_due=$((SECONDS + strict_refresh_interval_seconds))
+}
+
+refresh_strict_symbols_if_due() {
+    local phase="$1"
+    [[ "$profile" == "pause-and-cancel" ]] || return 0
+    $strict_refresh_paused && return 0
+    if ((SECONDS >= strict_refresh_next_due)); then
+        run_strict_refresh_cycle "$phase" "$strict_refresh_segment" live || return 1
+    fi
+}
+
 stabilize_pre_outage_submissions() {
-    local started samples='[]' sample report report_passed elapsed
+    local started samples='[]' sample report report_passed elapsed refresh_event_count
     started=$SECONDS
     while true; do
+        refresh_strict_symbols_if_due pre-outage-stabilization-refresh || return 1
         soak_run_required_phase_step pre-outage-stabilization capture-metrics \
             capture_metrics || return 1
         sample="$(soak_run_required_phase_step pre-outage-stabilization \
@@ -1753,10 +2062,13 @@ stabilize_pre_outage_submissions() {
             log "ERROR: failed to capture pre-outage stabilization telemetry snapshot"
             return 1
         }
+        refresh_event_count="$(wc -l <"$strict_refresh_jsonl")" || return 1
         samples="$(jq -cn \
             --argjson samples "$samples" \
             --argjson sample "$sample" \
-            '$samples + [$sample]')" || return 1
+            --argjson refreshEventCount "$refresh_event_count" \
+            '$samples + [($sample + {strictRefreshEventCount:$refreshEventCount})]')" ||
+            return 1
         report="$(jq -cn \
             --argjson requiredStableCycles "$pre_outage_stabilization_cycles" \
             --argjson intervalSeconds "$pre_outage_stabilization_interval_seconds" \
@@ -1819,6 +2131,7 @@ run_window() {
     started=$SECONDS
     next_sample=$SECONDS
     while (( SECONDS - started < seconds )); do
+        refresh_strict_symbols_if_due "${phase}-strict-refresh" || return 1
         now=$SECONDS
         if [[ "$sample" == "true" ]] && (( now >= next_sample )); then
             capture_metrics "$phase"
@@ -1836,15 +2149,14 @@ run_window() {
         sleep "$workload_interval_seconds"
     done
     if [[ "$sample" == "true" ]]; then
+        refresh_strict_symbols_if_due "${phase}-strict-refresh" || return 1
         capture_metrics "$phase"
     fi
 }
 
 if [[ "$profile" == "pause-and-cancel" ]]; then
     log "printing initial current-epoch trades for every strict-policy symbol"
-    while IFS=$'\t' read -r recovery_symbol recovery_quantity recovery_price; do
-        submit_recovery_cross "$recovery_symbol" "$recovery_quantity" "$recovery_price" "initial-reference-cross"
-    done < <(jq -r '.[] | [.symbol,.quantity,.referencePrice] | @tsv' <<<"$configured_instruments_json")
+    run_strict_refresh_cycle initial-reference-cross pre-outage configured
 fi
 
 log "waiting for initial two-sided PETR4 quotes"
@@ -1853,7 +2165,11 @@ wait_metric_equals \
     2 60
 log "executing a two-fill bootstrap round trip so the P&L ledger emits snapshots"
 submit_order "$trading_token" "$trading_user" Buy "$marketable_buy_price" "accounting-bootstrap"
+refresh_strict_symbols_if_due accounting-bootstrap-between-fills
 submit_order "$trading_token" "$trading_user" Sell "$marketable_sell_price" "accounting-bootstrap"
+if [[ "$profile" == "pause-and-cancel" ]]; then
+    sleep "$workload_interval_seconds"
+fi
 wait_accounting_period
 capture_metrics initial
 
@@ -1902,6 +2218,7 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
         pre_outage_stabilization_pass=false
         exit 1
     fi
+    refresh_strict_symbols_if_due pre-outage-refresh
     capture_metrics pre-outage
     outage_pre_snapshot="$(capture_outage_telemetry_snapshot pre-outage)"
     stabilized_submissions="$(jq -r '.stableWindow[-1].ordersSubmitted // "missing"' \
@@ -1914,6 +2231,7 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
         exit 1
     fi
     log "stopping marketdata to exercise PauseAndCancel"
+    strict_refresh_paused=true
     marketdata_before_snapshot="$(capture_service_runtime_snapshot marketdata before-intentional-stop)"
     outage_check_started_seconds=$SECONDS
     outage_deadline=$((SECONDS + recovery_timeout_seconds))
@@ -2043,11 +2361,10 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
     fi
     if $pause_recovery_pass; then
         log "printing ${recovery_cross_attempts} post-gap cross rounds for every configured symbol"
+        strict_refresh_segment=post-recovery
+        strict_refresh_paused=false
         for ((attempt = 1; attempt <= recovery_cross_attempts; attempt++)); do
-            while IFS=$'\t' read -r recovery_symbol recovery_quantity recovery_price; do
-                submit_recovery_cross "$recovery_symbol" "$recovery_quantity" "$recovery_price" \
-                    "feed-recovery-cross-${attempt}"
-            done < <(jq -r '.[] | [.symbol,.quantity,.referencePrice] | @tsv' <<<"$configured_instruments_json")
+            run_strict_refresh_cycle "feed-recovery-cross-${attempt}" post-recovery configured
             if (( attempt < recovery_cross_attempts )); then
                 sleep "$recovery_cross_interval_seconds"
             fi
@@ -2057,7 +2374,7 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
             recovery_remaining=$((recovery_deadline - SECONDS))
             if (( recovery_remaining <= 0 )) ||
                 ! wait_metric_equals \
-                    "count(bot_market_data_reference_age_seconds{service_name=\"b3-market-maker-bot\",symbol=\"$recovery_symbol\",exported_source=\"last_trade_price\"} < 15)" \
+                    "count(bot_market_data_reference_age_seconds{service_name=\"b3-market-maker-bot\",symbol=\"$recovery_symbol\",exported_source=\"last_trade_price\"} < $max_reference_age_seconds)" \
                     1 "$recovery_remaining"; then
                 pause_recovery_pass=false
                 continue
@@ -2326,6 +2643,31 @@ if [[ "$runtime_continuity_pass" != "true" || "$runtime_lifecycle_pass" != "true
     runtime_stable=false
 fi
 max_restart_count="$(jq -s '[.[].restartCount] | max' "$runtime_jsonl")"
+strict_freshness_pass=true
+strict_freshness_report=null
+if [[ "$profile" == "pause-and-cancel" ]]; then
+    strict_freshness_report="$(jq -n \
+        --argjson configuredSymbols "$configured_symbols_json" \
+        --argjson maxReferenceAgeSeconds "$max_reference_age_seconds" \
+        --argjson refreshIntervalSeconds "$strict_refresh_interval_seconds" \
+        --argjson refreshMarginSeconds "$strict_refresh_margin_seconds" \
+        --slurpfile refreshes "$strict_refresh_jsonl" \
+        --slurpfile metricSamples "$samples_jsonl" '
+          {
+            configuredSymbols: $configuredSymbols,
+            maxReferenceAgeSeconds: $maxReferenceAgeSeconds,
+            refreshIntervalSeconds: $refreshIntervalSeconds,
+            refreshMarginSeconds: $refreshMarginSeconds,
+            refreshes: $refreshes,
+            metricSamples: $metricSamples
+          }
+        ' | soak_evaluate_strict_freshness)" || {
+        log "ERROR: failed to evaluate strict-profile freshness evidence"
+        exit 1
+    }
+    strict_freshness_pass="$(jq -r '.passed' <<<"$strict_freshness_report")" || exit 1
+    printf '%s\n' "$strict_freshness_report" >"${artifacts_dir}/strict-freshness.json"
+fi
 
 record_check "final-quotes-per-eligible-symbol" "$final_quotes_exact" \
     "exactly 2 open quotes per configured symbol; strict-profile eligibility=1" \
@@ -2402,9 +2744,12 @@ case "$profile" in
             "configured=$configured_spread effective=$effective_spread additional=$additional_spread"
         ;;
     pause-and-cancel)
+        record_check "strict-symbol-refresh-continuity" "$strict_freshness_pass" \
+            "every configured symbol has deterministic refresh trades with observed gaps <= interval+margin < MaxReferenceAge, and remains eligible/fresh outside intentional outage/reconnect phases" \
+            "intervalSeconds=$strict_refresh_interval_seconds marginSeconds=$strict_refresh_margin_seconds maxReferenceAgeSeconds=$max_reference_age_seconds artifact=strict-freshness.json"
         record_check "pre-outage-submission-stability" "$pre_outage_stabilization_pass" \
-            "mandatory series present and submitted-order counter unchanged across at least two full OTLP export + Prometheus scrape cycles" \
-            "cycles=$pre_outage_stabilization_cycles intervalSeconds=$pre_outage_stabilization_interval_seconds artifact=pre-outage-stabilization.json"
+            "mandatory series present and market-maker submitted-order counter unchanged across at least two full telemetry cycles while user refresh crosses keep references fresh" \
+            "cycles=$pre_outage_stabilization_cycles intervalSeconds=$pre_outage_stabilization_interval_seconds refreshIntervalSeconds=$strict_refresh_interval_seconds artifact=pre-outage-stabilization.json"
         record_check "pause-and-cancel-outage" "$pause_outage_pass" \
             "settled eligibility/openOrders=0, required outage counters increase, submissions remain unchanged from pre-outage and quotes stay zero throughout hold" \
             "passed=$pause_outage_pass telemetry=$outage_telemetry_pass elapsedSeconds=$outage_cancellation_elapsed_seconds artifact=outage-telemetry.json"

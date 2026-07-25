@@ -63,6 +63,7 @@ finite automatic address pools. Give every run a unique project name:
 export SOAK_PROJECT_NAME=b3tp-719-baseline-01
 export SOAK_TRADING_USER=alice
 export SOAK_COUNTERPARTY_USER=bob
+export SOAK_ADMIN_USER=soak-admin
 export SOAK_TRADING_PASSWORD
 ```
 
@@ -127,12 +128,38 @@ Alternating `Buy @ 32.80` and `Sell @ 29.30` consumes the bot's own resting
 quotes. Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
+This target-symbol workload remains independently recorded in `workload.csv`
+for cross-profile fill/P&L comparability.
 
 The inventory profile first makes the bot long by 12 lots, records positive
 skew saturation, then reverses it through flat to 12 lots short and records
 negative saturation. The feed profile stops only the isolated `marketdata`
 service. Because strict mode cannot quote without a current-epoch reference,
-the helper crosses all three symbols once before the initial quote assertion.
+the helper crosses all three symbols before the initial quote assertion and
+continues deterministic same-price crosses for every configured symbol
+throughout warmup, pre-outage stabilization, and duration. These maintenance
+prints are recorded separately in `strict-refreshes.csv`/`.jsonl`; they do not
+replace or change the alternating PETR4 primary workload.
+Before each periodic maintenance cross, the helper uses its isolated local
+diagnostics identity to read the existing trading-host live-reference endpoint
+and crosses at that live price, inside the bot spread. Initial and post-outage
+recovery crosses use the configured reference while strict quotes are absent.
+This prevents a stale configured price from consuming a bot quote after the
+primary PETR4 workload has moved the market. Refresh-cycle ownership alternates:
+the trading identity buys one cycle and the counterparty buys the next. Both
+identities receive the configured sandbox deposit, so the refresh stream remains
+position- and cash-bounded over a multi-hour run.
+After a primary target fill, the helper allows one full telemetry cycle for
+the live reference to advance. It then moves the maintenance cross one tick
+toward the spread interior, away from the potentially stale quote on the fill
+side; if the primary print is not reference-eligible, it applies the same
+interior-tick rule to the stable live reference. Strict mode schedules the next
+all-symbol refresh before another primary target order, so target movement
+cannot starve the other configured symbols. The default margin combines one
+full telemetry cycle with the serial three-symbol execution budget; the
+refresh interval is derived from the remaining `MaxReferenceAge` budget. The
+helper rejects configuration unless
+`refreshInterval + refreshMargin < MaxReferenceAge`.
 After restart it repeats crosses between the configured trading and
 counterparty identities at each rendered reference price. The helper fails
 before startup if either identity has no unique rendered seed mapping or if the
@@ -140,9 +167,9 @@ resolved counterparty risk mapping is absent. This existing real-stack
 technique makes every configured symbol prove fresh eligibility and exactly two
 recovered quotes. A restarted UMDF consumer may discard the first post-gap
 event while healing sequence state, so the helper emits three recorded cross
-rounds, ten seconds apart, for all symbols. Only a fresh `<15s` last-trade
-reference plus two quotes for all symbols inside the single recovery timeout
-passes.
+rounds, ten seconds apart, for all symbols. Only a last-trade reference younger
+than the configured `MaxReferenceAge` plus two quotes for all symbols inside the
+single recovery timeout passes.
 
 ## Run the four profiles
 
@@ -155,6 +182,22 @@ SOAK_DURATION_SECONDS=60 \
 SOAK_SAMPLE_INTERVAL_SECONDS=5 \
 SOAK_PROJECT_NAME=b3tp-719-smoke-baseline \
   scripts/soak/run-market-maker-soak.sh --profile baseline
+```
+
+Accelerated strict-freshness smoke (non-acceptance evidence) shortens the
+freshness bound to 20 seconds and proves the three-symbol 5-second refresh loop:
+
+```bash
+export SOAK_TRADING_PASSWORD
+MM_SOAK_MAX_REFERENCE_AGE=00:00:20 \
+MM_SOAK_METRIC_EXPORT_INTERVAL_MS=1000 \
+SOAK_STRICT_REFRESH_INTERVAL_SECONDS=5 \
+SOAK_STRICT_REFRESH_MARGIN_SECONDS=12 \
+SOAK_WARMUP_SECONDS=15 \
+SOAK_DURATION_SECONDS=15 \
+SOAK_SAMPLE_INTERVAL_SECONDS=2 \
+SOAK_PROJECT_NAME=b3tp-719-smoke-strict-refresh \
+  scripts/soak/run-market-maker-soak.sh --profile pause-and-cancel
 ```
 
 Closure-eligible example, repeated with a fresh project name for every profile:
@@ -210,6 +253,10 @@ Useful controls:
 | `SOAK_DURATION_SECONDS` | `300` | Sampled evidence window |
 | `SOAK_SAMPLE_INTERVAL_SECONDS` | `15` | Prometheus snapshot interval |
 | `SOAK_WORKLOAD_INTERVAL_SECONDS` | `1` | Delay after each completed order |
+| `MM_SOAK_MAX_REFERENCE_AGE` | `00:00:30` | Strict feed and P&L mark freshness bound (`HH:MM:SS`) |
+| `SOAK_STRICT_REFRESH_INTERVAL_SECONDS` | derived (`7`) | Start-to-next-cycle delay for all-symbol strict refresh trades |
+| `SOAK_STRICT_REFRESH_MARGIN_SECONDS` | telemetry cycle + cycle budget (`15`) | Required execution/sampling margin below `MaxReferenceAge` |
+| `SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS` | `5` | Budget for the serial three-symbol paired-cross cycle |
 | `SOAK_OUTAGE_SECONDS` | `20` | Feed hold-down after cancellation proof |
 | `SOAK_RECOVERY_TIMEOUT_SECONDS` | `120` | Cancellation, reconnect hold, and fresh-recovery deadline |
 | `SOAK_RECOVERY_CROSS_ATTEMPTS` | `3` | Recorded post-gap crosses per symbol |
@@ -224,9 +271,10 @@ Useful controls:
 | `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Marketable workload sell limit |
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |
-| `SOAK_COUNTERPARTY_DEPOSIT_AMOUNT` | `0` | Counterparty sandbox deposit |
+| `SOAK_COUNTERPARTY_DEPOSIT_AMOUNT` | same as trading user (`100000.00`) | Counterparty sandbox deposit for alternating refresh ownership |
 | `SOAK_TRADING_USER` | `alice` | Trading workload identity; must resolve to one rendered seed slot |
 | `SOAK_COUNTERPARTY_USER` | `bob` | Distinct cross-printing identity; must resolve to one rendered seed slot/risk mapping |
+| `SOAK_ADMIN_USER` | `soak-admin` | Isolated local diagnostics identity used only to resolve live refresh prices |
 | `SOAK_ARTIFACTS_DIR` | `soak-artifacts/<run-id>` | Ignored evidence directory |
 | `SOAK_SUITE_MANIFEST` | unset | Shared closure-suite manifest; required for acceptance |
 | `SOAK_KEEP_STACK` | `false` | Keep isolated containers/volumes for inspection |
@@ -408,7 +456,11 @@ inspect the complete time series against these unambiguous thresholds:
   the submitted-order counter is unchanged across at least two consecutive
   full OTLP export plus Prometheus scrape cycles. The derived cycle is 10
   seconds for the checked-in 5-second exporter and 5-second scrape. A configured
-  interval cannot be shorter than that cycle.
+  interval cannot be shorter than that cycle. Strict refresh crosses continue
+  during this boundary: they are end-client orders, while the stabilized
+  counter is the market-maker bot's own quote-submission counter. Same-price
+  refreshes must not cause bot re-quotes; any observed bot submission change
+  restarts/fails stabilization naturally.
 - The helper captures explicit `pre-outage`, `outage-settled`, `outage-hold`,
   `reconnected-no-reference`, and `recovered` telemetry boundaries.
   `outage-settled` begins only after
@@ -434,11 +486,20 @@ inspect the complete time series against these unambiguous thresholds:
 - Restart alone is not accepted as recovery. Only after the reconnect hold does
   the helper generate fresh current-epoch trades; then
   eligibility becomes `1`, a
-  `reference_age_seconds{exported_source="last_trade_price"} < 15` sample
+  `reference_age_seconds{exported_source="last_trade_price"} <
+  MaxReferenceAge` sample
   appears, and every configured symbol returns to `open=2` within the configured
   recovery deadline.
 - `reference_age_seconds` resets to a fresh value and `[mm-feed]` records
   source plus the unavailable-to-available transition.
+- Outside `outage-settled`, `outage-hold`, and
+  `reconnected-no-reference`, every configured symbol must have
+  `reference_eligible_current=1` and `reference_age_seconds <
+  MaxReferenceAge` at every sample. Per-symbol refresh timestamps must cover
+  both pre-outage and post-recovery continuity windows with no observed gap
+  above `refreshInterval + refreshMargin`, which itself must remain strictly
+  below `MaxReferenceAge`. A stopped refresh stream therefore fails even if a
+  later event happens to restore final quotes.
 
 The bundled Prometheus scrape target already uses a `source` label, so its
 translation renames the instrument's bounded OTel `source` attribute to
@@ -514,6 +575,11 @@ The helper writes only under ignored `soak-artifacts/`:
 - `metric-presence.csv` / `metric-presence.jsonl` — mandatory-series presence/value evidence;
 - `outage-telemetry.json` — strict-profile phase boundaries, counters, submissions, eligibility, and open orders;
 - `workload.csv` — order/fill latency evidence;
+- `strict-refreshes.csv` / `strict-refreshes.jsonl` — per-symbol maintenance
+  trade timestamps, counts, alternating direction/identities, price source,
+  prices, quantities, and both end-client ClOrdIDs;
+- `strict-freshness.json` — per-symbol refresh counts/timestamps/gaps and every
+  non-outage eligibility/reference-age observation;
 - `counter-monotonicity.json` — any decreasing tracked counter series;
 - `open-order-bounds.json` — per-symbol and total maxima across all samples;
 - `summary.json` — machine-readable checks;
@@ -530,7 +596,7 @@ Use this summary shape (generated values only; never fabricate results):
 
 ```json
 {
-  "schemaVersion": "7",
+  "schemaVersion": "8",
   "runId": "20260724T180000Z-baseline",
   "profile": "baseline",
   "gitSha": "<40-hex commit>",
@@ -560,6 +626,11 @@ Use this summary shape (generated values only; never fabricate results):
     "metricExportIntervalMilliseconds": 5000,
     "prometheusScrapeIntervalSeconds": 5,
     "fullTelemetryCycleSeconds": 10,
+    "maxReferenceAge": "00:00:30",
+    "maxReferenceAgeSeconds": 30,
+    "strictRefreshIntervalSeconds": 7,
+    "strictRefreshMarginSeconds": 15,
+    "strictRefreshCycleBudgetSeconds": 5,
     "preOutageStabilizationCycles": 2,
     "preOutageStabilizationIntervalSeconds": 10,
     "preOutageStabilizationTimeoutSeconds": 60,
@@ -576,15 +647,31 @@ Use this summary shape (generated values only; never fabricate results):
     "identities": {
       "trading": {"seedIndex": 0, "username": "<trading-user>", "firm": "<firm>", "role": "<role>"},
       "counterparty": {"seedIndex": 5, "username": "<counterparty-user>", "firm": "<firm>", "role": "<role>"},
+      "diagnosticsAdmin": {"seedIndex": 8, "username": "<admin-user>", "firm": "FIRM01", "role": "admin"},
       "risk": {"counterparty": "<counterparty-user>", "allowShortSell": true}
     },
-    "symbol": "PETR4",
-    "quantity": 100,
-    "marketableBuyPrice": 32.8,
-    "marketableSellPrice": 29.3,
-    "referenceCrossPrice": 30,
+    "primaryTarget": {
+      "symbol": "PETR4",
+      "quantity": 100,
+      "marketableBuyPrice": 32.8,
+      "marketableSellPrice": 29.3,
+      "intervalSeconds": 1,
+      "evidenceArtifact": "workload.csv"
+    },
+    "strictRefresh": {
+      "intervalSeconds": 7,
+      "marginSeconds": 15,
+      "cycleBudgetSeconds": 5,
+      "maxReferenceAge": "00:00:30",
+      "maxReferenceAgeSeconds": 30,
+      "evidenceArtifacts": [
+        "strict-refreshes.csv",
+        "strict-refreshes.jsonl",
+        "strict-freshness.json"
+      ]
+    },
     "inventoryBiasLots": 12,
-    "deposits": {"tradingUser": 100000, "counterpartyUser": 0},
+    "deposits": {"tradingUser": 100000, "counterpartyUser": 100000},
     "recoveryCrosses": [
       {"symbol": "PETR4", "quantity": 100, "referencePrice": 30},
       {"symbol": "VALE3", "quantity": 100, "referencePrice": 70},

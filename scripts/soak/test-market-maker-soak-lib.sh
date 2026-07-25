@@ -13,6 +13,91 @@ absent_sample="$(printf '%s\n' '{"data":{"result":[]}}' | soak_metric_sample)"
 [[ "$(jq -r '.present' <<<"$absent_sample")" == "false" ]]
 [[ "$(jq -r '.value' <<<"$absent_sample")" == "null" ]]
 
+[[ "$(soak_duration_to_seconds 00:00:12)" == "12" ]]
+[[ "$(soak_duration_to_seconds 01:02:03)" == "3723" ]]
+if soak_duration_to_seconds 12s >/dev/null 2>&1; then
+    echo "ERROR: invalid MaxReferenceAge duration was accepted" >&2
+    exit 1
+fi
+soak_validate_strict_refresh_timing 12 3 6 6
+if soak_validate_strict_refresh_timing 12 6 6 6; then
+    echo "ERROR: refresh cadence without freshness margin was accepted" >&2
+    exit 1
+fi
+
+accelerated_freshness="$(jq -n '
+  ["PETR4","VALE3","ITUB4"] as $symbols |
+  def refresh($timestamp; $segment; $symbol; $direction):
+    {
+      timestampUtc:$timestamp,
+      segment:$segment,
+      phase:"accelerated-refresh",
+      symbol:$symbol,
+      direction:$direction
+    };
+  def sample($timestamp; $phase; $symbol; $metric; $value):
+    {
+      timestamp_utc:$timestamp,
+      phase:$phase,
+      metric:$metric,
+      labels:{symbol:$symbol},
+      value:$value
+    };
+  {
+    configuredSymbols: $symbols,
+    maxReferenceAgeSeconds: 12,
+    refreshIntervalSeconds: 3,
+    refreshMarginSeconds: 6,
+    refreshes: [
+      $symbols[] as $symbol |
+      refresh("2026-07-24T00:00:00Z";"pre-outage";$symbol;"trading-buys"),
+      refresh("2026-07-24T00:00:03Z";"pre-outage";$symbol;"counterparty-buys"),
+      refresh("2026-07-24T00:00:06Z";"pre-outage";$symbol;"trading-buys"),
+      refresh("2026-07-24T00:00:20Z";"post-recovery";$symbol;"counterparty-buys"),
+      refresh("2026-07-24T00:00:23Z";"post-recovery";$symbol;"trading-buys")
+    ],
+    metricSamples: [
+      $symbols[] as $symbol |
+      sample("2026-07-24T00:00:01Z";"initial";$symbol;"bot_market_data_reference_eligible_current";1),
+      sample("2026-07-24T00:00:01Z";"initial";$symbol;"bot_market_data_reference_age_seconds";1),
+      sample("2026-07-24T00:00:07Z";"pre-outage";$symbol;"bot_market_data_reference_eligible_current";1),
+      sample("2026-07-24T00:00:07Z";"pre-outage";$symbol;"bot_market_data_reference_age_seconds";1),
+      sample("2026-07-24T00:00:21Z";"recovered";$symbol;"bot_market_data_reference_eligible_current";1),
+      sample("2026-07-24T00:00:21Z";"recovered";$symbol;"bot_market_data_reference_age_seconds";1),
+      sample("2026-07-24T00:00:25Z";"final";$symbol;"bot_market_data_reference_eligible_current";1),
+      sample("2026-07-24T00:00:25Z";"final";$symbol;"bot_market_data_reference_age_seconds";2)
+    ]
+  }
+')"
+accelerated_freshness_report="$(soak_evaluate_strict_freshness <<<"$accelerated_freshness")"
+[[ "$(jq -r '.passed' <<<"$accelerated_freshness_report")" == "true" ]]
+[[ "$(jq -r '.refreshSummary | length' <<<"$accelerated_freshness_report")" == "3" ]]
+unbounded_direction="$(jq '
+  .refreshes |= map(
+    if .segment == "pre-outage" then .direction = "trading-buys" else . end
+  )
+' <<<"$accelerated_freshness")"
+[[ "$(soak_evaluate_strict_freshness <<<"$unbounded_direction" | jq -r '.passed')" == "false" ]]
+
+stopped_refresh="$(jq '
+  .refreshes |= map(select(
+    .segment != "pre-outage" or .timestampUtc == "2026-07-24T00:00:00Z"
+  )) |
+  .metricSamples |= map(
+    if .phase == "pre-outage" and
+       .metric == "bot_market_data_reference_eligible_current"
+    then .value = 0
+    elif .phase == "pre-outage" and
+         .metric == "bot_market_data_reference_age_seconds"
+    then .value = 13
+    else . end
+  )
+' <<<"$accelerated_freshness")"
+stopped_refresh_report="$(soak_evaluate_strict_freshness <<<"$stopped_refresh")"
+[[ "$(jq -r '.passed' <<<"$stopped_refresh_report")" == "false" ]]
+[[ "$(jq '[.symbolFreshness[].failedSamples[]] | length > 0' \
+    <<<"$stopped_refresh_report")" == "true" ]]
+
 phase_step_calls=""
 phase_step_ok() {
     phase_step_calls+="${1}:ok "
