@@ -45,6 +45,8 @@ internal sealed class MarketMakerWorker : BackgroundService
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _pricingContextFailureRetries =
         new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<ulong, TaskCompletionSource<UpModels.MassActionExecuted>>
+        _massActionReports = new();
     private readonly HashSet<string> _configuredSymbols;
     private readonly ConcurrentDictionary<string, FeedAvailabilityObservation> _feedAvailability =
         new(StringComparer.Ordinal);
@@ -143,20 +145,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             _log.LogInformation("[mm] connected; instruments={Count} reconcile={Interval}",
                 _options.Instruments.Count, _options.ReconcileInterval);
 
-            // Market data is best-effort and never blocks FIXP quoting —
-            // see MarketDataFeed's doc comment for why.
-            await _marketData.StartAsync(_options.MarketData, _options.Instruments, _loggerFactory, stoppingToken);
-
-            // Prime the book: one resting bid + ask per instrument before
-            // anything else runs, so a fresh boot doesn't leave a window
-            // with zero MM depth.
-            foreach (var instr in _options.Instruments)
-            {
-                await QuoteSideAsync(_client, instr, isBuy: true, stoppingToken);
-                await QuoteSideAsync(_client, instr, isBuy: false, stoppingToken);
-            }
-
-            var receive = ReceiveLoopAsync(_client, stoppingToken);
+            var receive = await PrepareConnectedSessionAsync(_client, stoppingToken);
             var reconcile = ReconcileLoopAsync(_client, stoppingToken);
             var pricingReaction = PricingContextReactionLoopAsync(_client, stoppingToken);
             await Task.WhenAny(receive, reconcile, pricingReaction);
@@ -178,6 +167,108 @@ internal sealed class MarketMakerWorker : BackgroundService
             _pricingContextSignals.Writer.TryComplete();
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
             await _marketData.DisposeAsync();
+        }
+    }
+
+    internal async Task<Task> PrepareConnectedSessionAsync(IEntryPointClient client, CancellationToken ct)
+    {
+        // Start draining the FIXP event stream before requesting cleanup. A
+        // legacy session can produce up to the venue's 100k cancellation ER
+        // cap, and the authoritative mass-action report itself arrives here.
+        var receive = ReceiveLoopAsync(client, ct);
+
+        await CleanupLegacySessionOrdersAsync(client, receive, ct);
+
+        // Market data and all normal quoting deliberately start only after
+        // the venue has accepted the session-scoped cleanup.
+        await _marketData.StartAsync(_options.MarketData, _options.Instruments, _loggerFactory, ct);
+
+        foreach (var instr in _options.Instruments)
+        {
+            await QuoteSideAsync(client, instr, isBuy: true, ct);
+            await QuoteSideAsync(client, instr, isBuy: false, ct);
+        }
+
+        return receive;
+    }
+
+    private async Task CleanupLegacySessionOrdersAsync(
+        IEntryPointClient client,
+        Task receiveLoop,
+        CancellationToken ct)
+    {
+        var clOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
+        var request = new UpModels.MassActionRequest
+        {
+            ClOrdID = new UpModels.ClOrdID(clOrdId),
+            ActionType = UpModels.MassActionType.CancelOrders,
+            Scope = UpModels.MassActionScope.AllOrdersForATradingSession,
+        };
+        var reportSource = new TaskCompletionSource<UpModels.MassActionExecuted>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_massActionReports.TryAdd(clOrdId, reportSource))
+            throw new InvalidOperationException($"Duplicate startup cleanup ClOrdID {clOrdId}.");
+
+        try
+        {
+            _log.LogInformation(
+                "[mm] cancelling legacy orders for FIXP session before starting market data or quoting clordid={ClOrdId}",
+                clOrdId);
+
+            // SDK 0.17.0 returns a transport-level synthetic MassActionReport,
+            // while the real venue report is published as MassActionExecuted.
+            // Require both so a write failure and a venue rejection each fail
+            // startup closed.
+            var requestTask = client.MassActionAsync(request, ct);
+            var cleanup = CompleteCleanupAsync(requestTask, reportSource.Task);
+            var timeout = Task.Delay(_options.CancelAckTimeout, _clock, ct);
+            await Task.WhenAny(cleanup, receiveLoop, timeout);
+
+            if (cleanup.IsCompleted)
+            {
+                var report = await cleanup;
+                _log.LogInformation(
+                    "[mm] startup legacy-order cleanup accepted reportId={ReportId} clordid={ClOrdId}",
+                    report.MassActionReportId,
+                    clOrdId);
+                return;
+            }
+
+            ct.ThrowIfCancellationRequested();
+            if (receiveLoop.IsCompleted)
+            {
+                await receiveLoop;
+                throw new InvalidOperationException(
+                    "FIXP event stream ended before the startup mass-action report arrived.");
+            }
+
+            throw new TimeoutException(
+                $"Startup mass-action report did not arrive within {_options.CancelAckTimeout}.");
+        }
+        finally
+        {
+            _massActionReports.TryRemove(clOrdId, out _);
+        }
+
+        static async Task<UpModels.MassActionExecuted> CompleteCleanupAsync(
+            Task<UpModels.MassActionReport> requestTask,
+            Task<UpModels.MassActionExecuted> reportTask)
+        {
+            var sendResult = await requestTask;
+            if (sendResult.Response != UpModels.MassActionResponse.Accepted)
+            {
+                throw new InvalidOperationException(
+                    $"Startup mass action was rejected: {sendResult.RejectReason?.ToString() ?? sendResult.Reason ?? "unknown"}.");
+            }
+
+            var report = await reportTask;
+            if (report.Response != UpModels.MassActionResponse.Accepted)
+            {
+                throw new InvalidOperationException(
+                    $"Startup mass action was rejected: {report.RejectReason?.ToString() ?? "unknown"}.");
+            }
+
+            return report;
         }
     }
 
@@ -210,6 +301,10 @@ internal sealed class MarketMakerWorker : BackgroundService
     {
         switch (ev)
         {
+            case UpModels.MassActionExecuted massAction:
+                if (_massActionReports.TryGetValue(massAction.ClOrdID.Value, out var reportSource))
+                    reportSource.TrySetResult(massAction);
+                break;
             case UpModels.OrderAccepted a:
                 // LeavesQty is not guaranteed to be populated on this ER
                 // shape — confirmed empirically the venue omits it

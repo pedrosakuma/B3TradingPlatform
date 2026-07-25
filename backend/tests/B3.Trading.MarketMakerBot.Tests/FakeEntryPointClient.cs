@@ -3,6 +3,9 @@ using B3.EntryPoint.Client.Fixp;
 using B3.EntryPoint.Client.Models;
 using B3.EntryPoint.Client.Risk;
 using B3.EntryPoint.Client.Telemetry;
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 
 namespace B3.Trading.MarketMakerBot.Tests;
 
@@ -12,20 +15,23 @@ namespace B3.Trading.MarketMakerBot.Tests;
 /// #709, so <c>MarketMakerWorker</c>'s event-handling logic (the actual
 /// source of the #707 duplicate-order bug) can be driven deterministically
 /// instead of only via a live Docker soak test. Only the members
-/// <c>MarketMakerWorker</c> actually calls (<see cref="SubmitAsync"/>,
-/// <see cref="CancelAsync"/>) do anything meaningful; everything else
-/// throws <see cref="NotSupportedException"/> since the worker never
-/// invokes it.
+/// <c>MarketMakerWorker</c> actually calls do anything meaningful;
+/// everything else throws <see cref="NotSupportedException"/>.
 /// </summary>
 internal sealed class FakeEntryPointClient : IEntryPointClient
 {
     public List<NewOrderRequest> SubmittedOrders { get; } = new();
     public List<CancelOrderRequest> SubmittedCancels { get; } = new();
+    public List<MassActionRequest> SubmittedMassActions { get; } = new();
+    public ConcurrentQueue<string> Operations { get; } = new();
     public Func<NewOrderRequest, CancellationToken, Task>? SubmitHandler { get; set; }
     public Func<CancelOrderRequest, CancellationToken, Task>? CancelHandler { get; set; }
+    public Func<MassActionRequest, CancellationToken, Task<MassActionReport>>? MassActionHandler { get; set; }
+    private readonly Channel<EntryPointEvent> _events = Channel.CreateUnbounded<EntryPointEvent>();
 
     public async Task<ClOrdID> SubmitAsync(NewOrderRequest request, CancellationToken ct)
     {
+        Operations.Enqueue("submit");
         SubmittedOrders.Add(request);
         if (SubmitHandler is not null)
             await SubmitHandler(request, ct);
@@ -34,6 +40,7 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
 
     public async Task CancelAsync(CancelOrderRequest request, CancellationToken ct)
     {
+        Operations.Enqueue("cancel");
         SubmittedCancels.Add(request);
         if (CancelHandler is not null)
             await CancelHandler(request, ct);
@@ -52,8 +59,14 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
         throw new NotSupportedException();
     public Task<OutboundAttemptReceipt> CancelWithReceiptAsync(CancelOrderRequest request, OutboundFramePreparedCallback callback, CancellationToken ct) =>
         throw new NotSupportedException();
-    public Task<MassActionReport> MassActionAsync(MassActionRequest request, CancellationToken ct) =>
-        throw new NotSupportedException();
+    public async Task<MassActionReport> MassActionAsync(MassActionRequest request, CancellationToken ct)
+    {
+        Operations.Enqueue("mass-action");
+        SubmittedMassActions.Add(request);
+        if (MassActionHandler is null)
+            throw new NotSupportedException();
+        return await MassActionHandler(request, ct);
+    }
     public Task<string> SubmitCrossAsync(NewOrderCrossRequest request, CancellationToken ct) =>
         throw new NotSupportedException();
     public Task SendQuoteRequestAsync(QuoteRequestMessage request, CancellationToken ct) =>
@@ -69,7 +82,19 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
     public Task<ReconnectOutcome> ReconnectAsync(ReconnectMode mode, Func<uint, uint>? nextSessionVerIdSelector, CancellationToken ct) =>
         throw new NotSupportedException();
     public ClientHealth GetHealth() => throw new NotSupportedException();
-    public IAsyncEnumerable<EntryPointEvent> Events(CancellationToken ct) => throw new NotSupportedException();
+    public async IAsyncEnumerable<EntryPointEvent> Events(
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        Operations.Enqueue("events-started");
+        while (await _events.Reader.WaitToReadAsync(ct))
+        {
+            while (_events.Reader.TryRead(out var ev))
+            {
+                Operations.Enqueue($"event:{ev.GetType().Name}");
+                yield return ev;
+            }
+        }
+    }
     public FixpClientState State => throw new NotSupportedException();
     public IList<IPreTradeGate> RiskGates => throw new NotSupportedException();
     public IKeepAliveScheduler KeepAlive => throw new NotSupportedException();
@@ -80,4 +105,6 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
         remove { }
     }
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    public void Publish(EntryPointEvent ev) => _events.Writer.TryWrite(ev);
 }
