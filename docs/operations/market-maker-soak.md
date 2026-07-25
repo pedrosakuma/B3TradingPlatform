@@ -326,6 +326,7 @@ failed_project_name='<exact-project-name-from-failed-run>'
   exit 2
 }
 MM_SOAK_COUNTERPARTY_USER="${SOAK_COUNTERPARTY_USER:-bob}" \
+MM_SOAK_ADMIN_USER="${SOAK_ADMIN_USER:-soak-admin}" \
 MM_SOAK_PROJECT_NAME="$failed_project_name" \
 docker compose \
   --project-name "$failed_project_name" \
