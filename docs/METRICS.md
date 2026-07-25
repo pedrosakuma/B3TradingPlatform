@@ -49,26 +49,96 @@ metadata, never accumulated position or P&L.
 |---|---|---|---|
 | `bot.position.net_quantity` | Observable Gauge | `symbol` | Signed net quantity |
 | `bot.position.average_entry_price` | Observable Gauge | `symbol` | Weighted-average open cost |
+| `bot.orders.open` | Observable Gauge | `symbol` | Bot-tracked open/resting-or-submitting orders; normally `2` per eligible configured symbol |
+| `bot.strategy.configured_half_spread_ticks` | Observable Gauge | `symbol` | Static configured `SpreadTicks` floor |
+| `bot.strategy.effective_half_spread_ticks` | Observable Gauge | `symbol` | Configured floor plus the current volatility addition |
 | `bot.strategy.inventory_skew_ticks` | Observable Gauge | `symbol` | Signed applied inventory skew for enabled instruments; positive means long inventory shifts the quote mid down, negative means short inventory shifts it up |
+| `bot.strategy.volatility_move_estimate_ticks` | Observable Gauge | `symbol` | Mean absolute valid trade-to-trade move in ticks; omitted until an estimate exists |
+| `bot.strategy.volatility_additional_half_spread_ticks` | Observable Gauge | `symbol` | Capped ticks added to the configured half-spread |
 | `bot.pnl.realized` | Observable Gauge | `symbol` | Process-lifetime gross realized P&L |
 | `bot.pnl.unrealized` | Observable Gauge | `symbol` | Omitted unless a connected live mark is no older than `MarketMaker:Telemetry:MarkMaxAge` |
 | `bot.pnl.total` | Observable Gauge | `symbol` | Realized + unrealized; omitted under the same fresh-mark gate |
+| `bot.orders.submitted` | Counter | `symbol`, `side` | Successfully transmitted new quotes |
+| `bot.orders.submit_failed` | Counter | `symbol` | Quote submissions that failed before acknowledgement |
+| `bot.fills.received` | Counter | `symbol` | Own execution events received before ledger classification |
 | `bot.pnl.fills_applied` | Counter | `symbol` | Valid own executions booked |
 | `bot.pnl.fills_unknown_order` | Counter | `symbol=unknown` | Fill ignored because ClOrdID is not owned by this process |
 | `bot.pnl.fills_duplicate` | Counter | `symbol` | Execution identity replay ignored |
 | `bot.pnl.fills_invalid` | Counter | `symbol` | Invalid price/quantity/identity ignored |
 | `bot.pnl.fills_inconsistent` | Counter | `symbol` | CumQty, LeavesQty, status, or replay payload mismatch ignored |
 | `bot.pnl.fill_delta_mismatch` | Counter | `symbol` | Advancing CumQty-derived delta differed from LastQty; authoritative cumulative delta was booked |
+| `bot.orders.rejected` | Counter | `symbol` | Venue quote rejects |
+| `bot.orders.cancelled` | Counter | none | Terminal cancel acknowledgements |
+| `bot.orders.stale_cancelled` | Counter | `symbol` | Stale-order guard cancel requests |
+| `bot.orders.stale_cancel_rejected` | Counter | `symbol` | Stale cancel rejects |
+| `bot.orders.stale_cancel_submit_failed` | Counter | `symbol` | Stale cancel transmission failures |
+| `bot.orders.safety_cap_hit` | Counter | `symbol` | `MaxOpenOrders` prevented a new quote |
+| `bot.orders.book_driven_requote` | Counter | `symbol`, `side` | Price-drift cancel/requote requests |
+| `bot.orders.book_driven_requote_submit_failed` | Counter | `symbol` | Book-driven cancel transmission failures |
+| `bot.orders.book_driven_requote_cancel_rejected` | Counter | `symbol` | Book-driven cancel rejects |
+| `bot.market_data.availability_transition` | Counter | `symbol`, `available`, `reason` | Strict feed eligibility changes |
+| `bot.market_data.quote_suppressed` | Counter | `symbol`, `side`, `reason` | Quote decisions suppressed by `PauseAndCancel` |
+| `bot.market_data.reference_age_seconds` | Observable Gauge | `symbol`, `source` | Age of the last valid live reference |
+| `bot.market_data.reference_eligible` | Observable Gauge | `symbol`, `reason` | `1` only when the current connection epoch has a fresh valid reference; emitted only for `PauseAndCancel` |
+| `bot.market_data.reference_eligible_current` | Observable Gauge | `symbol` | Stable-label current eligibility (`1`/`0`) for state checks; avoids stale Prometheus series when the diagnostic `reason` label changes |
+| `bot.orders.feed_unavailable_cancel` | Counter | `symbol`, `side` | Active quote cancelled because the feed became ineligible |
+| `bot.orders.feed_unavailable_cancel_rejected` | Counter | `symbol` | Feed-loss cancel rejects |
+| `bot.orders.feed_unavailable_cancel_submit_failed` | Counter | `symbol` | Feed-loss cancel transmission failures |
+| `bot.orders.feed_unavailable_cancel_retry` | Counter | `symbol` | Guarded feed-loss cancel retries |
 | `bot.orders.cancel_ack_expired` | Counter | `symbol`, `reason` | Pending cancel exceeded `MarketMaker:CancelAckTimeout`; marker expired and guarded retry was enabled |
+
+Configured-symbol counters publish bounded zero baselines when the metric
+publisher starts. Position, average-entry, and realized-P&L gauges likewise
+emit `0` for a configured symbol with no ledger entry. This makes a healthy
+zero distinguishable from an absent exporter/series. Unrealized and total P&L
+still require a fresh mark: no fresh mark means no series, never a fabricated
+numeric zero.
 
 Structured snapshots use the same ledger and mark-freshness gate at
 `MarketMaker:Telemetry:SnapshotInterval`. A missing/stale mark is logged as
 null and is never exported as zero unrealized P&L. Every snapshot also carries
-the process accounting-period start timestamp.
+the process accounting-period start timestamp:
+
+```text
+[mm-pnl] accountingPeriodStartedAtUtc=... symbol=... position=...
+averageCost=... realizedPnl=... unrealizedPnl=... totalPnl=...
+mark=... markAge=...
+```
+
+Other bounded diagnostic records used by the strategy soak are:
+
+- `[mm-volatility]`: `symbol`, `estimateTicks`, `samples`, `ready`,
+  `connected`, `previousAdditionalTicks`, `additionalTicks`;
+- `[mm-feed]`: `symbol`, `available`, `reason`, `epoch`, `age`, `source`,
+  and suppressed-decision `side`;
+
+The soak helper copies the current `accountingPeriodStartedAtUtc` into every
+metric sample and fails if it changes. Separate presence evidence requires
+mandatory symbol/profile series to exist before their numeric values are used;
+Prometheus absence is never coerced to zero. The helper also verifies every collected
+counter (`*_total` after Prometheus translation) is monotonically
+non-decreasing, so a bot restart cannot erase earlier integrity/error evidence.
+Before the strict outage boundary, `bot.orders.submitted` must be unchanged
+across at least two complete OTLP export plus Prometheus scrape cycles. After
+reconnect and before any fresh market event, the stable eligibility gauge and
+open-order gauge must remain zero for another complete cycle.
+In the bundled Prometheus view, the scrape target's `source` label causes the
+instrument's reference-source attribute to appear as `exported_source`; the
+helper normalizes that bounded value into its CSV `source` column.
+- `[mm-pnl]` fill diagnostics: `symbol`, `clordid`, `tradeId`, quantities,
+  prices, and a bounded reason;
+- `[mm] safety cap hit`: `OpenCount`, `MaxOpenOrders`, `symbol`, `side`.
+
+Metric dimensions stay low-cardinality: configured `symbol`; `side` only as
+`buy|sell`; and bounded `reason`, `available`, or `source` values shown above.
+ClOrdID, order ID, trade ID, account, and free-form exception text are logs,
+never metric tags.
 
 The bot exports only to an OTLP endpoint. The intended deployment path is
 `bot -> OTLP Collector in b3deploy -> Azure Monitor`; Azure-specific exporters
 and credentials belong to the collector deployment, not this repository.
+See the evidence, dashboard, and alert contract in
+[`operations/market-maker-soak.md`](operations/market-maker-soak.md).
 
 ## Application meter (`B3.Trading`)
 

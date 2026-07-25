@@ -326,6 +326,34 @@ The standard OTLP meter exposes
 configured `symbol`; effective-tick changes also emit structured
 `[mm-volatility]` diagnostics.
 
+### Strategy soak evidence
+
+Use [`operations/market-maker-soak.md`](operations/market-maker-soak.md) and
+`scripts/soak/run-market-maker-soak.sh` for isolated static, inventory-skew,
+volatility-spread, and `PauseAndCancel` runs. The dedicated
+`docker-compose.market-maker-soak.yml` overlay routes the bot to the bundled
+Collector, parameterizes only the opt-in feature switches, and isolates
+container/network/volume names. It also pins `Trading__Auth__Mode=Local` plus
+local login and resolves the operator-selected trading/counterparty seed and
+risk mappings without recording credentials.
+Closure evidence uses one shared suite
+manifest and compares actual runtime `sha256:` image IDs across profiles;
+mutable tags alone are not accepted. It also proves container/image/start/restart
+continuity for all six critical services, allowing only the explicitly recorded
+marketdata stop/start in the outage profile. Evidence paths are restricted to
+the checkout's ignored `soak-artifacts/` tree. Missing Prometheus series are
+recorded as absent and fail rather than being treated as zero. Pre-run teardown
+is mandatory, and final teardown failures invalidate the result while retaining
+aggregated cleanup evidence. The strict profile stabilizes submitted-order
+telemetry before outage, then proves a connected feed remains ineligible with
+zero quotes for a full export-plus-scrape cycle before generating a fresh
+recovery trade. Sensitive HTTP bodies and bearer headers use anonymous file
+descriptors rather than process arguments; exported password inputs are unset
+before the first child process and the live Docker-event environment is checked.
+The first acceptance run must build from the recorded clean git SHA, while
+later no-build profiles must exactly match the manifest's image IDs/digests.
+Multi-hour evidence is operator-run and is not part of normal CI.
+
 ### Out of scope
 
 - `KeepLastAndWiden` is not a supported feed-loss policy.
@@ -458,7 +486,9 @@ docker compose \
 ```
 
 This exports `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`
-into the trading-host container automatically — no extra env required.
+into the trading-host container automatically — no extra env required. The
+market-maker bot remains opt-in; the strategy-soak overlay wires that service
+to the same Collector.
 
 Default ports:
 

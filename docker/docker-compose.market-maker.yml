@@ -39,6 +39,9 @@
 # config value (#683, item "mm-marketdata-conn"). Feed-loss behavior is
 # explicit: this sandbox overlay retains the legacy StaticRefPrice fallback;
 # operators can select PauseAndCancel to require a fresh per-symbol mark.
+# Reproducible baseline/feature/outage evidence stacks the dedicated
+# docker-compose.market-maker-soak.yml overlay; see
+# docs/operations/market-maker-soak.md.
 
 name: b3trading
 

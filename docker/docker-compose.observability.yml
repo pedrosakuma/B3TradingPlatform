@@ -15,6 +15,8 @@
 #   - Sets OTEL_EXPORTER_OTLP_ENDPOINT so the SDK we wired in PR 7-2b
 #     actually starts exporting. Without this overlay the env stays unset
 #     and the SDK stays a no-op (see docs/METRICS.md).
+#   - The standalone market-maker remains opt-in. The #719 soak overlay
+#     explicitly routes it to this same collector.
 #
 # UIs after `up`:
 #   - Grafana:    http://localhost:3000 (admin / admin on first login)
