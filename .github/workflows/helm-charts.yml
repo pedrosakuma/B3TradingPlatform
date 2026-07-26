@@ -90,8 +90,9 @@ jobs:
       - name: helm template (market-maker partial behaviour override)
         if: matrix.chart == 'b3-market-maker-bot'
         run: |
-          helm template ci charts/b3-market-maker-bot \
-            --set-json 'behaviour={"cancelAckTimeout":"00:00:15","startupCleanupTimeout":"00:03:00"}'
+          rendered="$(helm template ci charts/b3-market-maker-bot \
+            --set-json 'behaviour={"cancelAckTimeout":"00:00:15","startupCleanupEnabled":true,"startupCleanupTimeout":"00:03:00"}')"
+          grep -A1 -F 'name: MarketMaker__StartupCleanupEnabled' <<<"$rendered" | grep -Fq 'value: "true"'
 
       - name: Assert market-maker default image is promoted
         if: matrix.chart == 'b3-market-maker-bot'
@@ -100,6 +101,7 @@ jobs:
           rendered="$(helm template ci charts/b3-market-maker-bot)"
           grep -Fq 'image: ghcr.io/pedrosakuma/b3-market-maker-bot:latest' <<<"$rendered"
           grep -Fq 'imagePullPolicy: Always' <<<"$rendered"
+          grep -A1 -F 'name: MarketMaker__StartupCleanupEnabled' <<<"$rendered" | grep -Fq 'value: "false"'
           ! grep -Fq 'b3-market-maker-bot:0.1.0' <<<"$rendered"
 
       # #574: a values/template-only chart change that lands without a

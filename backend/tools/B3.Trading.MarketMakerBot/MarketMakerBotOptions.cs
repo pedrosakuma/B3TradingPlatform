@@ -104,10 +104,17 @@ public sealed class MarketMakerBotOptions
     public TimeSpan CancelAckTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// Maximum startup wait for the session mass-cancel report, its
-    /// BusinessReject exclusion fence, and the resulting cancellation ER
-    /// burst. Sized separately from a single-order cancel because a legacy
-    /// session may contain up to the venue's 100k open-order cap.
+    /// Opts into terminal startup mass-cancel hygiene. Keep disabled unless
+    /// matching-platform includes B3MatchingPlatform#569, where the solicited
+    /// ACCEPTED report is emitted only after dispatcher execution and all
+    /// cancellation ERs.
+    /// </summary>
+    public bool StartupCleanupEnabled { get; set; }
+
+    /// <summary>
+    /// Maximum startup wait for the terminal session mass-cancel report.
+    /// Sized separately from a single-order cancel because a legacy session
+    /// may contain up to the venue's 100k open-order cap.
     /// </summary>
     public TimeSpan StartupCleanupTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
