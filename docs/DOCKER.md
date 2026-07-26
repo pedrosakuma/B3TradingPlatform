@@ -284,8 +284,10 @@ immediate replacement submit. Cancel rejection, synchronous cancel failure,
 mean the side could not be restored within the healthy cycle. An asynchronous
 replacement reject also emits one restoration warning plus
 `bot_orders_quote_restore_rejected_total`, while remaining included in the
-generic reject counter. Monitor `bot_orders_ttl_refresh_total` as expected
-lifecycle volume, not as an incident.
+generic reject counter. The cancel trigger follows the side reservation, so a
+concurrent reconcile submit that wins before the direct requote is classified
+the same way. Monitor `bot_orders_ttl_refresh_total` as expected lifecycle
+volume, not as an incident.
 
 Inventory skew is opt-in and defaults off independently for every
 instrument:

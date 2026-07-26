@@ -41,6 +41,11 @@ public sealed class OrderTracker
     // superseded by a newer reservation on the same side can't free a slot
     // it no longer owns (see Close()).
     private readonly Dictionary<(string Symbol, bool IsBuy), ulong> _activeSideOwners = new();
+    // A cancel ACK frees a side before the event handler can submit its
+    // replacement. Whichever concurrent path reserves that side next must
+    // inherit the restoration trigger, including the reconcile safety net.
+    private readonly Dictionary<(string Symbol, bool IsBuy), CancelReason>
+        _pendingRestoreReasons = new();
     private readonly object _sideLock = new();
     private readonly TimeProvider _clock;
     // RFC #703 book-driven quoting: every ER carries the venue's own
@@ -149,11 +154,15 @@ public sealed class OrderTracker
         bool isBuy,
         CancelReason? restoreReason = null)
     {
+        CancelReason? attachedRestoreReason;
         lock (_sideLock)
         {
             var side = (symbol, isBuy);
             if (_activeSideOwners.ContainsKey(side))
                 return false;
+            attachedRestoreReason = restoreReason;
+            if (_pendingRestoreReasons.Remove(side, out var pendingRestoreReason))
+                attachedRestoreReason ??= pendingRestoreReason;
             _activeSideOwners[side] = clOrdId;
         }
 
@@ -166,7 +175,7 @@ public sealed class OrderTracker
             Quantity = quantity,
             IsBuy = isBuy,
             SubmittedAtUtc = now,
-            RestoreReason = restoreReason,
+            RestoreReason = attachedRestoreReason,
             // Treat as open until we learn otherwise. A fill or reject ER
             // closes it; an explicit cancel ER closes it.
             IsOpen = true,
@@ -208,6 +217,14 @@ public sealed class OrderTracker
             }
         reason = default;
         return false;
+    }
+
+    public void ClearPendingRestoreReason(string symbol, bool isBuy)
+    {
+        lock (_sideLock)
+        {
+            _pendingRestoreReasons.Remove((symbol, isBuy));
+        }
     }
 
     /// <summary>
@@ -517,12 +534,24 @@ public sealed class OrderTracker
         }
     }
 
+    /// <summary>
+    /// Closes an acknowledged cancelled order and, atomically with releasing
+    /// its side reservation, records the cancel trigger for whichever submit
+    /// path restores that side next. A duplicate/late ACK cannot overwrite
+    /// restoration state after a newer order already owns the side.
+    /// </summary>
+    public void OnCancelledForRestore(ulong clOrdId, CancelReason? restoreReason)
+    {
+        if (_orders.TryGetValue(clOrdId, out var o))
+            Close(o, restoreReason);
+    }
+
     /// <summary>Marks the order closed and frees its (symbol, side)
     /// reservation — but only if this order is still the current owner
     /// of that reservation. A duplicate/racing terminal ER for an order
     /// that has already been superseded by a newer submit on the same
     /// side must not evict the newer order's reservation.</summary>
-    private void Close(TrackedOrder o)
+    private void Close(TrackedOrder o, CancelReason? pendingRestoreReason = null)
     {
         lock (o)
         {
@@ -535,7 +564,11 @@ public sealed class OrderTracker
         {
             var side = (o.Symbol, o.IsBuy);
             if (_activeSideOwners.TryGetValue(side, out var owner) && owner == o.ClOrdId)
+            {
                 _activeSideOwners.Remove(side);
+                if (pendingRestoreReason is { } reason)
+                    _pendingRestoreReasons[side] = reason;
+            }
         }
     }
 

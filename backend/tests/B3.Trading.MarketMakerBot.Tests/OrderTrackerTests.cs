@@ -155,6 +155,22 @@ public class OrderTrackerTests
     }
 
     [Fact]
+    public void PendingRestoreReason_AttachesToWinningSubmit_ThenDoesNotLeak()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true));
+        t.OnCancelledForRestore(1UL, CancelReason.TtlRefresh);
+
+        Assert.True(t.TryRegisterSubmit(2UL, "PETR4", 30m, 100, isBuy: true));
+        Assert.True(t.TryTakeRestoreReason(2UL, out var reason));
+        Assert.Equal(CancelReason.TtlRefresh, reason);
+        t.OnTerminal(2UL);
+
+        Assert.True(t.TryRegisterSubmit(3UL, "PETR4", 30m, 100, isBuy: true));
+        Assert.False(t.TryTakeRestoreReason(3UL, out _));
+    }
+
+    [Fact]
     public void TryGet_UnknownClOrdId_ReturnsFalse()
     {
         var t = new OrderTracker();

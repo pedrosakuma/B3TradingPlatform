@@ -181,6 +181,12 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
+    internal readonly record struct CancelledOrderTransition(
+        bool Known,
+        string? Symbol,
+        bool IsBuy,
+        CancelReason? RestoreReason);
+
     private async Task ReceiveLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
         await foreach (var ev in client.Events(ct).ConfigureAwait(false))
@@ -291,52 +297,8 @@ internal sealed class MarketMakerWorker : BackgroundService
                 }
             case UpModels.OrderCancelled c:
                 {
-                    _metrics.RecordCancelled();
-                    // OrigClOrdID is the original resting order's id; it's
-                    // only set when the cancel was in response to an
-                    // explicit CancelOrderRequest (ours or another
-                    // session's) — a venue-initiated spontaneous cancel
-                    // (e.g. Day expiry) reports ClOrdID as the order's own
-                    // id with no OrigClOrdID. Prefer OrigClOrdID, but the
-                    // upstream gateway is also known to sometimes drop it
-                    // on cancel acks entirely (see this repo's own
-                    // ExecutionReportProcessorTests.Cancel_WithMissingOrigClOrdId_ResolvesViaCancelLink
-                    // for the trading-host side of the same class of bug)
-                    // — fall back to our own cancel-attempt correlation
-                    // table before finally assuming ClOrdID IS the
-                    // original id (the spontaneous-cancel case).
-                    var transition = _orderLifecycle.Synchronize(() =>
-                    {
-                        var hasCancelAttempt = _tracker.TryResolveCancelAttempt(
-                            c.ClOrdID.Value,
-                            out var linked,
-                            out var cancelReason);
-                        var targetClOrdId = c.OrigClOrdID?.Value
-                            ?? (hasCancelAttempt
-                                ? linked
-                                : c.ClOrdID.Value);
-                        var known = _tracker.TryGet(targetClOrdId, out var order);
-                        _tracker.OnTerminal(targetClOrdId);
-                        _tracker.ForgetCancelAttempt(c.ClOrdID.Value);
-                        _pnlLedger.MarkTerminal(targetClOrdId);
-                        return (
-                            Known: known,
-                            Symbol: known ? order.Symbol : null,
-                            IsBuy: known && order.IsBuy,
-                            RestoreReason: hasCancelAttempt ? cancelReason : (CancelReason?)null);
-                    });
-                    if (transition.Known)
-                    {
-                        await RequoteAsync(
-                            client,
-                            transition.Symbol!,
-                            transition.IsBuy,
-                            ct,
-                            transition.RestoreReason);
-                        _pricingContextFailureRetries.TryRemove(transition.Symbol!, out _);
-                        if (TryTakeDirtyPricingContext(transition.Symbol!, out var dirtyReason))
-                            SignalPricingContextChanged(transition.Symbol!, dirtyReason);
-                    }
+                    var transition = ApplyOrderCancelled(c);
+                    await RestoreCancelledSideAsync(client, transition, ct);
                     break;
                 }
             case UpModels.OrderRejected r:
@@ -489,6 +451,52 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
+    internal CancelledOrderTransition ApplyOrderCancelled(UpModels.OrderCancelled cancelled)
+    {
+        _metrics.RecordCancelled();
+        // OrigClOrdID is the original resting order's id; it's only set when
+        // the cancel was explicit. Prefer it, then our cancel-attempt
+        // correlation, then the ER's own ClOrdID for spontaneous cancels.
+        return _orderLifecycle.Synchronize(() =>
+        {
+            var hasCancelAttempt = _tracker.TryResolveCancelAttempt(
+                cancelled.ClOrdID.Value,
+                out var linked,
+                out var cancelReason);
+            var targetClOrdId = cancelled.OrigClOrdID?.Value
+                ?? (hasCancelAttempt ? linked : cancelled.ClOrdID.Value);
+            var known = _tracker.TryGet(targetClOrdId, out var order);
+            var restoreReason = hasCancelAttempt ? cancelReason : (CancelReason?)null;
+            _tracker.OnCancelledForRestore(targetClOrdId, restoreReason);
+            _tracker.ForgetCancelAttempt(cancelled.ClOrdID.Value);
+            _pnlLedger.MarkTerminal(targetClOrdId);
+            return new CancelledOrderTransition(
+                known,
+                known ? order.Symbol : null,
+                known && order.IsBuy,
+                restoreReason);
+        });
+    }
+
+    internal async Task RestoreCancelledSideAsync(
+        IEntryPointClient client,
+        CancelledOrderTransition transition,
+        CancellationToken ct)
+    {
+        if (!transition.Known)
+            return;
+
+        await RequoteAsync(
+            client,
+            transition.Symbol!,
+            transition.IsBuy,
+            ct,
+            transition.RestoreReason);
+        _pricingContextFailureRetries.TryRemove(transition.Symbol!, out _);
+        if (TryTakeDirtyPricingContext(transition.Symbol!, out var dirtyReason))
+            SignalPricingContextChanged(transition.Symbol!, dirtyReason);
+    }
+
     private async Task RequoteAsync(
         IEntryPointClient client,
         string symbol,
@@ -499,6 +507,8 @@ internal sealed class MarketMakerWorker : BackgroundService
         var instr = FindInstrument(symbol);
         if (instr is null)
         {
+            if (restoreReason is not null)
+                _tracker.ClearPendingRestoreReason(symbol, isBuy);
             _log.LogWarning(
                 "[mm] cannot restore quote side for symbol={Symbol} side={Side}: instrument is no longer configured",
                 symbol,
@@ -974,6 +984,11 @@ internal sealed class MarketMakerWorker : BackgroundService
         var decision = BuildQuoteDecision(instr, isBuy);
         if (!decision.ShouldQuote || decision.Price is not { } price)
         {
+            if (restoreReason is not null &&
+                decision.SuppressionReason != QuoteSuppressionReason.FeedUnavailable)
+            {
+                _tracker.ClearPendingRestoreReason(instr.Symbol, isBuy);
+            }
             RecordSuppressedDecision(instr.Symbol, isBuy, decision);
             return;
         }

@@ -1226,6 +1226,71 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task TtlRefreshCancelAck_ReconcileWinsReplacementRace_RejectionStillEmitsOneRestoreAlert()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var logger = new CapturingLogger<MarketMakerWorker>();
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options => options.MaxOrderAge = TimeSpan.FromMinutes(5),
+            logger);
+        var metrics = _metrics[^1];
+        using var listener = new MeterListener();
+        var measurements = new ConcurrentBag<(string Name, long Value)>();
+        listener.InstrumentPublished = (published, meterListener) =>
+        {
+            if (ReferenceEquals(published.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(published);
+        };
+        listener.SetMeasurementEventCallback<long>((published, value, _, _) =>
+            measurements.Add((published.Name, value)));
+        listener.Start();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await worker.CancelStaleOrdersAsync(client, CancellationToken.None);
+        var cancel = client.SubmittedCancels.Single();
+        var transition = worker.ApplyOrderCancelled(new OrderCancelled
+        {
+            ClOrdID = cancel.ClOrdID,
+            OrigClOrdID = cancel.OrigClOrdID,
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = clock.GetUtcNow(),
+        });
+
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        await worker.ReconcileOnceAsync(client, CancellationToken.None);
+        var replacement = client.SubmittedOrders.Last(order => order.Side == Side.Buy);
+        await worker.RestoreCancelledSideAsync(client, transition, CancellationToken.None);
+        Assert.Equal(2, client.SubmittedOrders.Count(order => order.Side == Side.Buy));
+
+        var rejection = new OrderRejected
+        {
+            ClOrdID = replacement.ClOrdID,
+            OrderId = 0,
+            RejectCode = 2,
+            Reason = "instrument halted",
+            SeqNum = 2,
+            SendingTime = clock.GetUtcNow(),
+        };
+        await worker.HandleEventAsync(client, rejection, CancellationToken.None);
+        await worker.HandleEventAsync(client, rejection, CancellationToken.None);
+        listener.RecordObservableInstruments();
+
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        Assert.Contains(("bot.orders.rejected", 2L), measurements);
+        Assert.Contains(("bot.orders.quote_restore_rejected", 1L), measurements);
+        var warnings = logger.Entries
+            .Where(entry => entry.Level >= LogLevel.Warning)
+            .ToArray();
+        var warning = Assert.Single(warnings);
+        Assert.Contains("quote-side restoration rejected", warning.Message);
+        Assert.Contains("TtlRefresh", warning.Message);
+    }
+
+    [Fact]
     public async Task CancelStaleOrdersAsync_OrderWithinMaxAge_DoesNotCancel()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);

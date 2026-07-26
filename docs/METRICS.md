@@ -99,6 +99,9 @@ failure or `bot.orders.quote_restore_rejected` instead; those signals mean the
 healthy bound was not met or the side could not be restored. The generic
 `bot.orders.rejected` counter still includes restoration rejects; the specific
 counter adds the bounded cancel trigger without emitting a second warning.
+The trigger is staged on the vacant `(symbol, side)` at cancel ACK and consumed
+atomically by whichever submit wins next, so a concurrent reconcile replacement
+retains the same restoration telemetry.
 
 Configured-symbol counters publish bounded zero baselines when the metric
 publisher starts. Position, average-entry, and realized-P&L gauges likewise
