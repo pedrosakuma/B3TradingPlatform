@@ -10,6 +10,7 @@ public sealed class MarketMakerPnlLedger
     private readonly Dictionary<string, MutablePosition> _positions = new(StringComparer.Ordinal);
     private readonly Dictionary<ulong, OrderAccountingState> _orders = new();
     private readonly TimeProvider _clock;
+    private string? _reconciliationReason;
 
     public MarketMakerPnlLedger(TimeProvider? clock = null)
     {
@@ -18,6 +19,31 @@ public sealed class MarketMakerPnlLedger
     }
 
     public DateTimeOffset AccountingPeriodStartedAtUtc { get; }
+
+    public bool ReconciliationRequired
+    {
+        get
+        {
+            lock (_gate)
+                return _reconciliationReason is not null;
+        }
+    }
+
+    public string? ReconciliationReason
+    {
+        get
+        {
+            lock (_gate)
+                return _reconciliationReason;
+        }
+    }
+
+    public void RequireReconciliation(string reason)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        lock (_gate)
+            _reconciliationReason ??= reason;
+    }
 
     public FillApplyResult Apply(OwnFill fill)
     {

@@ -20,6 +20,7 @@ namespace B3.Trading.MarketMakerBot.Tests;
 /// </summary>
 internal sealed class FakeEntryPointClient : IEntryPointClient
 {
+    private EventHandler<TerminatedEventArgs>? _terminated;
     public List<NewOrderRequest> SubmittedOrders { get; } = new();
     public List<CancelOrderRequest> SubmittedCancels { get; } = new();
     public List<MassActionRequest> SubmittedMassActions { get; } = new();
@@ -101,11 +102,16 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
     public IRetransmitRequestHandler Retransmit => throw new NotSupportedException();
     public event EventHandler<TerminatedEventArgs>? Terminated
     {
-        add { }
-        remove { }
+        add => _terminated += value;
+        remove => _terminated -= value;
     }
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     public void Publish(EntryPointEvent ev) => _events.Writer.TryWrite(ev);
     public void CompleteEvents() => _events.Writer.TryComplete();
+    public void PublishTerminated(
+        TerminationCode code = TerminationCode.Unspecified,
+        string? reason = "transport closed",
+        bool initiatedByClient = false) =>
+        _terminated?.Invoke(this, new TerminatedEventArgs(code, reason, initiatedByClient));
 }

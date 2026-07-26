@@ -1,4 +1,5 @@
 using B3.EntryPoint.Client.Models;
+using B3.EntryPoint.Client.State;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
@@ -28,7 +29,10 @@ public class MarketMakerWorkerTests : IDisposable
         CreateWorker() => CreateWorker(out _);
 
     private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client, InstrumentConfig Instrument)
-        CreateWorker(out MarketMakerPnlLedger pnlLedger, Action<MarketMakerBotOptions>? configure = null)
+        CreateWorker(
+            out MarketMakerPnlLedger pnlLedger,
+            Action<MarketMakerBotOptions>? configure = null,
+            MarketMakerSessionStateStore? sessionStateStore = null)
     {
         var instrument = new InstrumentConfig
         {
@@ -59,7 +63,8 @@ public class MarketMakerWorkerTests : IDisposable
         var marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance);
         var worker = new MarketMakerWorker(
             Options.Create(options), tracker, priceTracker, volatilitySpread, pnlLedger, metrics,
-            marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance, TimeProvider.System);
+            marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance, TimeProvider.System,
+            sessionStateStore);
         return (worker, tracker, new FakeEntryPointClient(), instrument);
     }
 
@@ -177,6 +182,94 @@ public class MarketMakerWorkerTests : IDisposable
 
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => receive);
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_SixRestoredOrders_RestartStaysAtSix()
+    {
+        var (worker, _, client, _) = CreateWorker(out _, options =>
+        {
+            options.StartupCleanupEnabled = true;
+            options.Instruments.Add(CreateInstrument("VALE3", 2, 60m));
+            options.Instruments.Add(CreateInstrument("ITUB4", 3, 30m));
+        });
+        using var cts = new CancellationTokenSource();
+        var liveOrders = 6;
+        client.SubmitHandler = (_, _) =>
+        {
+            Interlocked.Increment(ref liveOrders);
+            return Task.CompletedTask;
+        };
+        client.MassActionHandler = (request, _) =>
+        {
+            Interlocked.Exchange(ref liveOrders, 0);
+            for (ulong i = 1; i <= 6; i++)
+            {
+                client.Publish(new OrderCancelled
+                {
+                    ClOrdID = new ClOrdID(1000 + i),
+                    OrigClOrdID = null,
+                    OrderId = 2000 + i,
+                    OrderStatus = OrderStatus.Cancelled,
+                    SeqNum = i,
+                    SendingTime = DateTimeOffset.UtcNow,
+                });
+            }
+            client.Publish(MassActionEvent(
+                request,
+                MassActionResponse.Accepted,
+                seqNum: 7));
+            return Task.FromResult(MassActionSendResult(request));
+        };
+
+        var receive = await worker.PrepareConnectedSessionAsync(client, cts.Token);
+
+        Assert.Equal(6, client.SubmittedOrders.Count);
+        Assert.Equal(6, Volatile.Read(ref liveOrders));
+        Assert.All(
+            client.SubmittedOrders.GroupBy(order => order.SecurityId),
+            orders => Assert.Equal(2, orders.Count()));
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => receive);
+    }
+
+    [Fact]
+    public void BuildClientOptions_ColdResumesBeforeAdvancingAndHonorsConfiguredFloor()
+    {
+        var (worker, _, _, _) = CreateWorker(out _, options => options.SessionVerId = 12);
+        var stateStore = new NoopSessionStateStore();
+
+        var clientOptions = worker.BuildClientOptions(
+            new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 9876),
+            stateStore);
+
+        Assert.Equal(B3.EntryPoint.Client.ConnectMode.EstablishReuseThenNegotiate, clientOptions.ConnectMode);
+        Assert.Equal(12u, clientOptions.SessionVerId);
+        Assert.Equal(12u, clientOptions.NextSessionVerIdSelector!(8));
+        Assert.Equal(13u, clientOptions.NextSessionVerIdSelector!(12));
+    }
+
+    [Fact]
+    public async Task RunConnectedSessionAsync_PeerTerminationStopsWorkerPromptly()
+    {
+        var (worker, _, client, _) = CreateWorker();
+        using var cts = new CancellationTokenSource();
+        var primed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.SubmitHandler = (_, _) =>
+        {
+            if (client.SubmittedOrders.Count == 2)
+                primed.TrySetResult();
+            return Task.CompletedTask;
+        };
+
+        var run = worker.RunConnectedSessionAsync(client, cts.Token);
+        await primed.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        client.PublishTerminated(reason: "matching disappeared");
+
+        var error = await Assert.ThrowsAsync<MarketMakerSessionTerminatedException>(
+            () => run.WaitAsync(TimeSpan.FromSeconds(1)));
+        Assert.Contains("matching disappeared", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -840,6 +933,56 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task HandleEventAsync_OrderAcceptedRetiresKnownAppliedPersistedNew()
+    {
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "accepted-session-state-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            var (worker, tracker, client, instrument) =
+                CreateWorker(out _, sessionStateStore: stateStore);
+            await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+            var clOrdId = Assert.Single(client.SubmittedOrders).ClOrdID;
+            await stateStore.SaveAsync(new SessionSnapshot
+            {
+                SessionId = 1,
+                SessionVerId = 10,
+                LastOutboundSeqNum = 1,
+                CapturedAt = DateTimeOffset.UtcNow,
+                OutstandingOrders = new Dictionary<string, ulong>
+                {
+                    [clOrdId.ToString()] = instrument.SecurityId,
+                },
+            });
+
+            await worker.HandleEventAsync(client, new OrderAccepted
+            {
+                ClOrdID = clOrdId,
+                OrderId = 100,
+                SecurityId = instrument.SecurityId,
+                Side = Side.Buy,
+                OrderStatus = OrderStatus.New,
+                LeavesQty = null,
+                SeqNum = 1,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, new CancellationToken(canceled: true));
+
+            var replayed = await stateStore.ReplayAsync();
+            Assert.NotNull(replayed);
+            Assert.Empty(replayed.OutstandingOrders);
+            Assert.True(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task HandleEventAsync_OrderTrade_FilledWithNullLeaves_ClosesAndRequotes()
     {
         var (worker, tracker, client, instrument) = CreateWorker();
@@ -864,6 +1007,58 @@ public class MarketMakerWorkerTests : IDisposable
         Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
         Assert.Equal(2, client.SubmittedOrders.Count);
         Assert.NotEqual(clOrdId, client.SubmittedOrders[1].ClOrdID.Value);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_FilledWithNullLeavesPersistsInboundFence()
+    {
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "filled-session-state-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            var (worker, _, client, instrument) =
+                CreateWorker(out _, sessionStateStore: stateStore);
+            await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+            var clOrdId = Assert.Single(client.SubmittedOrders).ClOrdID;
+            await stateStore.SaveAsync(new SessionSnapshot
+            {
+                SessionId = 1,
+                SessionVerId = 10,
+                LastOutboundSeqNum = 1,
+                CapturedAt = DateTimeOffset.UtcNow,
+                OutstandingOrders = new Dictionary<string, ulong>
+                {
+                    [clOrdId.ToString()] = instrument.SecurityId,
+                },
+            });
+
+            await worker.HandleEventAsync(client, new OrderTrade
+            {
+                ClOrdID = clOrdId,
+                OrderId = 100,
+                TradeId = 1,
+                OrderStatus = OrderStatus.Filled,
+                LastPx = 30m,
+                LastQty = 100,
+                LeavesQty = null,
+                SeqNum = 77,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, CancellationToken.None);
+
+            var restartedStore = new MarketMakerSessionStateStore(directory);
+            var replayed = await restartedStore.ReplayAsync();
+            Assert.NotNull(replayed);
+            Assert.Equal(77ul, replayed.LastInboundSeqNum);
+            Assert.DoesNotContain(clOrdId.ToString(), replayed.OutstandingOrders.Keys);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -1046,25 +1241,92 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task HandleEventAsync_UnknownOrderTrade_DoesNotCreateLedgerState()
+    public async Task HandleEventAsync_UnknownOrderTrade_RequiresReconciliationAndFailsClosed()
     {
-        var (worker, _, client, _) = CreateWorker(out var ledger);
-
-        await worker.HandleEventAsync(client, new OrderTrade
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "reconciliation-state-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
         {
-            ClOrdID = new ClOrdID(999),
-            OrderId = 100,
-            TradeId = 55,
-            OrderStatus = OrderStatus.Filled,
-            LastPx = 30m,
-            LastQty = 100,
-            CumQty = 100,
-            LeavesQty = 0,
-            SeqNum = 1,
-            SendingTime = DateTimeOffset.UtcNow,
-        }, CancellationToken.None);
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            var (worker, _, client, _) =
+                CreateWorker(out var ledger, sessionStateStore: stateStore);
 
-        Assert.Empty(ledger.SnapshotAll());
+            var error = await Assert.ThrowsAsync<MarketMakerReconciliationRequiredException>(
+                () => worker.HandleEventAsync(client, new OrderTrade
+                {
+                    ClOrdID = new ClOrdID(999),
+                    OrderId = 100,
+                    TradeId = 55,
+                    OrderStatus = OrderStatus.Filled,
+                    LastPx = 30m,
+                    LastQty = 100,
+                    CumQty = 100,
+                    LeavesQty = 0,
+                    SeqNum = 1,
+                    SendingTime = DateTimeOffset.UtcNow,
+                }, new CancellationToken(canceled: true)));
+
+            Assert.Empty(ledger.SnapshotAll());
+            Assert.True(ledger.ReconciliationRequired);
+            Assert.Equal(error.Message, ledger.ReconciliationReason);
+            var restartedStore = new MarketMakerSessionStateStore(directory);
+            var requirement = await restartedStore.GetReconciliationRequirementAsync();
+            Assert.NotNull(requirement);
+            Assert.Equal(error.Message, requirement.Reason);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_ExplicitCancelRetiresOriginalPersistedNew()
+    {
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "worker-session-state-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            var (worker, _, client, instrument) = CreateWorker(out _, sessionStateStore: stateStore);
+            await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+            var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID;
+            await stateStore.SaveAsync(new SessionSnapshot
+            {
+                SessionId = 1,
+                SessionVerId = 10,
+                LastOutboundSeqNum = 1,
+                CapturedAt = DateTimeOffset.UtcNow,
+                OutstandingOrders = new Dictionary<string, ulong>
+                {
+                    [originalClOrdId.ToString()] = instrument.SecurityId,
+                },
+            });
+
+            await worker.HandleEventAsync(client, new OrderCancelled
+            {
+                ClOrdID = new ClOrdID(originalClOrdId.Value + 1),
+                OrigClOrdID = originalClOrdId,
+                OrderId = 100,
+                OrderStatus = OrderStatus.Cancelled,
+                SeqNum = 1,
+                SendingTime = DateTimeOffset.UtcNow,
+            }, new CancellationToken(canceled: true));
+
+            var replayed = await stateStore.ReplayAsync();
+            Assert.NotNull(replayed);
+            Assert.DoesNotContain(originalClOrdId.ToString(), replayed.OutstandingOrders.Keys);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -2136,9 +2398,10 @@ public class MarketMakerWorkerTests : IDisposable
     private static MassActionExecuted MassActionEvent(
         MassActionRequest request,
         MassActionResponse response,
-        MassActionRejectReason? rejectReason = null) => new()
+        MassActionRejectReason? rejectReason = null,
+        ulong seqNum = 1) => new()
         {
-            SeqNum = 1,
+            SeqNum = seqNum,
             SendingTime = DateTimeOffset.UtcNow,
             ClOrdID = request.ClOrdID,
             MassActionReportId = 1,
@@ -2147,6 +2410,34 @@ public class MarketMakerWorkerTests : IDisposable
             Response = response,
             RejectReason = rejectReason,
         };
+
+    private static InstrumentConfig CreateInstrument(
+        string symbol,
+        ulong securityId,
+        decimal refPrice) => new()
+        {
+            Symbol = symbol,
+            SecurityId = securityId,
+            RefPrice = refPrice,
+            TickSize = 0.01m,
+            LotSize = 100,
+            QuoteLots = 1,
+            SpreadTicks = 5,
+        };
+
+    private sealed class NoopSessionStateStore : ISessionStateStore
+    {
+        public ValueTask<SessionSnapshot?> LoadAsync(CancellationToken ct = default) =>
+            ValueTask.FromResult<SessionSnapshot?>(null);
+        public ValueTask SaveAsync(SessionSnapshot snapshot, CancellationToken ct = default) =>
+            ValueTask.CompletedTask;
+        public ValueTask AppendDeltaAsync(SessionDelta delta, CancellationToken ct = default) =>
+            ValueTask.CompletedTask;
+        public ValueTask<SessionSnapshot?> ReplayAsync(CancellationToken ct = default) =>
+            ValueTask.FromResult<SessionSnapshot?>(null);
+        public ValueTask CompactAsync(CancellationToken ct = default) =>
+            ValueTask.CompletedTask;
+    }
 
     private static Task AckCancelAsync(
         MarketMakerWorker worker,

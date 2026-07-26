@@ -24,8 +24,9 @@ public sealed class MarketMakerBotOptions
     /// <summary>EnteringFirm code from matching's <c>firms[].enteringFirmCode</c>.</summary>
     [Required] public uint EnteringFirm { get; set; }
 
-    /// <summary>Configured floor for the FIXP <c>SessionVerId</c>; the SDK's
-    /// <c>FileSessionStateStore</c> bumps from this on warm restart.</summary>
+    /// <summary>Configured floor for the FIXP <c>SessionVerId</c>. Warm
+    /// restart first attempts to reattach the persisted version; a rejected
+    /// reattach advances monotonically to at least this value.</summary>
     public uint SessionVerId { get; set; } = 1;
 
     /// <summary>Verbatim JSON credential payload — matching's FixpSession
