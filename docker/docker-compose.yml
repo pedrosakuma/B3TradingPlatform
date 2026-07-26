@@ -67,12 +67,15 @@ name: b3trading
 
 services:
   matching-platform:
-    # NB: pinned to an immutable digest, not :latest. See
+    # NB: pinned to an immutable digest, not :latest. Keep this compatible
+    # with the marketdata digest below: snapshot epoch metadata changes must
+    # promote the producer and consumer together.
+    # See
     # scripts/matching-image/check-upstream.sh and the
     # matching-image-bump workflow for the bump cadence.
     # Devs can still override (e.g. MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest)
     # to test the bleeding edge locally.
-    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:4c6351ac113d0a0c8425bd7ac0686ab0e4333dc44f33ab3878f836817a8fdef5}
+    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:c4dc6f4c70e67be459a36951ca9ed0da8d74009306975084bf6edccef9d67b5c}
     container_name: b3-matching-platform
     restart: unless-stopped
     networks:
@@ -111,7 +114,9 @@ services:
     # — that name is hard-coded into docker/real/exchange-simulator.bridge.json
     # (matching's UMDF sink) and into trading-host's
     # Trading__MarketData__WsUrl below.
-    image: ghcr.io/pedrosakuma/b3-marketdata:${MARKETDATA_TAG:-latest}
+    # Pinned with matching-platform above. Floating marketdata independently
+    # can activate a newer snapshot epoch contract against an older producer.
+    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:bb06aa2e810cee9167c5ecd95de6a23e3f845b278cdcd998d16db5b3886d6921}
     container_name: b3-marketdata
     restart: unless-stopped
     environment:
@@ -415,7 +420,7 @@ services:
   #
   #   PCAP_DIR=/path/to/pcaps docker compose --profile marketdata-pcap up
   marketdata-pcap:
-    image: ghcr.io/pedrosakuma/b3-marketdata:${MARKETDATA_TAG:-latest}
+    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:bb06aa2e810cee9167c5ecd95de6a23e3f845b278cdcd998d16db5b3886d6921}
     container_name: b3-marketdata-pcap
     restart: unless-stopped
     profiles: ["marketdata-pcap"]

@@ -421,6 +421,12 @@ jobs:
               .services["trading-host"].environment["Trading__Risk__PerEndClient__soak-counterparty__AllowShortSell"] == "true"
             ' >/dev/null
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.real.yml -f docker/docker-compose.market-maker.yml -f docker/docker-compose.conformance.yml -f docker/docker-compose.market-maker-conformance.yml config --quiet
+          docker compose -f docker/docker-compose.yml --profile marketdata-pcap config --format json |
+            jq -e '
+              (.services["matching-platform"].image | test("^ghcr\\.io/pedrosakuma/b3-matching@sha256:[0-9a-f]{64}$")) and
+              (.services.marketdata.image | test("^ghcr\\.io/pedrosakuma/b3-marketdata@sha256:[0-9a-f]{64}$")) and
+              (.services["marketdata-pcap"].image == .services.marketdata.image)
+            ' >/dev/null
 
       - name: docker compose auth mode wiring smoke
         run: python3 docker/test/compose-auth-config-smoke.py
