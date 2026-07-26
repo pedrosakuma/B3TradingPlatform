@@ -418,14 +418,14 @@ public class OrderTrackerTests
         Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL));
         // Book-driven reactive cancels are explicitly tagged PriceDrift — this
         // is how MarketMakerWorker.HandleEventAsync's OrderRejected case
-        // tells a stale-order cancel reject apart from a book-driven
+        // tells a TTL-refresh cancel reject apart from a book-driven
         // requote cancel reject once both share the same submit path.
         Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 91UL, origClOrdId: 2UL,
             minIntervalSinceLastAttempt: null, reason: CancelReason.PriceDrift));
 
         Assert.True(t.TryResolveCancelAttempt(90UL, out var origA, out var reasonA));
         Assert.Equal(1UL, origA);
-        Assert.Equal(CancelReason.StaleOrder, reasonA);
+        Assert.Equal(CancelReason.TtlRefresh, reasonA);
 
         Assert.True(t.TryResolveCancelAttempt(91UL, out var origB, out var reasonB));
         Assert.Equal(2UL, origB);

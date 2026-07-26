@@ -275,6 +275,15 @@ still close it, while late rejects of expired cancel IDs are recognized as
 cancel rejects and cannot free the original order as if they rejected a new
 submit. `MinRequoteInterval` continues to throttle strategy/feed retries.
 
+`MarketMaker__MaxOrderAge` is an order lease, not a missed-fill detector. Each
+healthy expiry submits a TTL refresh cancel at Information level and replaces
+that side after the authoritative cancel ACK. A brief one-sided book interval
+during this cancel/ACK/requote round trip is expected; it should end with the
+immediate replacement submit. Cancel rejection, synchronous cancel failure,
+`CancelAckTimeout`, or replacement-submit failure remain warnings because they
+mean the side could not be restored within the healthy cycle. Monitor
+`bot_orders_ttl_refresh_total` as expected lifecycle volume, not as an incident.
+
 Inventory skew is opt-in and defaults off independently for every
 instrument:
 

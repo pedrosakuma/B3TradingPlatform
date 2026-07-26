@@ -199,7 +199,7 @@ public sealed class OrderTracker
     public void RegisterCancelAttempt(
         ulong cancelClOrdId,
         ulong origClOrdId,
-        CancelReason reason = CancelReason.StaleOrder)
+        CancelReason reason = CancelReason.TtlRefresh)
     {
         _cancelAttempts[cancelClOrdId] = new CancelAttempt(origClOrdId, reason);
         if (_orders.TryGetValue(origClOrdId, out var order))
@@ -217,7 +217,7 @@ public sealed class OrderTracker
     /// <paramref name="minIntervalSinceLastAttempt"/> is given) at least
     /// that much time has passed since its last cancel attempt. RFC #703's
     /// book-driven reactive requote path (<c>MarketMakerWorker.ReactToBookChangeAsync</c>)
-    /// runs concurrently with the pre-existing staleness guard
+    /// runs concurrently with the periodic TTL refresh
     /// (<c>CancelStaleOrdersAsync</c>) on a separate loop; without this
     /// atomicity, both could observe <c>PendingCancelClOrdId == null</c>
     /// for the same order and each submit a distinct CancelOrderRequest
@@ -233,14 +233,14 @@ public sealed class OrderTracker
     /// a concurrent fill/cancel has already closed it via <see cref="Close"/>.
     /// <paramref name="reason"/> is stamped onto the correlation row so a
     /// later reject can be attributed to the correct trigger (see
-    /// <see cref="TryResolveCancelAttempt"/>) instead of the staleness
-    /// guard and the reactive path being indistinguishable once both
+    /// <see cref="TryResolveCancelAttempt"/>) instead of the TTL refresh
+    /// and reactive paths being indistinguishable once both
     /// funnel through the same shared submit helper.
     /// Returns <c>false</c> (registering nothing) when any guard fails, so
     /// the caller skips submitting a cancel altogether.
     /// </summary>
     public bool TryRegisterCancelAttempt(ulong cancelClOrdId, ulong origClOrdId,
-        TimeSpan? minIntervalSinceLastAttempt = null, CancelReason reason = CancelReason.StaleOrder)
+        TimeSpan? minIntervalSinceLastAttempt = null, CancelReason reason = CancelReason.TtlRefresh)
     {
         if (!_orders.TryGetValue(origClOrdId, out var order)) return false;
         lock (order)
@@ -266,7 +266,7 @@ public sealed class OrderTracker
     /// name="reason"/> set to which trigger raised it — used by
     /// <c>MarketMakerWorker.HandleEventAsync</c>'s OrderRejected case to
     /// attribute the reject to the right metric/log instead of always
-    /// reporting it as a stale-order cancel reject now that both
+    /// reporting it as a TTL-refresh cancel reject now that both
     /// triggers share the same submit path.
     /// </summary>
     public bool TryResolveCancelAttempt(ulong clOrdId, out ulong origClOrdId, out CancelReason reason)
@@ -568,7 +568,7 @@ public readonly record struct ExpiredPendingCancel(
 /// </summary>
 public enum CancelReason
 {
-    StaleOrder,
+    TtlRefresh,
     PriceDrift,
     InventoryStrategy,
     VolatilityStrategy,

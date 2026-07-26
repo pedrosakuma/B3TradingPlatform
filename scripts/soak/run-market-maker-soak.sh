@@ -1595,9 +1595,9 @@ metric_names=(
     bot_pnl_fill_delta_mismatch_total
     bot_orders_rejected_total
     bot_orders_cancelled_total
-    bot_orders_stale_cancelled_total
-    bot_orders_stale_cancel_rejected_total
-    bot_orders_stale_cancel_submit_failed_total
+    bot_orders_ttl_refresh_total
+    bot_orders_ttl_refresh_cancel_rejected_total
+    bot_orders_ttl_refresh_cancel_submit_failed_total
     bot_orders_safety_cap_hit_total
     bot_orders_book_driven_requote_total
     bot_orders_book_driven_requote_submit_failed_total
@@ -1735,8 +1735,9 @@ mandatory_metric_requirements() {
         symbol("bot_pnl_fills_inconsistent_total"),
         symbol("bot_pnl_fill_delta_mismatch_total"),
         symbol("bot_orders_rejected_total"),
-        symbol("bot_orders_stale_cancel_rejected_total"),
-        symbol("bot_orders_stale_cancel_submit_failed_total"),
+        symbol("bot_orders_ttl_refresh_total"),
+        symbol("bot_orders_ttl_refresh_cancel_rejected_total"),
+        symbol("bot_orders_ttl_refresh_cancel_submit_failed_total"),
         symbol("bot_orders_safety_cap_hit_total"),
         symbol("bot_orders_book_driven_requote_submit_failed_total"),
         symbol("bot_orders_book_driven_requote_cancel_rejected_total"),
@@ -2498,8 +2499,8 @@ fills_applied="$(metric_value 'sum(bot_pnl_fills_applied_total{service_name="b3-
 operational_errors="$(sum_metric_values \
     bot_orders_submit_failed_total \
     bot_orders_rejected_total \
-    bot_orders_stale_cancel_rejected_total \
-    bot_orders_stale_cancel_submit_failed_total \
+    bot_orders_ttl_refresh_cancel_rejected_total \
+    bot_orders_ttl_refresh_cancel_submit_failed_total \
     bot_orders_book_driven_requote_submit_failed_total \
     bot_orders_book_driven_requote_cancel_rejected_total \
     bot_orders_feed_unavailable_cancel_rejected_total \

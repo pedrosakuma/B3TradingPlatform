@@ -378,22 +378,19 @@ internal sealed class MarketMakerWorker : BackgroundService
                     if (cancelReject.Matched)
                     {
                         // Attribute the reject to the trigger that raised
-                        // the shared cancel request. Existing stale-order
-                        // and price-drift metrics retain their historical
-                        // names while future strategy/feed reasons can use
-                        // the same correlation seam.
+                        // the shared cancel request.
                         if (cancelReject.CancelReason == CancelReason.PriceDrift)
                         {
                             _metrics.RecordBookDrivenRequoteCancelRejected(cancelReject.StuckSymbol);
-                            _log.LogInformation(
+                            _log.LogWarning(
                                 "[mm] book-driven requote cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
                                 cancelReject.OrigClOrdId, r.Reason);
                         }
-                        else if (cancelReject.CancelReason == CancelReason.StaleOrder)
+                        else if (cancelReject.CancelReason == CancelReason.TtlRefresh)
                         {
-                            _metrics.RecordStaleCancelRejected(cancelReject.StuckSymbol);
+                            _metrics.RecordTtlRefreshCancelRejected(cancelReject.StuckSymbol);
                             _log.LogWarning(
-                                "[mm] stale-order cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
+                                "[mm] TTL refresh cancel rejected for clordid={ClOrdId} reason={Reason}; possible missed terminal event, leaving tracker state unchanged (see RFC #703)",
                                 cancelReject.OrigClOrdId, r.Reason);
                         }
                         else if (cancelReject.CancelReason == CancelReason.FeedUnavailable)
@@ -466,7 +463,14 @@ internal sealed class MarketMakerWorker : BackgroundService
     private async Task RequoteAsync(IEntryPointClient client, string symbol, bool isBuy, CancellationToken ct)
     {
         var instr = FindInstrument(symbol);
-        if (instr is null) return;
+        if (instr is null)
+        {
+            _log.LogWarning(
+                "[mm] cannot restore quote side for symbol={Symbol} side={Side}: instrument is no longer configured",
+                symbol,
+                isBuy ? "buy" : "sell");
+            return;
+        }
         await QuoteSideAsync(client, instr, isBuy, ct);
     }
 
@@ -551,7 +555,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     }
 
     /// <summary>
-    /// RFC #703 miss-fill guard: the SDK has no order-status query, so we
+    /// RFC #703 order lease: the SDK has no order-status query, so we
     /// can't ask the venue "is this still really open" — instead, any
     /// order the tracker still considers open past
     /// <see cref="MarketMakerBotOptions.MaxOrderAge"/> is explicitly
@@ -581,7 +585,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                 // Instrument config was removed/renamed since the order was
                 // submitted; there is no valid SecurityId to cancel with.
                 _log.LogWarning(
-                    "[mm] cannot build stale-order cancel for clordid={ClOrdId}: unknown instrument {Symbol}",
+                    "[mm] cannot start TTL refresh for clordid={ClOrdId}: unknown instrument {Symbol}",
                     o.ClOrdId, o.Symbol);
                 continue;
             }
@@ -589,14 +593,15 @@ internal sealed class MarketMakerWorker : BackgroundService
                     client,
                     o,
                     instr,
-                    CancelReason.StaleOrder,
-                    _metrics.RecordStaleCancelSubmitFailed,
+                    CancelReason.TtlRefresh,
+                    _metrics.RecordTtlRefreshCancelSubmitFailed,
                     ct))
             {
-                _metrics.RecordStaleOrderCancelled(o.Symbol);
-                _log.LogWarning(
-                    "[mm] cancelled stale order clordid={ClOrdId} symbol={Symbol} side={Side} age={Age} (miss-fill guard)",
-                    o.ClOrdId, o.Symbol, o.IsBuy ? "buy" : "sell", _tracker.UtcNow - o.SubmittedAtUtc);
+                _metrics.RecordTtlRefresh(o.Symbol);
+                _log.LogInformation(
+                    "[mm] TTL refresh cancel submitted clordid={ClOrdId} symbol={Symbol} side={Side} age={Age}; awaiting cancel ACK before replacement",
+                    o.ClOrdId, o.Symbol, o.IsBuy ? "buy" : "sell",
+                    _tracker.UtcNow - o.SubmittedAtUtc);
             }
         }
     }
@@ -876,7 +881,7 @@ internal sealed class MarketMakerWorker : BackgroundService
     /// correlation row so a later OrderRejected can be attributed to the
     /// right trigger (see <see cref="OrderTracker.TryResolveCancelAttempt(ulong, out ulong, out CancelReason)"/>
     /// and <see cref="HandleEventAsync"/>'s OrderRejected case) instead of
-    /// always being reported as a stale-order cancel reject now that both
+    /// always being reported as a TTL-refresh cancel reject now that both
     /// triggers share this same submit path. Returns whether the cancel
     /// was accepted for transmission (false also when a cancel was
     /// already outstanding for this order from the OTHER path, the order
@@ -913,7 +918,12 @@ internal sealed class MarketMakerWorker : BackgroundService
             // catch runs.
             _tracker.ClearPendingCancelIfMatches(o.ClOrdId, cancelClOrdId);
             recordSubmitFailed(o.Symbol);
-            _log.LogWarning(ex, "[mm] failed to cancel clordid={ClOrdId} symbol={Symbol}", o.ClOrdId, o.Symbol);
+            _log.LogWarning(
+                ex,
+                "[mm] failed to cancel clordid={ClOrdId} symbol={Symbol} trigger={CancelReason}",
+                o.ClOrdId,
+                o.Symbol,
+                reason);
             if (IsPricingContextReason(reason))
                 RetryPricingContextChanged(o.Symbol, reason);
             return false;
