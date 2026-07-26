@@ -72,6 +72,7 @@ metadata, never accumulated position or P&L.
 | `bot.orders.ttl_refresh` | Counter | `symbol` | Expected `MaxOrderAge` lease-refresh cancel requests accepted for transmission; a steady non-zero rate is normal |
 | `bot.orders.ttl_refresh_cancel_rejected` | Counter | `symbol` | TTL refresh cancel rejects; possible missed terminal event requiring guarded recovery |
 | `bot.orders.ttl_refresh_cancel_submit_failed` | Counter | `symbol` | TTL refresh cancel transmission failures |
+| `bot.orders.quote_restore_rejected` | Counter | `symbol`, `reason` | Replacement quote was asynchronously rejected after an acknowledged cancel; subset of `bot.orders.rejected` identifying a side-restoration failure |
 | `bot.orders.safety_cap_hit` | Counter | `symbol` | `MaxOpenOrders` prevented a new quote |
 | `bot.orders.book_driven_requote` | Counter | `symbol`, `side` | Price-drift cancel/requote requests |
 | `bot.orders.book_driven_requote_submit_failed` | Counter | `symbol` | Book-driven cancel transmission failures |
@@ -94,8 +95,10 @@ briefly absent between the venue cancel and the replacement submit. That
 transient interval is bounded by the normal cancel/ACK/requote round trip and is
 not a missed-fill signal. Alert on refresh cancel rejection or synchronous
 failure, `bot.orders.cancel_ack_expired{reason="ttl_refresh"}`, and quote-submit
-failure instead; those signals mean the healthy bound was not met or the side
-could not be restored.
+failure or `bot.orders.quote_restore_rejected` instead; those signals mean the
+healthy bound was not met or the side could not be restored. The generic
+`bot.orders.rejected` counter still includes restoration rejects; the specific
+counter adds the bounded cancel trigger without emitting a second warning.
 
 Configured-symbol counters publish bounded zero baselines when the metric
 publisher starts. Position, average-entry, and realized-P&L gauges likewise

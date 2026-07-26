@@ -53,6 +53,7 @@ public class MarketMakerMetricsTests
             Assert.Contains(("bot.orders.ttl_refresh", 0L, symbol), longs);
             Assert.Contains(("bot.orders.ttl_refresh_cancel_rejected", 0L, symbol), longs);
             Assert.Contains(("bot.orders.ttl_refresh_cancel_submit_failed", 0L, symbol), longs);
+            Assert.Contains(("bot.orders.quote_restore_rejected", 0L, symbol), longs);
             Assert.Contains(("bot.pnl.fills_duplicate", 0L, symbol), longs);
             Assert.Contains(("bot.orders.safety_cap_hit", 0L, symbol), longs);
             Assert.Contains(("bot.orders.feed_unavailable_cancel", 0L, symbol), longs);

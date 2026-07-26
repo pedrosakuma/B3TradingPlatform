@@ -37,6 +37,7 @@ public sealed class MarketMakerMetrics : IDisposable
     private readonly ObservableMetricCounter _ttlRefreshes;
     private readonly ObservableMetricCounter _ttlRefreshCancelRejected;
     private readonly ObservableMetricCounter _ttlRefreshCancelSubmitFailed;
+    private readonly ObservableMetricCounter _quoteRestoreRejected;
     private readonly ObservableMetricCounter _safetyCapHits;
     private readonly ObservableMetricCounter _bookDrivenRequotes;
     private readonly ObservableMetricCounter _bookDrivenRequoteSubmitFailed;
@@ -80,6 +81,7 @@ public sealed class MarketMakerMetrics : IDisposable
         _ttlRefreshCancelRejected = new(_meter, "bot.orders.ttl_refresh_cancel_rejected");
         _ttlRefreshCancelSubmitFailed =
             new(_meter, "bot.orders.ttl_refresh_cancel_submit_failed");
+        _quoteRestoreRejected = new(_meter, "bot.orders.quote_restore_rejected");
         _safetyCapHits = new(_meter, "bot.orders.safety_cap_hit");
         _bookDrivenRequotes = new(_meter, "bot.orders.book_driven_requote");
         _bookDrivenRequoteSubmitFailed =
@@ -159,6 +161,11 @@ public sealed class MarketMakerMetrics : IDisposable
         _ttlRefreshCancelRejected.Add(1, SymbolTag(symbol));
     public void RecordTtlRefreshCancelSubmitFailed(string symbol) =>
         _ttlRefreshCancelSubmitFailed.Add(1, SymbolTag(symbol));
+    public void RecordQuoteRestoreRejected(string symbol, CancelReason reason) =>
+        _quoteRestoreRejected.Add(
+            1,
+            SymbolTag(symbol),
+            new("reason", CancelReasonName(reason)));
     public void RecordSafetyCapHit(string symbol) => _safetyCapHits.Add(1, SymbolTag(symbol));
     public void RecordBookDrivenRequote(string symbol, bool isBuy) =>
         _bookDrivenRequotes.Add(1, SymbolTag(symbol), SideTag(isBuy));
@@ -231,6 +238,10 @@ public sealed class MarketMakerMetrics : IDisposable
             _ttlRefreshes.Add(0, symbol);
             _ttlRefreshCancelRejected.Add(0, symbol);
             _ttlRefreshCancelSubmitFailed.Add(0, symbol);
+            _quoteRestoreRejected.Add(
+                0,
+                symbol,
+                new("reason", CancelReasonName(CancelReason.TtlRefresh)));
             _safetyCapHits.Add(0, symbol);
             _bookDrivenRequoteSubmitFailed.Add(0, symbol);
             _bookDrivenRequoteCancelRejected.Add(0, symbol);

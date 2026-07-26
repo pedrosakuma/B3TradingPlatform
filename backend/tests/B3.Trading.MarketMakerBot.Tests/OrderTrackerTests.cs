@@ -121,6 +121,40 @@ public class OrderTrackerTests
     }
 
     [Fact]
+    public void TryTakeRestoreReason_ConsumesContextOnce()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(
+            1UL,
+            "PETR4",
+            30m,
+            100,
+            isBuy: true,
+            restoreReason: CancelReason.TtlRefresh));
+
+        Assert.True(t.TryTakeRestoreReason(1UL, out var reason));
+        Assert.Equal(CancelReason.TtlRefresh, reason);
+        Assert.False(t.TryTakeRestoreReason(1UL, out _));
+    }
+
+    [Fact]
+    public void OnAccepted_ClearsRestoreContext()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(
+            1UL,
+            "PETR4",
+            30m,
+            100,
+            isBuy: true,
+            restoreReason: CancelReason.TtlRefresh));
+
+        t.OnAccepted(1UL, leaves: null);
+
+        Assert.False(t.TryTakeRestoreReason(1UL, out _));
+    }
+
+    [Fact]
     public void TryGet_UnknownClOrdId_ReturnsFalse()
     {
         var t = new OrderTracker();

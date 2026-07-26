@@ -13,6 +13,19 @@ absent_sample="$(printf '%s\n' '{"data":{"result":[]}}' | soak_metric_sample)"
 [[ "$(jq -r '.present' <<<"$absent_sample")" == "false" ]]
 [[ "$(jq -r '.value' <<<"$absent_sample")" == "null" ]]
 
+mock_cancel_ack_expired=0
+metric_value() {
+    if [[ "$1" == "sum(bot_orders_cancel_ack_expired_total)" ]]; then
+        printf '%s\n' "$mock_cancel_ack_expired"
+    else
+        printf '0\n'
+    fi
+}
+[[ "$(soak_operational_error_total)" == "0" ]]
+mock_cancel_ack_expired=1
+[[ "$(soak_operational_error_total)" == "1" ]]
+unset -f metric_value
+
 [[ "$(soak_duration_to_seconds 00:00:12)" == "12" ]]
 [[ "$(soak_duration_to_seconds 01:02:03)" == "3723" ]]
 if soak_duration_to_seconds 12s >/dev/null 2>&1; then

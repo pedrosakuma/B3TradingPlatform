@@ -281,8 +281,11 @@ that side after the authoritative cancel ACK. A brief one-sided book interval
 during this cancel/ACK/requote round trip is expected; it should end with the
 immediate replacement submit. Cancel rejection, synchronous cancel failure,
 `CancelAckTimeout`, or replacement-submit failure remain warnings because they
-mean the side could not be restored within the healthy cycle. Monitor
-`bot_orders_ttl_refresh_total` as expected lifecycle volume, not as an incident.
+mean the side could not be restored within the healthy cycle. An asynchronous
+replacement reject also emits one restoration warning plus
+`bot_orders_quote_restore_rejected_total`, while remaining included in the
+generic reject counter. Monitor `bot_orders_ttl_refresh_total` as expected
+lifecycle volume, not as an incident.
 
 Inventory skew is opt-in and defaults off independently for every
 instrument:

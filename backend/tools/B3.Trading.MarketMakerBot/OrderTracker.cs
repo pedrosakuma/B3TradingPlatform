@@ -141,7 +141,13 @@ public sealed class OrderTracker
     /// the event-driven requote path and the reconcile safety net can
     /// never both submit a replacement for the same side.
     /// </summary>
-    public bool TryRegisterSubmit(ulong clOrdId, string symbol, decimal price, long quantity, bool isBuy)
+    public bool TryRegisterSubmit(
+        ulong clOrdId,
+        string symbol,
+        decimal price,
+        long quantity,
+        bool isBuy,
+        CancelReason? restoreReason = null)
     {
         lock (_sideLock)
         {
@@ -160,6 +166,7 @@ public sealed class OrderTracker
             Quantity = quantity,
             IsBuy = isBuy,
             SubmittedAtUtc = now,
+            RestoreReason = restoreReason,
             // Treat as open until we learn otherwise. A fill or reject ER
             // closes it; an explicit cancel ER closes it.
             IsOpen = true,
@@ -179,6 +186,27 @@ public sealed class OrderTracker
             return true;
         }
         order = default!;
+        return false;
+    }
+
+    /// <summary>
+    /// Atomically consumes the cancel trigger that caused this order to be
+    /// submitted as a quote-side restoration. Consumption makes duplicate
+    /// rejection ERs unable to emit duplicate restoration alerts.
+    /// </summary>
+    public bool TryTakeRestoreReason(ulong clOrdId, out CancelReason reason)
+    {
+        if (_orders.TryGetValue(clOrdId, out var order))
+            lock (order)
+            {
+                if (order.RestoreReason is { } found)
+                {
+                    order.RestoreReason = null;
+                    reason = found;
+                    return true;
+                }
+            }
+        reason = default;
         return false;
     }
 
@@ -447,8 +475,12 @@ public sealed class OrderTracker
     {
         if (_orders.TryGetValue(clOrdId, out var o))
         {
-            if (leaves is { } l) o.Leaves = l;
-            o.IsOpen = true;
+            lock (o)
+            {
+                if (leaves is { } l) o.Leaves = l;
+                o.IsOpen = true;
+                o.RestoreReason = null;
+            }
         }
     }
 
@@ -466,9 +498,13 @@ public sealed class OrderTracker
     {
         if (_orders.TryGetValue(clOrdId, out var o))
         {
-            if (leaves is { } l) o.Leaves = l;
+            lock (o)
+            {
+                if (leaves is { } l) o.Leaves = l;
+                o.RestoreReason = null;
+                if (!isFilled) o.IsOpen = true;
+            }
             if (isFilled) Close(o);
-            else o.IsOpen = true;
         }
     }
 
@@ -492,6 +528,7 @@ public sealed class OrderTracker
         {
             o.IsOpen = false;
             o.PendingCancelClOrdId = null;
+            o.RestoreReason = null;
         }
         if (o.OrderId is { } orderId) _ownOrderIds.TryRemove(orderId, out _);
         lock (_sideLock)
@@ -585,6 +622,7 @@ public sealed class TrackedOrder
     public bool IsBuy { get; set; }
     public DateTimeOffset SubmittedAtUtc { get; set; }
     public bool IsOpen { get; set; }
+    public CancelReason? RestoreReason { get; set; }
     /// <summary>ClOrdID of an outstanding CancelOrderRequest targeting this
     /// order, if any — see <see cref="OrderTracker.RegisterCancelAttempt"/>.
     /// Null means no cancel is currently in flight for this order.</summary>

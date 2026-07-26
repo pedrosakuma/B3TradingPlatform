@@ -307,8 +307,12 @@ internal sealed class MarketMakerWorker : BackgroundService
                     // original id (the spontaneous-cancel case).
                     var transition = _orderLifecycle.Synchronize(() =>
                     {
+                        var hasCancelAttempt = _tracker.TryResolveCancelAttempt(
+                            c.ClOrdID.Value,
+                            out var linked,
+                            out var cancelReason);
                         var targetClOrdId = c.OrigClOrdID?.Value
-                            ?? (_tracker.TryResolveCancelAttempt(c.ClOrdID.Value, out var linked)
+                            ?? (hasCancelAttempt
                                 ? linked
                                 : c.ClOrdID.Value);
                         var known = _tracker.TryGet(targetClOrdId, out var order);
@@ -318,11 +322,17 @@ internal sealed class MarketMakerWorker : BackgroundService
                         return (
                             Known: known,
                             Symbol: known ? order.Symbol : null,
-                            IsBuy: known && order.IsBuy);
+                            IsBuy: known && order.IsBuy,
+                            RestoreReason: hasCancelAttempt ? cancelReason : (CancelReason?)null);
                     });
                     if (transition.Known)
                     {
-                        await RequoteAsync(client, transition.Symbol!, transition.IsBuy, ct);
+                        await RequoteAsync(
+                            client,
+                            transition.Symbol!,
+                            transition.IsBuy,
+                            ct,
+                            transition.RestoreReason);
                         _pricingContextFailureRetries.TryRemove(transition.Symbol!, out _);
                         if (TryTakeDirtyPricingContext(transition.Symbol!, out var dirtyReason))
                             SignalPricingContextChanged(transition.Symbol!, dirtyReason);
@@ -419,11 +429,30 @@ internal sealed class MarketMakerWorker : BackgroundService
                     {
                         var known = _tracker.TryGet(r.ClOrdID.Value, out var order);
                         var symbol = known ? order.Symbol : null;
+                        var restoreReason = default(CancelReason);
+                        var hasRestoreReason = known && _tracker.TryTakeRestoreReason(
+                            r.ClOrdID.Value,
+                            out restoreReason);
                         _tracker.OnTerminal(r.ClOrdID.Value);
                         _pnlLedger.MarkTerminal(r.ClOrdID.Value);
-                        return (Known: known, Symbol: symbol);
+                        return (
+                            Known: known,
+                            Symbol: symbol,
+                            RestoreReason: hasRestoreReason
+                                ? restoreReason
+                                : (CancelReason?)null);
                     });
                     _metrics.RecordRejected(rejection.Symbol);
+                    if (rejection is { Symbol: not null, RestoreReason: { } restoreReason })
+                    {
+                        _metrics.RecordQuoteRestoreRejected(rejection.Symbol, restoreReason);
+                        _log.LogWarning(
+                            "[mm] quote-side restoration rejected clordid={ClOrdId} symbol={Symbol} trigger={RestoreReason} reason={Reason}; side remains empty until guarded reconcile retry",
+                            r.ClOrdID.Value,
+                            rejection.Symbol,
+                            restoreReason,
+                            r.Reason);
+                    }
                     // Deliberately do NOT re-quote immediately here: an
                     // instrument-level reject (bad config, halt, risk
                     // limit) would otherwise repeat identically forever,
@@ -460,7 +489,12 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
-    private async Task RequoteAsync(IEntryPointClient client, string symbol, bool isBuy, CancellationToken ct)
+    private async Task RequoteAsync(
+        IEntryPointClient client,
+        string symbol,
+        bool isBuy,
+        CancellationToken ct,
+        CancelReason? restoreReason = null)
     {
         var instr = FindInstrument(symbol);
         if (instr is null)
@@ -471,7 +505,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                 isBuy ? "buy" : "sell");
             return;
         }
-        await QuoteSideAsync(client, instr, isBuy, ct);
+        await QuoteSideAsync(client, instr, isBuy, ct, restoreReason);
     }
 
     /// <summary>
@@ -930,7 +964,12 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
-    internal async Task QuoteSideAsync(IEntryPointClient client, InstrumentConfig instr, bool isBuy, CancellationToken ct)
+    internal async Task QuoteSideAsync(
+        IEntryPointClient client,
+        InstrumentConfig instr,
+        bool isBuy,
+        CancellationToken ct,
+        CancelReason? restoreReason = null)
     {
         var decision = BuildQuoteDecision(instr, isBuy);
         if (!decision.ShouldQuote || decision.Price is not { } price)
@@ -962,7 +1001,13 @@ internal sealed class MarketMakerWorker : BackgroundService
         // the same side. Register BEFORE the SDK await — the matching ER
         // can race ahead of the await on a fast wire (mirrors
         // trading-host's pattern).
-        if (!_tracker.TryRegisterSubmit(clOrdId, instr.Symbol, price, quantity, isBuy))
+        if (!_tracker.TryRegisterSubmit(
+                clOrdId,
+                instr.Symbol,
+                price,
+                quantity,
+                isBuy,
+                restoreReason))
             return;
         if (!IsSubmitEligible(instr.Symbol))
         {
@@ -994,8 +1039,25 @@ internal sealed class MarketMakerWorker : BackgroundService
         {
             _orderLifecycle.Synchronize(() => _tracker.OnTerminal(clOrdId));
             _metrics.RecordOrderSubmitFailed(instr.Symbol);
-            _log.LogWarning(ex, "[mm] quote submit failed for {Symbol} side={Side} clordid={ClOrdId}",
-                instr.Symbol, isBuy ? "buy" : "sell", clOrdId);
+            if (restoreReason is { } failedRestoreReason)
+            {
+                _log.LogWarning(
+                    ex,
+                    "[mm] quote restore submit failed for {Symbol} side={Side} clordid={ClOrdId} trigger={RestoreReason}",
+                    instr.Symbol,
+                    isBuy ? "buy" : "sell",
+                    clOrdId,
+                    failedRestoreReason);
+            }
+            else
+            {
+                _log.LogWarning(
+                    ex,
+                    "[mm] quote submit failed for {Symbol} side={Side} clordid={ClOrdId}",
+                    instr.Symbol,
+                    isBuy ? "buy" : "sell",
+                    clOrdId);
+            }
         }
     }
 
