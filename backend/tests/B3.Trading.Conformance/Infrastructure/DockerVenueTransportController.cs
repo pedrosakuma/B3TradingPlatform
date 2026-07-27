@@ -157,6 +157,7 @@ internal sealed class DockerVenueTransportController
         while (DateTimeOffset.UtcNow < deadline)
         {
             var priorSnapshotWriteUtc = await GetLatestMatchingSnapshotWriteUtcAsync(ct);
+            await Task.Delay(TimeSpan.FromMilliseconds(1100), ct);
             var force = await RunDockerAsync(
                 new[]
                 {
