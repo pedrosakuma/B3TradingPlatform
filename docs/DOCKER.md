@@ -33,8 +33,8 @@ docker compose \
 
 | Service | Image | Port (host) | Purpose |
 |---|---|---|---|
-| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching@sha256:…` (pinned — see [Bumping the matching image](#bumping-the-matching-image)) | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/api/admin/channels/*` snapshot ops |
-| `marketdata` | `ghcr.io/pedrosakuma/b3-marketdata:latest` | `8081` | UMDF unicast consumer (`30084/30184/31084 udp`) + WebSocket fanout (`:8080`) |
+| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching@sha256:…` (pinned — see [Bumping the matching and marketdata images](#bumping-the-matching-and-marketdata-images)) | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/api/admin/channels/*` snapshot ops |
+| `marketdata` | `ghcr.io/pedrosakuma/b3-marketdata@sha256:…` (pinned with matching) | `8081` | UMDF unicast consumer (`30084/30184/31084 udp`) + WebSocket fanout (`:8080`) |
 | `trading-host` | `ghcr.io/pedrosakuma/b3-trading-host:latest` | `5000` | REST + WebSocket; `Mode=Real`, FIRM01 session against matching, live `IReferencePrice` wired through marketdata WS |
 | `frontend` | `ghcr.io/pedrosakuma/b3-trading-frontend:latest` | `8080` | nginx serving the static UI + reverse-proxy to trading-host |
 
@@ -786,22 +786,22 @@ base stack remains PAT-only by default.
 See the full [FIXP listener operations guide](operations/fixp-listener.md) for
 TLS setup, rate-limit tuning, and monitoring.
 
-## Bumping the matching image
+## Bumping the matching and marketdata images
 
-The `matching-platform` service is pinned to an **immutable image
-digest** (`ghcr.io/pedrosakuma/b3-matching@sha256:…`) in
-`docker/docker-compose.yml`. We deliberately do **not** track
-`:latest` — every bump is a reviewable, CI-validated PR. This
-mitigates the class of flake where upstream churn lands on our builds
-without warning (e.g. #332, #345, #347).
+The `matching-platform` and `marketdata` services are pinned to
+**immutable image digests** in `docker/docker-compose.yml`. We deliberately
+do **not** track `:latest` — every bump is a reviewable, CI-validated PR.
+When a UMDF snapshot or epoch contract changes, update both digests in one
+PR so the producer and consumer remain compatible.
 
 ### Daily local override
 
-Devs who want the bleeding edge for a one-off run can override:
+Devs who want the bleeding edge for a one-off run can override both sides:
 
 ```bash
 MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest \
-  docker compose -f docker/docker-compose.yml up matching-platform
+MARKETDATA_IMAGE=ghcr.io/pedrosakuma/b3-marketdata:latest \
+  docker compose -f docker/docker-compose.yml up matching-platform marketdata
 ```
 
 ### Detecting drift
@@ -820,8 +820,10 @@ digest is printed on the last stdout line when drift is detected.
 The [`matching-image-bump`](../.github/workflows/matching-image-bump.yml)
 workflow runs the script on a weekly cron (Mondays 06:00 UTC) **and**
 on `workflow_dispatch`. When drift is detected it opens a PR bumping
-the pin; the standard CI matrix (`real-stack-conformance` included)
-validates the new digest before a human merges.
+the matching pin; the standard CI matrix (`real-stack-conformance` included)
+validates it against the pinned marketdata digest before a human merges.
+Marketdata digest changes are intentionally manual so a newer consumer cannot
+silently activate an incompatible snapshot contract.
 
 ### Manual bump (one-liner)
 

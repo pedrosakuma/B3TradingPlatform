@@ -279,7 +279,6 @@ internal sealed class MarketMakerWorker : BackgroundService
     }
 
     internal bool StartupCleanupRequired => _startupCleanupRequired;
-
     internal async Task<Task> PrepareConnectedSessionAsync(IEntryPointClient client, CancellationToken ct)
     {
         // Start draining the FIXP event stream before requesting cleanup. A
