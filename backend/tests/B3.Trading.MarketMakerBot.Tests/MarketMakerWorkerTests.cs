@@ -1,4 +1,5 @@
 using B3.EntryPoint.Client.Models;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
@@ -85,6 +86,15 @@ public class MarketMakerWorkerTests : IDisposable
         InstrumentConfig Instrument, MarketPriceTracker PriceTracker) CreateWorker(
         TimeProvider clock,
         Action<MarketMakerBotOptions>? configure,
+        ILogger<MarketMakerWorker> logger)
+    {
+        return CreateWorker(clock, configure, out _, out _, logger);
+    }
+
+    private (MarketMakerWorker Worker, OrderTracker Tracker, FakeEntryPointClient Client,
+        InstrumentConfig Instrument, MarketPriceTracker PriceTracker) CreateWorker(
+        TimeProvider clock,
+        Action<MarketMakerBotOptions>? configure,
         out MarketMakerPnlLedger pnlLedger)
     {
         return CreateWorker(clock, configure, out pnlLedger, out _);
@@ -95,7 +105,8 @@ public class MarketMakerWorkerTests : IDisposable
         TimeProvider clock,
         Action<MarketMakerBotOptions>? configure,
         out MarketMakerPnlLedger pnlLedger,
-        out MarketDataFeed marketData)
+        out MarketDataFeed marketData,
+        ILogger<MarketMakerWorker>? logger = null)
     {
         var instrument = new InstrumentConfig
         {
@@ -126,7 +137,7 @@ public class MarketMakerWorkerTests : IDisposable
         marketData = new MarketDataFeed(priceTracker, volatilitySpread, NullLogger.Instance, clock);
         var worker = new MarketMakerWorker(
             Options.Create(options), tracker, priceTracker, volatilitySpread, pnlLedger, metrics,
-            marketData, loggerFactory, NullLogger<MarketMakerWorker>.Instance, clock);
+            marketData, loggerFactory, logger ?? NullLogger<MarketMakerWorker>.Instance, clock);
         return (worker, tracker, new FakeEntryPointClient(), instrument, priceTracker);
     }
 
@@ -1200,7 +1211,7 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(CancelReason.StaleOrder)]
+    [InlineData(CancelReason.TtlRefresh)]
     [InlineData(CancelReason.PriceDrift)]
     [InlineData(CancelReason.InventoryStrategy)]
     [InlineData(CancelReason.VolatilityStrategy)]
@@ -1266,16 +1277,29 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task CancelStaleOrdersAsync_OrderOlderThanMaxAge_SubmitsCancel()
+    public async Task CancelStaleOrdersAsync_OrderOlderThanMaxAge_EmitsHealthyTtlRefreshTelemetry()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var logger = new CapturingLogger<MarketMakerWorker>();
         var (worker, tracker, client, instrument, _) = CreateWorker(clock,
-            o => o.MaxOrderAge = TimeSpan.FromMinutes(5));
+            o => o.MaxOrderAge = TimeSpan.FromMinutes(5), logger);
+        var metrics = _metrics[^1];
+        using var listener = new MeterListener();
+        var measurements = new ConcurrentBag<(string Name, long Value)>();
+        listener.InstrumentPublished = (published, meterListener) =>
+        {
+            if (ReferenceEquals(published.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(published);
+        };
+        listener.SetMeasurementEventCallback<long>((published, value, _, _) =>
+            measurements.Add((published.Name, value)));
+        listener.Start();
         await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
         var clOrdId = client.SubmittedOrders[0].ClOrdID.Value;
 
         clock.Advance(TimeSpan.FromMinutes(6));
         await worker.CancelStaleOrdersAsync(client, CancellationToken.None);
+        listener.RecordObservableInstruments();
 
         Assert.Single(client.SubmittedCancels);
         Assert.Equal(clOrdId, client.SubmittedCancels[0].OrigClOrdID.Value);
@@ -1283,12 +1307,162 @@ public class MarketMakerWorkerTests : IDisposable
             client.SubmittedCancels[0].ClOrdID.Value,
             out _,
             out var cancelReason));
-        Assert.Equal(CancelReason.StaleOrder, cancelReason);
+        Assert.Equal(CancelReason.TtlRefresh, cancelReason);
         // Still open — only cancelled, not yet closed (that's the venue's
         // OrderCancelled/OrderRejected ER via HandleEventAsync).
         Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
         Assert.True(tracker.TryGet(clOrdId, out var order));
         Assert.NotNull(order.PendingCancelClOrdId);
+        await AckCancelAsync(worker, client, client.SubmittedCancels[0], seqNum: 1);
+
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        Assert.True(tracker.HasOpenSide("PETR4", isBuy: true));
+        Assert.Contains(("bot.orders.ttl_refresh", 1L), measurements);
+        Assert.Contains(logger.Entries, entry =>
+            entry.Level == LogLevel.Information &&
+            entry.Message.Contains("TTL refresh cancel submitted", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Entries, entry => entry.Level >= LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_TtlRefreshReplacementSubmitFails_EmitsWarning()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var logger = new CapturingLogger<MarketMakerWorker>();
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options => options.MaxOrderAge = TimeSpan.FromMinutes(5),
+            logger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await worker.CancelStaleOrdersAsync(client, CancellationToken.None);
+        client.SubmitHandler = (_, _) =>
+            throw new InvalidOperationException("replacement transport failure");
+
+        await AckCancelAsync(worker, client, client.SubmittedCancels.Single(), seqNum: 1);
+
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        Assert.Contains(logger.Entries, entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("quote restore submit failed", StringComparison.Ordinal) &&
+            entry.Message.Contains("TtlRefresh", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_TtlRefreshReplacementRejected_EmitsOneRestoreAlertAndGenericTelemetry()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var logger = new CapturingLogger<MarketMakerWorker>();
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options => options.MaxOrderAge = TimeSpan.FromMinutes(5),
+            logger);
+        var metrics = _metrics[^1];
+        using var listener = new MeterListener();
+        var measurements = new ConcurrentBag<(string Name, long Value)>();
+        listener.InstrumentPublished = (published, meterListener) =>
+        {
+            if (ReferenceEquals(published.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(published);
+        };
+        listener.SetMeasurementEventCallback<long>((published, value, _, _) =>
+            measurements.Add((published.Name, value)));
+        listener.Start();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await worker.CancelStaleOrdersAsync(client, CancellationToken.None);
+        await AckCancelAsync(worker, client, client.SubmittedCancels.Single(), seqNum: 1);
+        var replacement = client.SubmittedOrders[1];
+        var rejection = new OrderRejected
+        {
+            ClOrdID = replacement.ClOrdID,
+            OrderId = 0,
+            RejectCode = 2,
+            Reason = "instrument halted",
+            SeqNum = 2,
+            SendingTime = clock.GetUtcNow(),
+        };
+
+        await worker.HandleEventAsync(client, rejection, CancellationToken.None);
+        await worker.HandleEventAsync(client, rejection, CancellationToken.None);
+        listener.RecordObservableInstruments();
+
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        Assert.Contains(("bot.orders.rejected", 2L), measurements);
+        Assert.Contains(("bot.orders.quote_restore_rejected", 1L), measurements);
+        var warnings = logger.Entries
+            .Where(entry => entry.Level >= LogLevel.Warning)
+            .ToArray();
+        var warning = Assert.Single(warnings);
+        Assert.Contains("quote-side restoration rejected", warning.Message);
+        Assert.Contains("TtlRefresh", warning.Message);
+    }
+
+    [Fact]
+    public async Task TtlRefreshCancelAck_ReconcileWinsReplacementRace_RejectionStillEmitsOneRestoreAlert()
+    {
+        var clock = new FakeClock(DateTimeOffset.UtcNow);
+        var logger = new CapturingLogger<MarketMakerWorker>();
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            clock,
+            options => options.MaxOrderAge = TimeSpan.FromMinutes(5),
+            logger);
+        var metrics = _metrics[^1];
+        using var listener = new MeterListener();
+        var measurements = new ConcurrentBag<(string Name, long Value)>();
+        listener.InstrumentPublished = (published, meterListener) =>
+        {
+            if (ReferenceEquals(published.Meter, metrics.Meter))
+                meterListener.EnableMeasurementEvents(published);
+        };
+        listener.SetMeasurementEventCallback<long>((published, value, _, _) =>
+            measurements.Add((published.Name, value)));
+        listener.Start();
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await worker.CancelStaleOrdersAsync(client, CancellationToken.None);
+        var cancel = client.SubmittedCancels.Single();
+        var transition = worker.ApplyOrderCancelled(new OrderCancelled
+        {
+            ClOrdID = cancel.ClOrdID,
+            OrigClOrdID = cancel.OrigClOrdID,
+            OrderId = 100,
+            OrderStatus = OrderStatus.Cancelled,
+            SeqNum = 1,
+            SendingTime = clock.GetUtcNow(),
+        });
+
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        await worker.ReconcileOnceAsync(client, CancellationToken.None);
+        var replacement = client.SubmittedOrders.Last(order => order.Side == Side.Buy);
+        await worker.RestoreCancelledSideAsync(client, transition, CancellationToken.None);
+        Assert.Equal(2, client.SubmittedOrders.Count(order => order.Side == Side.Buy));
+
+        var rejection = new OrderRejected
+        {
+            ClOrdID = replacement.ClOrdID,
+            OrderId = 0,
+            RejectCode = 2,
+            Reason = "instrument halted",
+            SeqNum = 2,
+            SendingTime = clock.GetUtcNow(),
+        };
+        await worker.HandleEventAsync(client, rejection, CancellationToken.None);
+        await worker.HandleEventAsync(client, rejection, CancellationToken.None);
+        listener.RecordObservableInstruments();
+
+        Assert.False(tracker.HasOpenSide(instrument.Symbol, isBuy: true));
+        Assert.Contains(("bot.orders.rejected", 2L), measurements);
+        Assert.Contains(("bot.orders.quote_restore_rejected", 1L), measurements);
+        var warnings = logger.Entries
+            .Where(entry => entry.Level >= LogLevel.Warning)
+            .ToArray();
+        var warning = Assert.Single(warnings);
+        Assert.Contains("quote-side restoration rejected", warning.Message);
+        Assert.Contains("TtlRefresh", warning.Message);
     }
 
     [Fact]
@@ -1995,13 +2169,15 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(CancelReason.StaleOrder, "bot.orders.stale_cancel_rejected")]
+    [InlineData(CancelReason.TtlRefresh, "bot.orders.ttl_refresh_cancel_rejected")]
     [InlineData(CancelReason.PriceDrift, "bot.orders.book_driven_requote_cancel_rejected")]
-    public async Task HandleEventAsync_CancelReject_PreservesReasonSpecificMetric(
+    public async Task HandleEventAsync_CancelReject_EmitsReasonSpecificAlertTelemetry(
         CancelReason cancelReason,
         string expectedMetric)
     {
-        var (worker, tracker, client, instrument) = CreateWorker();
+        var logger = new CapturingLogger<MarketMakerWorker>();
+        var (worker, tracker, client, instrument, _) =
+            CreateWorker(TimeProvider.System, configure: null, logger: logger);
         var metrics = _metrics[^1];
         using var listener = new MeterListener();
         var measurements = new ConcurrentBag<string>();
@@ -2034,10 +2210,16 @@ public class MarketMakerWorkerTests : IDisposable
         listener.RecordObservableInstruments();
 
         Assert.Contains(expectedMetric, measurements);
-        var unexpectedMetric = cancelReason == CancelReason.StaleOrder
+        var unexpectedMetric = cancelReason == CancelReason.TtlRefresh
             ? "bot.orders.book_driven_requote_cancel_rejected"
-            : "bot.orders.stale_cancel_rejected";
+            : "bot.orders.ttl_refresh_cancel_rejected";
         Assert.DoesNotContain(unexpectedMetric, measurements);
+        Assert.Contains(logger.Entries, entry => entry.Level >= LogLevel.Warning);
+        if (cancelReason == CancelReason.TtlRefresh)
+        {
+            Assert.Contains(logger.Entries, entry =>
+                entry.Message.Contains("possible missed terminal event", StringComparison.Ordinal));
+        }
     }
 
     [Fact]
@@ -2162,4 +2344,20 @@ public class MarketMakerWorkerTests : IDisposable
             SeqNum = seqNum,
             SendingTime = DateTimeOffset.UtcNow,
         }, CancellationToken.None);
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+    }
 }
