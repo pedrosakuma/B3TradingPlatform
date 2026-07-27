@@ -109,6 +109,12 @@ services:
       # after this bounded acknowledgement window; MinRequoteInterval remains
       # the secondary anti-churn guard.
       MarketMaker__CancelAckTimeout: "00:00:10"
+      # Opt in only when matching-platform contains B3MatchingPlatform#569:
+      # older matching versions emit ACCEPTED before mass-cancel execution.
+      MarketMaker__StartupCleanupEnabled: "false"
+      # Terminal cleanup may drain the venue's full 100k-order cap before
+      # reporting completion. Keep this separate from normal cancel recovery.
+      MarketMaker__StartupCleanupTimeout: "00:05:00"
       # Gross/pre-fee process-local P&L snapshots. Unrealized P&L is
       # omitted unless the connected live mark is newer than MarkMaxAge.
       MarketMaker__Telemetry__SnapshotInterval: "00:00:30"

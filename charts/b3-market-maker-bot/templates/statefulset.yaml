@@ -77,6 +77,10 @@ spec:
               value: {{ dig "reconcileInterval" "00:00:05" $behaviour | quote }}
             - name: MarketMaker__CancelAckTimeout
               value: {{ dig "cancelAckTimeout" "00:00:10" $behaviour | quote }}
+            - name: MarketMaker__StartupCleanupEnabled
+              value: {{ dig "startupCleanupEnabled" false $behaviour | quote }}
+            - name: MarketMaker__StartupCleanupTimeout
+              value: {{ dig "startupCleanupTimeout" "00:05:00" $behaviour | quote }}
             # ── Position/P&L observability ────────────────────────────────
             - name: MarketMaker__Telemetry__SnapshotInterval
               value: {{ .Values.observability.snapshotInterval | quote }}

@@ -45,6 +45,8 @@ internal sealed class MarketMakerWorker : BackgroundService
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _pricingContextFailureRetries =
         new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<ulong, TaskCompletionSource<UpModels.MassActionExecuted>>
+        _massActionReports = new();
     private readonly HashSet<string> _configuredSymbols;
     private readonly ConcurrentDictionary<string, FeedAvailabilityObservation> _feedAvailability =
         new(StringComparer.Ordinal);
@@ -143,20 +145,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             _log.LogInformation("[mm] connected; instruments={Count} reconcile={Interval}",
                 _options.Instruments.Count, _options.ReconcileInterval);
 
-            // Market data is best-effort and never blocks FIXP quoting —
-            // see MarketDataFeed's doc comment for why.
-            await _marketData.StartAsync(_options.MarketData, _options.Instruments, _loggerFactory, stoppingToken);
-
-            // Prime the book: one resting bid + ask per instrument before
-            // anything else runs, so a fresh boot doesn't leave a window
-            // with zero MM depth.
-            foreach (var instr in _options.Instruments)
-            {
-                await QuoteSideAsync(_client, instr, isBuy: true, stoppingToken);
-                await QuoteSideAsync(_client, instr, isBuy: false, stoppingToken);
-            }
-
-            var receive = ReceiveLoopAsync(_client, stoppingToken);
+            var receive = await PrepareConnectedSessionAsync(_client, stoppingToken);
             var reconcile = ReconcileLoopAsync(_client, stoppingToken);
             var pricingReaction = PricingContextReactionLoopAsync(_client, stoppingToken);
             await Task.WhenAny(receive, reconcile, pricingReaction);
@@ -179,6 +168,161 @@ internal sealed class MarketMakerWorker : BackgroundService
             try { await _client.DisposeAsync(); } catch { /* ignore */ }
             await _marketData.DisposeAsync();
         }
+    }
+
+    internal async Task<Task> PrepareConnectedSessionAsync(IEntryPointClient client, CancellationToken ct)
+    {
+        // Start draining the FIXP event stream before requesting cleanup. A
+        // legacy session can produce up to the venue's 100k cancellation ER
+        // cap, and the authoritative mass-action report itself arrives here.
+        var receive = ReceiveLoopAsync(client, ct);
+
+        if (_options.StartupCleanupEnabled)
+        {
+            await CleanupLegacySessionOrdersAsync(client, receive, ct);
+            await Task.Yield();
+            await ThrowIfReceiveLoopStoppedAsync(receive);
+        }
+        else
+        {
+            _log.LogInformation(
+                "[mm] startup mass-action cleanup disabled; preserving legacy startup behavior. Enable only with a matching-platform release containing B3MatchingPlatform#569.");
+        }
+
+        // Market data and normal quoting start only after the optional
+        // terminal cleanup gate (when enabled) has completed.
+        await AwaitWhileReceiveLoopActiveAsync(
+            operationToken => _marketData.StartAsync(
+                _options.MarketData,
+                _options.Instruments,
+                _loggerFactory,
+                operationToken),
+            receive,
+            ct);
+
+        foreach (var instr in _options.Instruments)
+        {
+            await AwaitWhileReceiveLoopActiveAsync(
+                operationToken => QuoteSideAsync(client, instr, isBuy: true, operationToken),
+                receive,
+                ct);
+            await AwaitWhileReceiveLoopActiveAsync(
+                operationToken => QuoteSideAsync(client, instr, isBuy: false, operationToken),
+                receive,
+                ct);
+        }
+
+        await ThrowIfReceiveLoopStoppedAsync(receive);
+        return receive;
+    }
+
+    private async Task CleanupLegacySessionOrdersAsync(
+        IEntryPointClient client,
+        Task receiveLoop,
+        CancellationToken ct)
+    {
+        var clOrdId = (ulong)Interlocked.Increment(ref _nextClOrdId);
+        var request = new UpModels.MassActionRequest
+        {
+            ClOrdID = new UpModels.ClOrdID(clOrdId),
+            ActionType = UpModels.MassActionType.CancelOrders,
+            Scope = UpModels.MassActionScope.AllOrdersForATradingSession,
+        };
+        var reportSource = new TaskCompletionSource<UpModels.MassActionExecuted>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_massActionReports.TryAdd(clOrdId, reportSource))
+            throw new InvalidOperationException($"Duplicate startup cleanup ClOrdID {clOrdId}.");
+
+        try
+        {
+            _log.LogInformation(
+                "[mm] cancelling legacy orders for FIXP session before starting market data or quoting clordid={ClOrdId}; requires terminal mass-action contract from B3MatchingPlatform#569",
+                clOrdId);
+
+            // SDK 0.17.0 returns a transport-level synthetic MassActionReport,
+            // while the real venue report is published as MassActionExecuted.
+            // With B3MatchingPlatform#569, the solicited ACCEPTED event is
+            // terminal: every cancel ER has already traversed the ordered FIXP
+            // stream. Pre-#569 matching is intentionally unsupported when this
+            // opt-in is enabled because its early ACCEPTED is not a barrier.
+            var requestTask = client.MassActionAsync(request, ct);
+            var cleanup = CompleteCleanupAsync(requestTask, reportSource.Task);
+            var timeout = Task.Delay(_options.StartupCleanupTimeout, _clock, ct);
+            await Task.WhenAny(cleanup, receiveLoop, timeout);
+
+            if (receiveLoop.IsCompleted)
+            {
+                await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+            }
+
+            if (cleanup.IsCompleted)
+            {
+                var report = await cleanup;
+                await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+                _log.LogInformation(
+                    "[mm] startup legacy-order cleanup completed reportId={ReportId} clordid={ClOrdId}",
+                    report.MassActionReportId,
+                    clOrdId);
+                return;
+            }
+
+            ct.ThrowIfCancellationRequested();
+            throw new TimeoutException(
+                $"Terminal startup mass-action report did not arrive within {_options.StartupCleanupTimeout}.");
+        }
+        finally
+        {
+            _massActionReports.TryRemove(clOrdId, out _);
+        }
+
+        static async Task<UpModels.MassActionExecuted> CompleteCleanupAsync(
+            Task<UpModels.MassActionReport> requestTask,
+            Task<UpModels.MassActionExecuted> reportTask)
+        {
+            var sendResult = await requestTask;
+            if (sendResult.Response != UpModels.MassActionResponse.Accepted)
+            {
+                throw new InvalidOperationException(
+                    $"Startup mass action was rejected: {sendResult.RejectReason?.ToString() ?? sendResult.Reason ?? "unknown"}.");
+            }
+
+            var report = await reportTask;
+            if (report.Response != UpModels.MassActionResponse.Accepted)
+            {
+                throw new InvalidOperationException(
+                    $"Startup mass action was rejected: {report.RejectReason?.ToString() ?? "unknown"}.");
+            }
+
+            return report;
+        }
+    }
+
+    private static async Task AwaitWhileReceiveLoopActiveAsync(
+        Func<CancellationToken, Task> operationFactory,
+        Task receiveLoop,
+        CancellationToken ct)
+    {
+        await Task.Yield();
+        await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+        using var operationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var operation = operationFactory(operationCts.Token);
+        await Task.WhenAny(operation, receiveLoop);
+        if (receiveLoop.IsCompleted)
+        {
+            operationCts.Cancel();
+            try { await operation; }
+            catch (OperationCanceledException) when (operationCts.IsCancellationRequested) { }
+            await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+        }
+        await operation;
+        await ThrowIfReceiveLoopStoppedAsync(receiveLoop);
+    }
+
+    private static async Task ThrowIfReceiveLoopStoppedAsync(Task receiveLoop)
+    {
+        if (!receiveLoop.IsCompleted) return;
+        await receiveLoop;
+        throw new InvalidOperationException("FIXP event stream ended during market-maker startup.");
     }
 
     private async Task ReceiveLoopAsync(IEntryPointClient client, CancellationToken ct)
@@ -210,6 +354,10 @@ internal sealed class MarketMakerWorker : BackgroundService
     {
         switch (ev)
         {
+            case UpModels.MassActionExecuted massAction:
+                if (_massActionReports.TryGetValue(massAction.ClOrdID.Value, out var reportSource))
+                    reportSource.TrySetResult(massAction);
+                break;
             case UpModels.OrderAccepted a:
                 // LeavesQty is not guaranteed to be populated on this ER
                 // shape — confirmed empirically the venue omits it
@@ -461,6 +609,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                 _orderLifecycle.Synchronize(() => _tracker.SetOrderId(m.ClOrdID.Value, m.OrderId));
                 break;
         }
+
     }
 
     private async Task RequoteAsync(IEntryPointClient client, string symbol, bool isBuy, CancellationToken ct)

@@ -275,6 +275,31 @@ still close it, while late rejects of expired cancel IDs are recognized as
 cancel rejects and cannot free the original order as if they rejected a new
 submit. `MinRequoteInterval` continues to throttle strategy/feed retries.
 
+Startup cleanup is an explicit rollout opt-in with a separate, deliberately
+longer bound:
+
+```yaml
+MarketMaker__StartupCleanupEnabled: "false"
+MarketMaker__StartupCleanupTimeout: "00:05:00"
+```
+
+The default `false` preserves historical startup behavior and is the only safe
+setting with matching-platform versions from before
+[`B3MatchingPlatform#569`](https://github.com/pedrosakuma/B3MatchingPlatform/issues/569).
+Those versions emit `OrderMassActionReport(ACCEPTED)` before dispatcher
+execution, so neither that report nor a FIXP `Sequence` heartbeat is an
+execution barrier.
+
+Set `StartupCleanupEnabled=true` only after deploying a matching-platform
+release containing #569. Under that minimum contract, the solicited
+`MassActionExecuted(ACCEPTED)` correlated by the request `ClOrdID` is terminal:
+all cancellation ERs have already traversed the ordered FIXP business stream.
+The bot awaits both the outbound transport task and that terminal report before
+starting market data or submitting quotes. A legacy session can contain
+100,000 orders, so five minutes leaves production headroom without weakening
+the 10-second single-order cancel retry policy. Timeout, rejection, request
+failure, or event-stream failure terminates startup without quoting.
+
 Inventory skew is opt-in and defaults off independently for every
 instrument:
 

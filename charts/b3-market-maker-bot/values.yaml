@@ -79,6 +79,13 @@ behaviour:
   # Clears a lost cancel acknowledgement's pending marker after this window,
   # retaining a bounded correlation tombstone so late ERs remain safe.
   cancelAckTimeout: "00:00:10"
+  # Requires a matching-platform release containing B3MatchingPlatform#569.
+  # Keep false against older matching versions: their ACCEPTED report is not
+  # terminal and cannot safely gate quote startup.
+  startupCleanupEnabled: false
+  # Terminal startup cleanup can produce up to 100k cancellation ERs without
+  # weakening the normal single-cancel retry window above.
+  startupCleanupTimeout: "00:05:00"
 
 # ── Position/P&L observability ───────────────────────────────────────────────
 observability:
