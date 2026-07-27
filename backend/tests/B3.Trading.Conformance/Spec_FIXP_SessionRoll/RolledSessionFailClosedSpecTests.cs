@@ -48,33 +48,20 @@ public sealed class RolledSessionFailClosedSpecTests
             http,
             user,
             maker,
-            async cleanup =>
+            venueOrderId => docker.WaitForVenueOrderAbsentAsync(
+                venueOrderId,
+                SessionRollSpecSupport.TradeTimeout),
+            async _cleanup =>
             {
-                var probeClOrdIds = new List<ulong>();
-                for (var index = 0; index < 4; index++)
-                {
-                    var probeClOrdId = await cleanup.SubmitOrderAsync("PETR4", price);
-                    probeClOrdIds.Add(probeClOrdId);
-                    await SessionRollSpecSupport.WaitForOrderAsync(
-                        http,
-                        user,
-                        probeClOrdId,
-                        order => order.Status == "Working" && !order.IsStale,
-                        SessionRollSpecSupport.OrderTimeout,
-                        "fault-window probe to reach Working before matching is paused");
-                }
-
-                baseline = (await GetMutationsAsync(http, maker))
-                    .Select(mutation => mutation.MutationId)
-                    .ToHashSet(StringComparer.Ordinal);
-
                 await using (var paused = await docker.PauseMatchingAsync())
                 {
-                    var submissions = probeClOrdIds
-                        .Select(clOrdId => SessionRollSpecSupport.StimulateGatewayWriteAsync(
+                    var submissions = Enumerable.Range(0, 4)
+                        .Select(index => SubmitFaultWindowProbeAsync(
                             http,
                             user,
-                            clOrdId))
+                            price,
+                            runId,
+                            index))
                         .ToArray();
                     await Task.WhenAll(submissions);
                     _ = await WaitForNewAttemptedMutationsAsync(
@@ -148,6 +135,29 @@ public sealed class RolledSessionFailClosedSpecTests
                     await ResolveVenueAbsentAsync(http, maker, checker, mutation.MutationId);
                 await WaitForReadyAsync(http);
             });
+    }
+
+    private static async Task SubmitFaultWindowProbeAsync(
+        HttpClient http,
+        AuthenticationHeaderValue auth,
+        decimal price,
+        string runId,
+        int index)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            using var response = await SubmitOrderAsync(
+                http,
+                auth,
+                price,
+                $"{runId}-roll-fault-{index}",
+                cts.Token);
+        }
+        catch (Exception exception)
+            when (exception is OperationCanceledException or HttpRequestException)
+        {
+        }
     }
 
     private static async Task<HttpResponseMessage> SubmitOrderAsync(

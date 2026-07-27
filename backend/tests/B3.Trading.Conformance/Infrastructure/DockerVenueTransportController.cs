@@ -106,6 +106,134 @@ internal sealed class DockerVenueTransportController
             $"Timed out after {timeout.TotalSeconds:F0}s waiting for marketdata client reconnect in container '{_marketDataContainer}' since {sinceUtc:o}.");
     }
 
+    public async Task WaitForVenueOrderAbsentAsync(
+        ulong venueOrderId,
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        await EnsureDockerAvailableAsync(ct);
+
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        string? lastSnapshot = null;
+        string? lastError = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var priorSnapshotWriteUtc = await GetLatestMatchingSnapshotWriteUtcAsync(ct);
+            var force = await RunDockerAsync(
+                new[]
+                {
+                    "exec", _matchingContainer,
+                    "wget", "-qO-", "--post-data=",
+                    "http://localhost:8080/admin/channels/84/snapshot/force",
+                },
+                ct,
+                allowNonZeroExit: true);
+            if (force.ExitCode != 0)
+            {
+                lastError = force.StdErr;
+                await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+                continue;
+            }
+
+            DateTimeOffset? freshSnapshotWriteUtc = null;
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                freshSnapshotWriteUtc = await GetLatestMatchingSnapshotWriteUtcAsync(ct);
+                if (freshSnapshotWriteUtc is not null &&
+                    (priorSnapshotWriteUtc is null ||
+                     freshSnapshotWriteUtc > priorSnapshotWriteUtc))
+                {
+                    break;
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+            }
+
+            if (freshSnapshotWriteUtc is null ||
+                (priorSnapshotWriteUtc is not null &&
+                 freshSnapshotWriteUtc <= priorSnapshotWriteUtc))
+            {
+                lastError = "forced matching snapshot did not produce a newer persisted generation";
+                continue;
+            }
+
+            var snapshot = await RunDockerAsync(
+                new[]
+                {
+                    "exec", _matchingContainer,
+                    "wget", "-qO-",
+                    "http://localhost:8080/admin/channels/84/snapshot",
+                },
+                ct,
+                allowNonZeroExit: true);
+            if (snapshot.ExitCode != 0)
+            {
+                lastError = snapshot.StdErr;
+                continue;
+            }
+
+            lastSnapshot = snapshot.StdOut;
+            lastError = null;
+            if (!SnapshotContainsVenueOrder(snapshot.StdOut, venueOrderId))
+                return;
+        }
+
+        throw new InvalidOperationException(
+            $"Timed out after {timeout.TotalSeconds:F0}s proving venue order {venueOrderId} absent " +
+            $"from matching channel 84. lastError={lastError ?? "<none>"} " +
+            $"lastSnapshot={lastSnapshot ?? "<none>"}.");
+    }
+
+    private async Task<DateTimeOffset?> GetLatestMatchingSnapshotWriteUtcAsync(
+        CancellationToken ct)
+    {
+        var listing = await RunDockerAsync(
+            new[]
+            {
+                "exec", _matchingContainer,
+                "ls", "-1", "/var/lib/b3matching",
+            },
+            ct,
+            allowNonZeroExit: true);
+        if (listing.ExitCode != 0)
+            return null;
+
+        DateTimeOffset? latest = null;
+        foreach (var fileName in listing.StdOut.Split(
+                     ['\r', '\n'],
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!fileName.StartsWith("channel-84.snapshot.", StringComparison.Ordinal) ||
+                fileName.EndsWith(".tmp", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var stat = await RunDockerAsync(
+                new[]
+                {
+                    "exec", _matchingContainer,
+                    "stat", "-c", "%y",
+                    $"/var/lib/b3matching/{fileName}",
+                },
+                ct,
+                allowNonZeroExit: true);
+            if (stat.ExitCode != 0 ||
+                !DateTimeOffset.TryParse(
+                    stat.StdOut.Trim(),
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out var writeUtc))
+            {
+                continue;
+            }
+
+            if (latest is null || writeUtc > latest)
+                latest = writeUtc;
+        }
+
+        return latest;
+    }
+
     public async Task KillTradingHostAsync(CancellationToken ct = default)
     {
         await EnsureDockerAvailableAsync(ct);
@@ -485,6 +613,60 @@ internal sealed class DockerVenueTransportController
             }
         }
 
+        return false;
+    }
+
+    internal static bool SnapshotContainsVenueOrder(string snapshotJson, ulong venueOrderId)
+    {
+        using var document = JsonDocument.Parse(snapshotJson);
+        if (!TryGetPropertyIgnoreCase(document.RootElement, "Engine", out var engine) ||
+            !TryGetPropertyIgnoreCase(engine, "Books", out var books) ||
+            books.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException(
+                "Matching snapshot did not contain engine.books.");
+        }
+
+        foreach (var book in books.EnumerateArray())
+        {
+            if (!TryGetPropertyIgnoreCase(book, "Orders", out var orders) ||
+                orders.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var order in orders.EnumerateArray())
+            {
+                if (TryGetPropertyIgnoreCase(order, "OrderId", out var orderId) &&
+                    orderId.TryGetUInt64(out var parsed) &&
+                    parsed == venueOrderId)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(
+        JsonElement element,
+        string propertyName,
+        out JsonElement value)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(
+                    property.Name,
+                    propertyName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
         return false;
     }
 

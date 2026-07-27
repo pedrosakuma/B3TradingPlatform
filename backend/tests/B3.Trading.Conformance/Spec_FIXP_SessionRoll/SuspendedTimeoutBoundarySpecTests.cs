@@ -27,6 +27,9 @@ public class SuspendedTimeoutBoundarySpecTests
             http,
             userAuth,
             adminAuth,
+            venueOrderId => docker.WaitForVenueOrderAbsentAsync(
+                venueOrderId,
+                SessionRollSpecSupport.TradeTimeout),
             async cleanup =>
             {
                 var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
@@ -97,6 +100,9 @@ public class SuspendedTimeoutBoundarySpecTests
             http,
             userAuth,
             adminAuth,
+            venueOrderId => docker.WaitForVenueOrderAbsentAsync(
+                venueOrderId,
+                SessionRollSpecSupport.TradeTimeout),
             async cleanup =>
             {
                 var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);

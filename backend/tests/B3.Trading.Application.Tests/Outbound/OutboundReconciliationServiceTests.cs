@@ -230,6 +230,39 @@ public sealed class OutboundReconciliationServiceTests
     }
 
     [Fact]
+    public void VenueAbsentCancelReplay_ReleasesOriginalWalProjectionAfterRetry()
+    {
+        var fixture = Fixture.Create(
+            kind: OutboundMutationKind.Cancel,
+            retried: true);
+        Assert.True(fixture.PendingCancels.TryConsumeByCancel(102, out _));
+        fixture.Ownership.RemoveCancelLink(102);
+        Assert.True(fixture.PendingCancels.TryAdd(99, 101));
+        fixture.Ownership.RegisterCancelLink(101, 99);
+        var replayer = CreateReplayer(
+            fixture.Ledger,
+            fixture.PendingCancels,
+            fixture.Ownership);
+
+        replayer.Apply(new OutboundOperatorResolvedEvent
+        {
+            MutationId = fixture.MutationId,
+            Decision = OutboundOperatorDecision.VenueAbsent,
+            EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+            EvidenceReference = $"official-extract:{new string('d', 64)}",
+            EvidenceDigest = new string('e', 64),
+            ReasonCode = "official_extract_attested",
+            OperatorRef = "operator",
+            ReleaseCapacity = false,
+            ResolvedAtUtc = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        Assert.False(fixture.PendingCancels.TryGetByCancel(101, out _));
+        Assert.False(fixture.Ownership.TryResolveOrig(101, out _));
+    }
+
+    [Fact]
     public void ManualAnnotation_NeverReleasesCapacity()
     {
         var fixture = Fixture.Create();
@@ -1121,6 +1154,7 @@ public sealed class OutboundReconciliationServiceTests
                 OrigClOrdId = 99,
                 SessionVerId = 3,
                 InboundSeqNum = 93,
+                VenueOrderId = 9001,
                 TimestampUtc = T0.AddMinutes(3),
             });
         var lateEvidence = Assert.Single(
@@ -1139,6 +1173,29 @@ public sealed class OutboundReconciliationServiceTests
                 lateEvidence.EvidenceId,
                 "late_contradiction_reconciled"));
         Assert.Equal(OutboundOperatorResolutionStatus.Resolved, resolved.Status);
+        Assert.Equal(
+            9001UL,
+            Assert.Single(fixture.Ledger.SnapshotMutations())
+                .Resolution!
+                .VenueOrderId);
+        var cancelApproval = new CancelReplaceApprovalFactory(
+                fixture.Protector,
+                outboundLedger: fixture.Ledger)
+            .CreateCancel(
+                OutboundMutationId.New(),
+                new Order(
+                    101,
+                    new EndClientId("CLIENT-SECRET"),
+                    "PETR4",
+                    123,
+                    OrderSide.Buy,
+                    OrderType.Limit,
+                    10,
+                    30m,
+                    "F1"),
+                cancelClOrdId: 202,
+                T0.AddMinutes(4));
+        Assert.Equal(9001UL, cancelApproval.Approval.VenueOrderId);
     }
 
     [Fact]
@@ -1642,6 +1699,34 @@ public sealed class OutboundReconciliationServiceTests
             Task.FromResult(RiskDecision.Approve);
 
         public void ReleaseReservation(ulong clOrdId) => ReleaseCount++;
+    }
+
+    private static EventReplayer CreateReplayer(
+        OutboundMutationLedger ledger,
+        PendingCancelRegistry pendingCancels,
+        OrderOwnershipMap ownership)
+    {
+        var orders = new WorkingOrderBook();
+        var processor = new ExecutionReportProcessor(
+            ownership,
+            orders,
+            new PositionKeeper(),
+            new NoOpExecutionEventSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            pendingCancels: pendingCancels);
+        return new EventReplayer(
+            orders,
+            ownership,
+            new KillSwitchService(),
+            new SymbolHaltService(),
+            new SessionPhaseService(),
+            processor,
+            new AlgoBook(),
+            new ClOrdIdPrefixRegistry(),
+            new AlgoIdRegistry(),
+            pendingCancels: pendingCancels,
+            outboundLedger: ledger);
     }
 
     private sealed class RecordingReplaceMargin : IReplaceMarginCoordinator

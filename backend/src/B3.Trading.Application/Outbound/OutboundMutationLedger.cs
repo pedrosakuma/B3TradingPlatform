@@ -568,6 +568,17 @@ public sealed class OutboundMutationLedger
                 throw TransitionError("Outbound mutation already has a terminal operator resolution.");
             if (!CanOperatorResolve(mutation))
                 throw TransitionError("Operator resolution is not valid in the current state.");
+            ulong? venueOrderId = null;
+            if (evt.Decision == OutboundOperatorDecision.VenueAcknowledged &&
+                evt.EvidenceType == OutboundOperatorEvidenceType.TerminalExecutionReport &&
+                evt.EvidenceReference is { } venueEvidenceReference &&
+                HasAuthoritativeTerminalExecutionReportUnsafe(
+                    mutation,
+                    venueEvidenceReference,
+                    out var venueEvidence))
+            {
+                venueOrderId = venueEvidence.VenueOrderId;
+            }
             var proposals = mutation.ResolutionProposals.ToList();
             if (evt.ProposalId is { } proposalId)
             {
@@ -627,7 +638,7 @@ public sealed class OutboundMutationLedger
                 : OutboundMutationState.OperatorResolved;
             Terminalise(
                 mutation, terminalState, evt.ResolvedAtUtc,
-                evt.EvidenceType.ToString(), evt.EvidenceDigest, venueOrderId: null);
+                evt.EvidenceType.ToString(), evt.EvidenceDigest, venueOrderId);
         }
     }
 

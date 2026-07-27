@@ -20,10 +20,15 @@ internal static class SessionRollSpecSupport
         HttpClient http,
         AuthenticationHeaderValue userAuth,
         AuthenticationHeaderValue adminAuth,
+        Func<ulong, Task> proveVenueOrderAbsent,
         Func<OrderCleanupScope, Task> scenario,
         Func<Task>? beforeOrderCleanup = null)
     {
-        var cleanup = new OrderCleanupScope(http, userAuth, adminAuth);
+        var cleanup = new OrderCleanupScope(
+            http,
+            userAuth,
+            adminAuth,
+            proveVenueOrderAbsent);
         await cleanup.CaptureBaselineAsync();
         Exception? scenarioFailure = null;
         try
@@ -368,7 +373,8 @@ internal static class SessionRollSpecSupport
     internal sealed class OrderCleanupScope(
         HttpClient http,
         AuthenticationHeaderValue userAuth,
-        AuthenticationHeaderValue adminAuth)
+        AuthenticationHeaderValue adminAuth,
+        Func<ulong, Task> proveVenueOrderAbsent)
     {
         private readonly Dictionary<ulong, TrackedOrder> _orders = [];
         private readonly HashSet<ulong> _baselineOrderIds = [];
@@ -475,6 +481,24 @@ internal static class SessionRollSpecSupport
                 if (IsTerminal(before))
                     return;
 
+                var proof = await GetVenueOrderProofAsync(order.ClOrdId);
+                if (proof.VenueAbsent)
+                {
+                    await MarkVenueAbsentAsync(order.ClOrdId, before);
+                    return;
+                }
+                if (proof.VenueOrderId is not { } venueOrderId)
+                {
+                    if (proof.AwaitingVenueAcknowledgement)
+                    {
+                        await Task.Delay(PollInterval);
+                        continue;
+                    }
+                    throw new InvalidOperationException(
+                        $"Tracked order {order.ClOrdId} has no acknowledged venue OrderId " +
+                        "and no authoritative VenueAbsent resolution.");
+                }
+
                 if (before.IsStale)
                 {
                     await ClearStaleAsync(order.ClOrdId);
@@ -499,15 +523,18 @@ internal static class SessionRollSpecSupport
                 {
                     var remaining = deadline - DateTimeOffset.UtcNow;
                     if (remaining > TimeSpan.Zero &&
-                        await WaitForTerminalAsync(order.ClOrdId, remaining))
+                        await WaitForTerminalAsync(
+                            order.ClOrdId,
+                            Min(remaining, TimeSpan.FromSeconds(2))))
                     {
                         return;
                     }
 
-                    var terminalLast = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
-                    throw new TimeoutException(
-                        $"Targeted cleanup cancel for order {order.ClOrdId} did not produce a terminal execution report. " +
-                        $"Last observed={Format(terminalLast)}.");
+                    await proveVenueOrderAbsent(venueOrderId);
+                    var venueAbsentLast = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
+                    if (venueAbsentLast is not null && !IsTerminal(venueAbsentLast))
+                        await MarkVenueAbsentAsync(order.ClOrdId, venueAbsentLast);
+                    return;
                 }
 
                 var after = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
@@ -545,6 +572,95 @@ internal static class SessionRollSpecSupport
                 $"Last observed={Format(last)}.");
         }
 
+        private async Task<VenueOrderProof> GetVenueOrderProofAsync(ulong clOrdId)
+        {
+            using var listRequest = new HttpRequestMessage(
+                HttpMethod.Get,
+                "/api/admin/outbound-mutations/");
+            listRequest.Headers.Authorization = adminAuth;
+            using var listResponse = await http.SendAsync(listRequest);
+            listResponse.EnsureSuccessStatusCode();
+            using var listDocument = JsonDocument.Parse(
+                await listResponse.Content.ReadAsStringAsync());
+            var mutations = listDocument.RootElement.GetProperty("mutations");
+            string? mutationId = null;
+            string? mutationState = null;
+            var requiresReconciliation = false;
+            foreach (var mutation in mutations.EnumerateArray())
+            {
+                var kind = mutation.GetProperty("kind").GetString();
+                if (kind is not ("new" or "replace") ||
+                    !TryReadUInt64(mutation.GetProperty("primaryClOrdId"), out var primaryClOrdId) ||
+                    primaryClOrdId != clOrdId)
+                {
+                    continue;
+                }
+
+                mutationId = mutation.GetProperty("mutationId").GetString();
+                mutationState = mutation.GetProperty("state").GetString();
+                requiresReconciliation =
+                    mutation.TryGetProperty("requiresReconciliation", out var requires) &&
+                    requires.ValueKind == JsonValueKind.True;
+                break;
+            }
+
+            if (string.IsNullOrWhiteSpace(mutationId))
+            {
+                throw new InvalidOperationException(
+                    $"No new/replace outbound mutation was found for tracked order {clOrdId}.");
+            }
+
+            using var detailRequest = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"/api/admin/outbound-mutations/{mutationId}");
+            detailRequest.Headers.Authorization = adminAuth;
+            using var detailResponse = await http.SendAsync(detailRequest);
+            detailResponse.EnsureSuccessStatusCode();
+            using var detailDocument = JsonDocument.Parse(
+                await detailResponse.Content.ReadAsStringAsync());
+            var root = detailDocument.RootElement;
+            if (root.TryGetProperty("resolution", out var resolution) &&
+                resolution.ValueKind == JsonValueKind.Object &&
+                resolution.TryGetProperty("venueOrderId", out var venueOrderId) &&
+                TryReadUInt64(venueOrderId, out var parsedVenueOrderId))
+            {
+                return new VenueOrderProof(parsedVenueOrderId, VenueAbsent: false);
+            }
+
+            if (root.TryGetProperty("operatorEvidence", out var operatorEvidence) &&
+                operatorEvidence.ValueKind == JsonValueKind.Array &&
+                mutationState == "operator_resolved" &&
+                !requiresReconciliation &&
+                operatorEvidence.EnumerateArray().Any(evidence =>
+                    evidence.TryGetProperty("decision", out var decision) &&
+                    decision.GetString() == "venue_absent"))
+            {
+                return new VenueOrderProof(
+                    null,
+                    VenueAbsent: true,
+                    AwaitingVenueAcknowledgement: false);
+            }
+
+            if (mutationState == "proven_unsent")
+            {
+                return new VenueOrderProof(
+                    null,
+                    VenueAbsent: true,
+                    AwaitingVenueAcknowledgement: false);
+            }
+
+            return new VenueOrderProof(
+                null,
+                VenueAbsent: false,
+                AwaitingVenueAcknowledgement:
+                    !requiresReconciliation &&
+                    mutationState is
+                        "approved_to_send" or
+                        "attempt_intent_prepared" or
+                        "frame_prepared" or
+                        "transport_write_completed");
+        }
+
         private async Task ClearStaleAsync(ulong clOrdId)
         {
             using var clear = new HttpRequestMessage(
@@ -557,6 +673,36 @@ internal static class SessionRollSpecSupport
             {
                 throw new InvalidOperationException(
                     $"POST clear-stale for tracked order {clOrdId} expected 204, got " +
+                    $"{(int)response.StatusCode}: {body}");
+            }
+        }
+
+        private async Task MarkVenueAbsentAsync(
+            ulong clOrdId,
+            OrderSnapshot order)
+        {
+            if (order.IsStale ||
+                order.Status is not ("Working" or "PartiallyFilled"))
+            {
+                return;
+            }
+
+            using var mark = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"/api/admin/firms/{FirmId}/orders/{clOrdId}/mark-stale")
+            {
+                Content = JsonContent.Create(new
+                {
+                    reason = "cleanup_venue_absent",
+                }),
+            };
+            mark.Headers.Authorization = adminAuth;
+            using var response = await http.SendAsync(mark);
+            var body = await response.Content.ReadAsStringAsync();
+            if (response.StatusCode != HttpStatusCode.NoContent)
+            {
+                throw new InvalidOperationException(
+                    $"POST mark-stale for venue-absent order {clOrdId} expected 204, got " +
                     $"{(int)response.StatusCode}: {body}");
             }
         }
@@ -584,6 +730,19 @@ internal static class SessionRollSpecSupport
 
         private static bool IsTerminal(OrderSnapshot order) =>
             order.Status is "Filled" or "Cancelled" or "Rejected" or "Replaced";
+
+        private static bool TryReadUInt64(JsonElement value, out ulong parsed)
+        {
+            if (value.ValueKind == JsonValueKind.Number)
+                return value.TryGetUInt64(out parsed);
+            if (value.ValueKind == JsonValueKind.String)
+                return ulong.TryParse(value.GetString(), out parsed);
+            parsed = 0;
+            return false;
+        }
+
+        private static TimeSpan Min(TimeSpan left, TimeSpan right) =>
+            left <= right ? left : right;
     }
 
     internal sealed record OrderSnapshot(
@@ -603,5 +762,10 @@ internal static class SessionRollSpecSupport
         string Side,
         decimal? Price,
         long Quantity);
+
+    private sealed record VenueOrderProof(
+        ulong? VenueOrderId,
+        bool VenueAbsent,
+        bool AwaitingVenueAcknowledgement = false);
 
 }

@@ -622,7 +622,7 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             return;
         if (mutation.State == OutboundMutationState.ProvenUnsent)
         {
-            RemoveProjection(mutation.Kind, ActiveClOrdId(mutation));
+            RemoveTerminalProjection(mutation);
             return;
         }
         if (mutation.State == OutboundMutationState.OperatorResolved)
@@ -630,7 +630,7 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             if (mutation.OperatorEvidence.LastOrDefault()?.Decision
                 == OutboundOperatorDecision.VenueAbsent)
             {
-                RemoveProjection(mutation.Kind, ActiveClOrdId(mutation));
+                RemoveTerminalProjection(mutation);
             }
             return;
         }
@@ -780,6 +780,23 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
         _replacements.TryConsume(clOrdId, out _);
         _ownership.RemoveCancelLink(clOrdId);
         _replaceMargin.AbortReplace(clOrdId);
+    }
+
+    private void RemoveTerminalProjection(OutboundMutationSnapshot mutation)
+    {
+        if (mutation.Kind != OutboundMutationKind.Cancel)
+        {
+            RemoveProjection(mutation.Kind, ActiveClOrdId(mutation));
+            return;
+        }
+
+        foreach (var cancelClOrdId in mutation.Attempts
+                     .Select(attempt => attempt.ClOrdId)
+                     .Append(mutation.PrimaryClOrdId)
+                     .Distinct())
+        {
+            RemoveProjection(OutboundMutationKind.Cancel, cancelClOrdId);
+        }
     }
 
     private CancelReplaceDispatchResult ReconciliationRequired(

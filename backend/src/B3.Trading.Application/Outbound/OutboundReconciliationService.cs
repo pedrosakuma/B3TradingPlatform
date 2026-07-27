@@ -466,11 +466,15 @@ public sealed class OutboundReconciliationService
             return;
         }
 
-        var activeClOrdId = mutation.Attempts.LastOrDefault()?.ClOrdId
-            ?? mutation.PrimaryClOrdId;
-        _pendingCancels?.TryConsumeByCancel(activeClOrdId, out _);
-        _ownership?.RemoveCancelLink(activeClOrdId);
-        _botMappings?.ReapCancel(activeClOrdId);
+        foreach (var cancelClOrdId in mutation.Attempts
+                     .Select(attempt => attempt.ClOrdId)
+                     .Append(mutation.PrimaryClOrdId)
+                     .Distinct())
+        {
+            _pendingCancels?.TryConsumeByCancel(cancelClOrdId, out _);
+            _ownership?.RemoveCancelLink(cancelClOrdId);
+            _botMappings?.ReapCancel(cancelClOrdId);
+        }
     }
 
     private void AuditFirst(
