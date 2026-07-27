@@ -328,6 +328,14 @@ public sealed class OutboundMutationLedger
     }
 
     public void Apply(OutboundTransportWriteCompletedEvent evt)
+        => ApplyTransportWriteCompleted(evt, allowMissingFramePrepared: false);
+
+    public void ApplyRecovered(OutboundTransportWriteCompletedEvent evt)
+        => ApplyTransportWriteCompleted(evt, allowMissingFramePrepared: true);
+
+    private void ApplyTransportWriteCompleted(
+        OutboundTransportWriteCompletedEvent evt,
+        bool allowMissingFramePrepared)
     {
         ArgumentNullException.ThrowIfNull(evt);
         lock (_gate)
@@ -340,6 +348,26 @@ public sealed class OutboundMutationLedger
                     && attempt.GatewayReceiptVersion == evt.GatewayReceiptVersion)
                     return;
                 throw TransitionError("Conflicting transport-write evidence.");
+            }
+            if (allowMissingFramePrepared
+                && mutation.State == OutboundMutationState.AttemptIntentPrepared
+                && attempt.FramePrepared is null
+                && index == mutation.Attempts.Count - 1)
+            {
+                var recoveredAttempt = attempt with
+                {
+                    TransportWriteCompletedAtUtc = evt.CompletedAtUtc,
+                    GatewayReceiptVersion = evt.GatewayReceiptVersion,
+                    AmbiguityReason = OutboundAmbiguityReason.MissingFramePreparedEvidence,
+                };
+                _mutations[evt.MutationId] = ReplaceAttempt(
+                    mutation,
+                    index,
+                    recoveredAttempt,
+                    OutboundMutationState.Ambiguous,
+                    evt.TimestampUtc,
+                    requiresReconciliation: true);
+                return;
             }
             if (mutation.State != OutboundMutationState.FramePrepared
                 || attempt.FramePrepared is null
