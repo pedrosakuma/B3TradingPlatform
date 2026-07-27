@@ -156,8 +156,6 @@ internal sealed class DockerVenueTransportController
         string? lastError = null;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            var priorSnapshotWriteUtc = await GetLatestMatchingSnapshotWriteUtcAsync(ct);
-            await Task.Delay(TimeSpan.FromMilliseconds(1100), ct);
             var force = await RunDockerAsync(
                 new[]
                 {
@@ -174,86 +172,26 @@ internal sealed class DockerVenueTransportController
                 continue;
             }
 
-            while (DateTimeOffset.UtcNow < deadline)
-            {
-                var freshSnapshotWriteUtc =
-                    await GetLatestMatchingSnapshotWriteUtcAsync(ct);
-                if (freshSnapshotWriteUtc is not null &&
-                    (priorSnapshotWriteUtc is null ||
-                     freshSnapshotWriteUtc > priorSnapshotWriteUtc))
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), ct);
+            var snapshot = await RunDockerAsync(
+                new[]
                 {
-                    var snapshot = await RunDockerAsync(
-                        new[]
-                        {
-                            "exec", _matchingContainer,
-                            "wget", "-qO-",
-                            "http://localhost:8080/admin/channels/84/snapshot",
-                        },
-                        ct,
-                        allowNonZeroExit: true);
-                    if (snapshot.ExitCode == 0)
-                        return snapshot.StdOut;
-                    lastError = snapshot.StdErr;
-                    break;
-                }
-                await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+                    "exec", _matchingContainer,
+                    "wget", "-qO-",
+                    "http://localhost:8080/admin/channels/84/snapshot",
+                },
+                ct,
+                allowNonZeroExit: true);
+            if (snapshot.ExitCode == 0)
+            {
+                return snapshot.StdOut;
             }
+            lastError = snapshot.StdErr;
         }
 
         throw new InvalidOperationException(
             "Timed out capturing a fresh matching channel-84 snapshot. " +
             $"lastError={lastError ?? "<none>"}.");
-    }
-
-    private async Task<DateTimeOffset?> GetLatestMatchingSnapshotWriteUtcAsync(
-        CancellationToken ct)
-    {
-        var listing = await RunDockerAsync(
-            new[]
-            {
-                "exec", _matchingContainer,
-                "ls", "-1", "/var/lib/b3matching",
-            },
-            ct,
-            allowNonZeroExit: true);
-        if (listing.ExitCode != 0)
-            return null;
-
-        DateTimeOffset? latest = null;
-        foreach (var fileName in listing.StdOut.Split(
-                     ['\r', '\n'],
-                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (!fileName.StartsWith("channel-84.snapshot.", StringComparison.Ordinal) ||
-                fileName.EndsWith(".tmp", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var stat = await RunDockerAsync(
-                new[]
-                {
-                    "exec", _matchingContainer,
-                    "stat", "-c", "%y",
-                    $"/var/lib/b3matching/{fileName}",
-                },
-                ct,
-                allowNonZeroExit: true);
-            if (stat.ExitCode != 0 ||
-                !DateTimeOffset.TryParse(
-                    stat.StdOut.Trim(),
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                    out var writeUtc))
-            {
-                continue;
-            }
-
-            if (latest is null || writeUtc > latest)
-                latest = writeUtc;
-        }
-
-        return latest;
     }
 
     public async Task KillTradingHostAsync(CancellationToken ct = default)
