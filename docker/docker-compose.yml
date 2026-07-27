@@ -116,7 +116,7 @@ services:
     # Trading__MarketData__WsUrl below.
     # Pinned with matching-platform above. Floating marketdata independently
     # can activate a newer snapshot epoch contract against an older producer.
-    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:89ce482cbe1dc0f0a40c0bb7cf3a1208eb0e20fd3d97a29a84da5131f81750b1}
+    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:2174ac595606334548a8df147c84707f66d7df3264794552467270398443f034}
     container_name: b3-marketdata
     restart: unless-stopped
     environment:
@@ -420,7 +420,7 @@ services:
   #
   #   PCAP_DIR=/path/to/pcaps docker compose --profile marketdata-pcap up
   marketdata-pcap:
-    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:89ce482cbe1dc0f0a40c0bb7cf3a1208eb0e20fd3d97a29a84da5131f81750b1}
+    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:2174ac595606334548a8df147c84707f66d7df3264794552467270398443f034}
     container_name: b3-marketdata-pcap
     restart: unless-stopped
     profiles: ["marketdata-pcap"]
