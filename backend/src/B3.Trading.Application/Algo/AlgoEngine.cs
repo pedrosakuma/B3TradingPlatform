@@ -1041,10 +1041,23 @@ public sealed class AlgoEngine : BackgroundService
             return;
         }
 
-        // Child is terminal — this clOrdId is no longer live regardless of
-        // outcome. Clear the slot before transitioning so re-entrancy via
-        // RecordTerminalAsync sees a clean state.
-        if (rt.LiveChildClOrdId == child.ClOrdId)
+        // #548. A Filled child from an in-flight Pegged repeg is kept
+        // published as live until ResolveRepegOnFillAsync has consumed the
+        // replacement intent and retired the repeg cycle. LiveChildClOrdId's
+        // lock-fenced setter is the publication boundary: a reconciliation
+        // pass that observes the empty slot must also observe all cleanup
+        // that happened before it. Publishing null here used to expose an
+        // empty slot while the intent was still live, allowing a queued
+        // scheduler tick to submit slice N+1 before fill resolution finished.
+        var resolvingPeggedRepegFill =
+            child.Status == OrderStatus.Filled
+            && algo.Type == AlgoType.Pegged
+            && (_peggedRepeg?.IsCancelledChild(
+                algo.FirmId,
+                algo.AlgoId,
+                child.ClOrdId) ?? false);
+        if (!resolvingPeggedRepegFill
+            && rt.LiveChildClOrdId == child.ClOrdId)
             rt.LiveChildClOrdId = null;
 
         switch (child.Status)
@@ -1079,10 +1092,16 @@ public sealed class AlgoEngine : BackgroundService
                 // through to either the normal Fill-then-resubmit
                 // path (orphan replacement) or the VenueCancelled
                 // branch (spurious Suspended).
-                if (algo.Type == AlgoType.Pegged
-                    && (_peggedRepeg?.IsCancelledChild(algo.FirmId, algo.AlgoId, child.ClOrdId) ?? false))
+                if (resolvingPeggedRepegFill)
                 {
                     await ResolveRepegOnFillAsync(algo, rt, child).ConfigureAwait(false);
+                    if (!algo.IsTerminal
+                        && rt.LiveChildClOrdId == child.ClOrdId)
+                    {
+                        // #548: publish the empty slot only after the repeg
+                        // intent/book cleanup above is complete.
+                        rt.LiveChildClOrdId = null;
+                    }
                     return;
                 }
                 if (algo.Status == AlgoStatus.Cancelling)
@@ -2337,7 +2356,6 @@ public sealed class AlgoEngine : BackgroundService
     private async Task ResolveRepegOnFillAsync(Algo algo, AlgoParentRuntime rt, Order child)
     {
         var wasPending = rt.RepegPending;
-        rt.RepegPending = false;
         // Keep LastRepegCancelledChildId sticky for late-ER dedup; the
         // marker is cleared only on parent terminal.
 
@@ -2413,6 +2431,13 @@ public sealed class AlgoEngine : BackgroundService
                     new KeyValuePair<string, object?>("call_site", "algo.pegged.repeg-resolved"));
             }
         }
+
+        // #548: retire the in-memory throttle only after the replacement
+        // intent and durable repeg marker are resolved. The caller publishes
+        // LiveChildClOrdId=null after this method returns; its lock release
+        // makes this ordered cleanup visible to any observer of the empty
+        // slot, matching the adoption-side fence established in #469.
+        rt.RepegPending = false;
 
         if (algo.RemainingQuantity <= 0)
         {

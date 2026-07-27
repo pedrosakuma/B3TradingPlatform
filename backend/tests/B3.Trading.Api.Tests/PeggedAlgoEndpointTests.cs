@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Application.MarketData;
+using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -1901,7 +1902,15 @@ public class PeggedAlgoEndpointTests
         // Fill ER to fall through to SubmitNextSliceAsync — a SECOND
         // child would get submitted and Assert.Single(allChildren)
         // below fails.
-        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var f = TestAppFactory.WithOverrides(
+            Simulator(),
+            services =>
+            {
+                services.RemoveAll<IReplaceMarginCoordinator>();
+                services.AddSingleton<BlockingAbortReplaceMarginCoordinator>();
+                services.AddSingleton<IReplaceMarginCoordinator>(sp =>
+                    sp.GetRequiredService<BlockingAbortReplaceMarginCoordinator>());
+            });
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
         var adminToken = await f.LoginAsync(http, "admin");
@@ -1917,11 +1926,14 @@ public class PeggedAlgoEndpointTests
         var mock = f.Services.GetRequiredService<MockEntryPointClient>();
         var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
         var registry = f.Services.GetRequiredService<PendingReplacementRegistry>();
+        var engine = f.Services.GetRequiredService<AlgoEngine>();
+        var abortGate = f.Services.GetRequiredService<BlockingAbortReplaceMarginCoordinator>();
 
         // Hold the engine's CancelReplaceAsync await via a TCS so we
         // have a deterministic window to race the Fill ER against.
         var replaceGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         mock.ReplaceDelayInjector = _ => replaceGate.Task;
+        abortGate.BlockNextAbort();
 
         // Drift the mid → engine issues cancel-replace; the wire-
         // call now parks on the gate.
@@ -1942,6 +1954,26 @@ public class PeggedAlgoEndpointTests
         // through the IsCancelledChild dedup → ResolveRepegOnFillAsync
         // which also consumes the in-flight replace intent.
         replaceGate.SetResult();
+
+        try
+        {
+            // #548. ResolveRepegOnFillAsync consumes the replacement
+            // intent, then aborts its margin reservation. Hold that abort
+            // so the test observes the exact cleanup window. The filled
+            // child must remain published until the whole resolution
+            // sequence retires; otherwise a queued scheduler/reconcile tick
+            // can observe an empty slot and submit an orphan slice.
+            await abortGate.WaitUntilAbortEnteredAsync(TimeSpan.FromSeconds(3));
+            Assert.False(registry.IsOriginalInFlight(child1.ClOrdId));
+            Assert.Equal(
+                child1.ClOrdId,
+                engine.TryGetLiveChildClOrdId("default", ulong.Parse(algoId)));
+            Assert.Single(book.EnumerateChildrenOf("default", ulong.Parse(algoId)));
+        }
+        finally
+        {
+            abortGate.ReleaseAbort();
+        }
 
         await WaitForAlgoStatus(http, token, algoId, "Completed");
         var snap = await GetAlgo(http, token, algoId);
@@ -2459,6 +2491,82 @@ public class PeggedAlgoEndpointTests
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
         return resp;
+    }
+
+    private sealed class BlockingAbortReplaceMarginCoordinator(
+        ReserveOnSubmitMarginProvider inner) : IReplaceMarginCoordinator, IDisposable
+    {
+        private readonly ManualResetEventSlim _abortRelease = new(initialState: true);
+        private TaskCompletionSource? _abortEntered;
+        private int _blockNextAbort;
+
+        public void BlockNextAbort()
+        {
+            _abortEntered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _abortRelease.Reset();
+            Volatile.Write(ref _blockNextAbort, 1);
+        }
+
+        public async Task WaitUntilAbortEnteredAsync(TimeSpan timeout)
+        {
+            var entered = _abortEntered
+                ?? throw new InvalidOperationException("Abort gate was not armed.");
+            await entered.Task.WaitAsync(timeout);
+        }
+
+        public void ReleaseAbort() => _abortRelease.Set();
+
+        public Task<RiskDecision> PrepareReplaceAsync(
+            ulong originalClOrdId,
+            ulong newClOrdId,
+            EndClientId owner,
+            decimal newRemainingNotional,
+            CancellationToken ct) =>
+            inner.PrepareReplaceAsync(
+                originalClOrdId,
+                newClOrdId,
+                owner,
+                newRemainingNotional,
+                ct);
+
+        public Task<RiskDecision> PrepareReplaceAsync(
+            ulong originalClOrdId,
+            ulong newClOrdId,
+            EndClientId owner,
+            string firmId,
+            decimal newRemainingNotional,
+            CancellationToken ct) =>
+            inner.PrepareReplaceAsync(
+                originalClOrdId,
+                newClOrdId,
+                owner,
+                firmId,
+                newRemainingNotional,
+                ct);
+
+        public void CommitReplace(
+            ulong originalClOrdId,
+            ulong newClOrdId,
+            decimal confirmedRemainingNotional) =>
+            inner.CommitReplace(
+                originalClOrdId,
+                newClOrdId,
+                confirmedRemainingNotional);
+
+        public void AbortReplace(ulong newClOrdId)
+        {
+            if (Interlocked.Exchange(ref _blockNextAbort, 0) == 1)
+            {
+                _abortEntered?.TrySetResult();
+                if (!_abortRelease.Wait(TimeSpan.FromSeconds(10)))
+                    throw new TimeoutException("Timed out waiting to release AbortReplace.");
+            }
+
+            inner.AbortReplace(newClOrdId);
+        }
+
+        public void Dispose() => _abortRelease.Dispose();
     }
 
     /// <summary>
