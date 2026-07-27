@@ -304,6 +304,10 @@ Those versions emit `OrderMassActionReport(ACCEPTED)` before dispatcher
 execution, so neither that report nor a FIXP `Sequence` heartbeat is an
 execution barrier.
 
+If persisted state identifies a prior session that requires cleanup, the bot
+fails startup while this option is `false`; it never bypasses the compatibility
+opt-in or submits replacement quotes over potentially restored venue orders.
+
 Set `StartupCleanupEnabled=true` only after deploying a matching-platform
 release containing #569. Under that minimum contract, the solicited
 `MassActionExecuted(ACCEPTED)` correlated by the request `ClOrdID` is terminal:

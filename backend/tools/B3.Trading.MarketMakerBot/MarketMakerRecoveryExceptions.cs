@@ -17,3 +17,11 @@ internal sealed class MarketMakerReconciliationRequiredException : InvalidOperat
     {
     }
 }
+
+internal sealed class MarketMakerRecoveryCompatibilityException : InvalidOperationException
+{
+    public MarketMakerRecoveryCompatibilityException(string message)
+        : base(message)
+    {
+    }
+}

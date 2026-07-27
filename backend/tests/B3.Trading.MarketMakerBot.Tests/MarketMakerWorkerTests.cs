@@ -224,6 +224,7 @@ public class MarketMakerWorkerTests : IDisposable
                 options =>
                 {
                     options.SessionVerId = 42;
+                    options.StartupCleanupEnabled = true;
                     options.Instruments.Add(CreateInstrument("VALE3", 2, 60m));
                     options.Instruments.Add(CreateInstrument("ITUB4", 3, 30m));
                 },
@@ -278,9 +279,38 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
-    public void ConfigureRecoveryState_ForcesCleanupForResumeOrUnresolvedOrders()
+    public async Task ConnectAndRunSessionAsync_RecoveredSessionWithCleanupDisabledFailsClosed()
     {
-        var (worker, _, _, _) = CreateWorker();
+        var (worker, _, client, _) = CreateWorker();
+        var recovered = new SessionSnapshot
+        {
+            SessionId = 1,
+            SessionVerId = 5,
+            LastInboundSeqNum = 8,
+            OutstandingOrders = new Dictionary<string, ulong> { ["100"] = 1 },
+        };
+
+        var error = await Assert.ThrowsAsync<MarketMakerRecoveryCompatibilityException>(
+            () => worker.ConnectAndRunSessionAsync(
+                client,
+                _ =>
+                {
+                    worker.ConfigureRecoveryState(recovered, effectiveSessionVerId: 5);
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None));
+
+        Assert.Contains("StartupCleanupEnabled is false", error.Message, StringComparison.Ordinal);
+        Assert.Contains("B3MatchingPlatform#569", error.Message, StringComparison.Ordinal);
+        Assert.Empty(client.SubmittedMassActions);
+        Assert.Empty(client.SubmittedOrders);
+    }
+
+    [Fact]
+    public void ConfigureRecoveryState_EnabledCleanupCoversResumeOrUnresolvedOrders()
+    {
+        var (worker, _, _, _) =
+            CreateWorker(out _, options => options.StartupCleanupEnabled = true);
         var emptyResumed = new SessionSnapshot
         {
             SessionId = 1,
@@ -302,7 +332,7 @@ public class MarketMakerWorkerTests : IDisposable
         Assert.True(worker.StartupCleanupRequired);
 
         worker.ConfigureRecoveryState(recovered: null, effectiveSessionVerId: 6);
-        Assert.False(worker.StartupCleanupRequired);
+        Assert.True(worker.StartupCleanupRequired);
     }
 
     [Fact]
@@ -376,7 +406,11 @@ public class MarketMakerWorkerTests : IDisposable
             var stateStore = new MarketMakerSessionStateStore(directory);
             var (worker, _, client, instrument) = CreateWorker(
                 out _,
-                options => options.SessionVerId = 42,
+                options =>
+                {
+                    options.SessionVerId = 42;
+                    options.StartupCleanupEnabled = true;
+                },
                 stateStore);
             await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
             var clOrdId = Assert.Single(client.SubmittedOrders).ClOrdID;
@@ -468,7 +502,11 @@ public class MarketMakerWorkerTests : IDisposable
             await firstStore.SaveAsync(baseline);
             var (firstWorker, _, firstClient, _) = CreateWorker(
                 out _,
-                options => options.SessionVerId = 42,
+                options =>
+                {
+                    options.SessionVerId = 42;
+                    options.StartupCleanupEnabled = true;
+                },
                 firstStore);
             firstWorker.ConfigureRecoveryState(baseline, effectiveSessionVerId: 42);
 
@@ -517,7 +555,11 @@ public class MarketMakerWorkerTests : IDisposable
 
             var (restartedWorker, _, restartedClient, _) = CreateWorker(
                 out _,
-                options => options.SessionVerId = 42,
+                options =>
+                {
+                    options.SessionVerId = 42;
+                    options.StartupCleanupEnabled = true;
+                },
                 restartedStore);
             restartedWorker.ConfigureRecoveryState(recovered, effectiveSessionVerId: 42);
             restartedClient.InboundPersistenceCallback = async (ev, ct) =>
@@ -1305,7 +1347,11 @@ public class MarketMakerWorkerTests : IDisposable
             var (worker, _, client, instrument) =
                 CreateWorker(
                     out _,
-                    options => options.SessionVerId = 10,
+                    options =>
+                    {
+                        options.SessionVerId = 10;
+                        options.StartupCleanupEnabled = true;
+                    },
                     stateStore);
             await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
             var clOrdId = Assert.Single(client.SubmittedOrders).ClOrdID;

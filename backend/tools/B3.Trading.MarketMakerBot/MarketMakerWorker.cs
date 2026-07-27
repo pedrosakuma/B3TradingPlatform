@@ -273,9 +273,17 @@ internal sealed class MarketMakerWorker : BackgroundService
         } && sessionId == _options.SessionId;
         var resumed = belongsToSession && recovered!.SessionVerId == effectiveSessionVerId;
 
+        if (belongsToSession && !_options.StartupCleanupEnabled)
+        {
+            throw new MarketMakerRecoveryCompatibilityException(
+                $"Recovered FIXP session {_options.SessionId} version {recovered!.SessionVerId} requires terminal startup cleanup, " +
+                "but MarketMaker:StartupCleanupEnabled is false. Upgrade matching-platform to a release containing " +
+                "B3MatchingPlatform#569 and enable startup cleanup, or reconcile and remove restored venue orders before clearing persisted state.");
+        }
+
         _effectiveSessionVerId = effectiveSessionVerId;
         _inboundSequence.Reset(resumed ? recovered!.LastInboundSeqNum : 0);
-        _startupCleanupRequired = _options.StartupCleanupEnabled || belongsToSession;
+        _startupCleanupRequired = _options.StartupCleanupEnabled;
     }
 
     internal bool StartupCleanupRequired => _startupCleanupRequired;
@@ -296,11 +304,6 @@ internal sealed class MarketMakerWorker : BackgroundService
 
         if (_startupCleanupRequired)
         {
-            if (!_options.StartupCleanupEnabled)
-            {
-                _log.LogWarning(
-                    "[mm] forcing terminal startup cleanup because a prior FIXP session was recovered; fresh quoting remains blocked until venue cleanup is authoritative.");
-            }
             await CleanupLegacySessionOrdersAsync(client, receive, ct);
             await Task.Yield();
             await ThrowIfReceiveLoopStoppedAsync(receive);

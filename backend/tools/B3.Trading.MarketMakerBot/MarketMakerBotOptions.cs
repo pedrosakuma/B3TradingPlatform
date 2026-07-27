@@ -108,7 +108,8 @@ public sealed class MarketMakerBotOptions
     /// Opts into terminal startup mass-cancel hygiene. Keep disabled unless
     /// matching-platform includes B3MatchingPlatform#569, where the solicited
     /// ACCEPTED report is emitted only after dispatcher execution and all
-    /// cancellation ERs.
+    /// cancellation ERs. Recovered session state fails startup while disabled
+    /// because replacement quoting cannot safely proceed without that barrier.
     /// </summary>
     public bool StartupCleanupEnabled { get; set; }
 
