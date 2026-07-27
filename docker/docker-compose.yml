@@ -75,7 +75,7 @@ services:
     # matching-image-bump workflow for the bump cadence.
     # Devs can still override (e.g. MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest)
     # to test the bleeding edge locally.
-    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:c4dc6f4c70e67be459a36951ca9ed0da8d74009306975084bf6edccef9d67b5c}
+    image: ${MATCHING_IMAGE:-ghcr.io/pedrosakuma/b3-matching@sha256:3e5b4d4034fe735e9d640df1093f2f4e761836ae2840995d354f95c4f6d32626}
     container_name: b3-matching-platform
     restart: unless-stopped
     networks:
@@ -116,7 +116,7 @@ services:
     # Trading__MarketData__WsUrl below.
     # Pinned with matching-platform above. Floating marketdata independently
     # can activate a newer snapshot epoch contract against an older producer.
-    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:bb06aa2e810cee9167c5ecd95de6a23e3f845b278cdcd998d16db5b3886d6921}
+    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:89ce482cbe1dc0f0a40c0bb7cf3a1208eb0e20fd3d97a29a84da5131f81750b1}
     container_name: b3-marketdata
     restart: unless-stopped
     environment:
@@ -420,7 +420,7 @@ services:
   #
   #   PCAP_DIR=/path/to/pcaps docker compose --profile marketdata-pcap up
   marketdata-pcap:
-    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:bb06aa2e810cee9167c5ecd95de6a23e3f845b278cdcd998d16db5b3886d6921}
+    image: ${MARKETDATA_IMAGE:-ghcr.io/pedrosakuma/b3-marketdata@sha256:89ce482cbe1dc0f0a40c0bb7cf3a1208eb0e20fd3d97a29a84da5131f81750b1}
     container_name: b3-marketdata-pcap
     restart: unless-stopped
     profiles: ["marketdata-pcap"]
