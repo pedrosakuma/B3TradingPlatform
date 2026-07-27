@@ -34,9 +34,10 @@ public sealed class MarketMakerMetrics : IDisposable
     private readonly ObservableMetricCounter _fillDeltaMismatch;
     private readonly ObservableMetricCounter _rejects;
     private readonly ObservableMetricCounter _cancelled;
-    private readonly ObservableMetricCounter _staleOrdersCancelled;
-    private readonly ObservableMetricCounter _staleCancelRejected;
-    private readonly ObservableMetricCounter _staleCancelSubmitFailed;
+    private readonly ObservableMetricCounter _ttlRefreshes;
+    private readonly ObservableMetricCounter _ttlRefreshCancelRejected;
+    private readonly ObservableMetricCounter _ttlRefreshCancelSubmitFailed;
+    private readonly ObservableMetricCounter _quoteRestoreRejected;
     private readonly ObservableMetricCounter _safetyCapHits;
     private readonly ObservableMetricCounter _bookDrivenRequotes;
     private readonly ObservableMetricCounter _bookDrivenRequoteSubmitFailed;
@@ -76,9 +77,11 @@ public sealed class MarketMakerMetrics : IDisposable
         _fillDeltaMismatch = new(_meter, "bot.pnl.fill_delta_mismatch");
         _rejects = new(_meter, "bot.orders.rejected");
         _cancelled = new(_meter, "bot.orders.cancelled");
-        _staleOrdersCancelled = new(_meter, "bot.orders.stale_cancelled");
-        _staleCancelRejected = new(_meter, "bot.orders.stale_cancel_rejected");
-        _staleCancelSubmitFailed = new(_meter, "bot.orders.stale_cancel_submit_failed");
+        _ttlRefreshes = new(_meter, "bot.orders.ttl_refresh");
+        _ttlRefreshCancelRejected = new(_meter, "bot.orders.ttl_refresh_cancel_rejected");
+        _ttlRefreshCancelSubmitFailed =
+            new(_meter, "bot.orders.ttl_refresh_cancel_submit_failed");
+        _quoteRestoreRejected = new(_meter, "bot.orders.quote_restore_rejected");
         _safetyCapHits = new(_meter, "bot.orders.safety_cap_hit");
         _bookDrivenRequotes = new(_meter, "bot.orders.book_driven_requote");
         _bookDrivenRequoteSubmitFailed =
@@ -156,9 +159,16 @@ public sealed class MarketMakerMetrics : IDisposable
 
     public void RecordRejected(string? symbol) => _rejects.Add(1, SymbolTag(symbol));
     public void RecordCancelled() => _cancelled.Add(1);
-    public void RecordStaleOrderCancelled(string symbol) => _staleOrdersCancelled.Add(1, SymbolTag(symbol));
-    public void RecordStaleCancelRejected(string symbol) => _staleCancelRejected.Add(1, SymbolTag(symbol));
-    public void RecordStaleCancelSubmitFailed(string symbol) => _staleCancelSubmitFailed.Add(1, SymbolTag(symbol));
+    public void RecordTtlRefresh(string symbol) => _ttlRefreshes.Add(1, SymbolTag(symbol));
+    public void RecordTtlRefreshCancelRejected(string symbol) =>
+        _ttlRefreshCancelRejected.Add(1, SymbolTag(symbol));
+    public void RecordTtlRefreshCancelSubmitFailed(string symbol) =>
+        _ttlRefreshCancelSubmitFailed.Add(1, SymbolTag(symbol));
+    public void RecordQuoteRestoreRejected(string symbol, CancelReason reason) =>
+        _quoteRestoreRejected.Add(
+            1,
+            SymbolTag(symbol),
+            new("reason", CancelReasonName(reason)));
     public void RecordSafetyCapHit(string symbol) => _safetyCapHits.Add(1, SymbolTag(symbol));
     public void RecordBookDrivenRequote(string symbol, bool isBuy) =>
         _bookDrivenRequotes.Add(1, SymbolTag(symbol), SideTag(isBuy));
@@ -228,9 +238,13 @@ public sealed class MarketMakerMetrics : IDisposable
             _fillsInconsistent.Add(0, symbol);
             _fillDeltaMismatch.Add(0, symbol);
             _rejects.Add(0, symbol);
-            _staleOrdersCancelled.Add(0, symbol);
-            _staleCancelRejected.Add(0, symbol);
-            _staleCancelSubmitFailed.Add(0, symbol);
+            _ttlRefreshes.Add(0, symbol);
+            _ttlRefreshCancelRejected.Add(0, symbol);
+            _ttlRefreshCancelSubmitFailed.Add(0, symbol);
+            _quoteRestoreRejected.Add(
+                0,
+                symbol,
+                new("reason", CancelReasonName(CancelReason.TtlRefresh)));
             _safetyCapHits.Add(0, symbol);
             _bookDrivenRequoteSubmitFailed.Add(0, symbol);
             _bookDrivenRequoteCancelRejected.Add(0, symbol);
@@ -432,7 +446,7 @@ public sealed class MarketMakerMetrics : IDisposable
 
     private static string CancelReasonName(CancelReason reason) => reason switch
     {
-        CancelReason.StaleOrder => "stale_order",
+        CancelReason.TtlRefresh => "ttl_refresh",
         CancelReason.PriceDrift => "price_drift",
         CancelReason.InventoryStrategy => "inventory_strategy",
         CancelReason.VolatilityStrategy => "volatility_strategy",

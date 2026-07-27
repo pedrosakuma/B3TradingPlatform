@@ -65,6 +65,35 @@ soak_metric_sample() {
     '
 }
 
+soak_sum_metric_values() {
+    local total=0 value name
+    for name in "$@"; do
+        value="$(metric_value "sum(${name})")" || return 1
+        total="$(awk -v total="$total" -v value="$value" 'BEGIN { print total + value }')" ||
+            return 1
+    done
+    printf '%s\n' "$total" || return 1
+}
+
+soak_operational_error_metric_names() {
+    printf '%s\n' \
+        bot_orders_submit_failed_total \
+        bot_orders_rejected_total \
+        bot_orders_ttl_refresh_cancel_rejected_total \
+        bot_orders_ttl_refresh_cancel_submit_failed_total \
+        bot_orders_book_driven_requote_submit_failed_total \
+        bot_orders_book_driven_requote_cancel_rejected_total \
+        bot_orders_feed_unavailable_cancel_rejected_total \
+        bot_orders_feed_unavailable_cancel_submit_failed_total \
+        bot_orders_cancel_ack_expired_total
+}
+
+soak_operational_error_total() {
+    local -a metric_names
+    mapfile -t metric_names < <(soak_operational_error_metric_names)
+    soak_sum_metric_values "${metric_names[@]}"
+}
+
 soak_duration_to_seconds() {
     local duration="$1"
     [[ "$duration" =~ ^([0-9]+):([0-5][0-9]):([0-5][0-9])$ ]] || return 1

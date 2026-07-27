@@ -372,7 +372,7 @@ Required comparison fields:
 | Feed eligibility/age/source | `bot.market_data.reference_eligible_current` for stable state checks, `bot.market_data.reference_eligible` for bounded reason diagnostics, `bot.market_data.reference_age_seconds`; `[mm-feed]` |
 | Fills/rejects/cancels | `bot.fills.received`, `bot.pnl.fills_applied`, `bot.orders.rejected`, `bot.orders.cancelled` |
 | Accounting corruption | unknown, duplicate, invalid, inconsistent, and delta-mismatch P&L counters |
-| Open orders/safety | `bot.orders.open`, `bot.orders.safety_cap_hit`, cancel/requote error counters |
+| Open orders/safety | `bot.orders.open`, `bot.orders.safety_cap_hit`, cancel/requote/restore error counters, and `bot.orders.cancel_ack_expired`; every non-zero error or ACK timeout fails the soak gate |
 
 `unrealized` and `total` are intentionally absent, not zero, when no fresh live
 mark exists. Full quoted spread in ticks is twice the reported half-spread.

@@ -69,9 +69,10 @@ metadata, never accumulated position or P&L.
 | `bot.pnl.fill_delta_mismatch` | Counter | `symbol` | Advancing CumQty-derived delta differed from LastQty; authoritative cumulative delta was booked |
 | `bot.orders.rejected` | Counter | `symbol` | Venue quote rejects |
 | `bot.orders.cancelled` | Counter | none | Terminal cancel acknowledgements |
-| `bot.orders.stale_cancelled` | Counter | `symbol` | Stale-order guard cancel requests |
-| `bot.orders.stale_cancel_rejected` | Counter | `symbol` | Stale cancel rejects |
-| `bot.orders.stale_cancel_submit_failed` | Counter | `symbol` | Stale cancel transmission failures |
+| `bot.orders.ttl_refresh` | Counter | `symbol` | Expected `MaxOrderAge` lease-refresh cancel requests accepted for transmission; a steady non-zero rate is normal |
+| `bot.orders.ttl_refresh_cancel_rejected` | Counter | `symbol` | TTL refresh cancel rejects; possible missed terminal event requiring guarded recovery |
+| `bot.orders.ttl_refresh_cancel_submit_failed` | Counter | `symbol` | TTL refresh cancel transmission failures |
+| `bot.orders.quote_restore_rejected` | Counter | `symbol`, `reason` | Replacement quote was asynchronously rejected after an acknowledged cancel; subset of `bot.orders.rejected` identifying a side-restoration failure |
 | `bot.orders.safety_cap_hit` | Counter | `symbol` | `MaxOpenOrders` prevented a new quote |
 | `bot.orders.book_driven_requote` | Counter | `symbol`, `side` | Price-drift cancel/requote requests |
 | `bot.orders.book_driven_requote_submit_failed` | Counter | `symbol` | Book-driven cancel transmission failures |
@@ -86,6 +87,21 @@ metadata, never accumulated position or P&L.
 | `bot.orders.feed_unavailable_cancel_submit_failed` | Counter | `symbol` | Feed-loss cancel transmission failures |
 | `bot.orders.feed_unavailable_cancel_retry` | Counter | `symbol` | Guarded feed-loss cancel retries |
 | `bot.orders.cancel_ack_expired` | Counter | `symbol`, `reason` | Pending cancel exceeded `MarketMaker:CancelAckTimeout`; marker expired and guarded retry was enabled |
+
+TTL refresh preserves the RFC #703 order-age safety contract: every tracked
+order is cancelled after `MaxOrderAge` and replaced only after an authoritative
+cancel acknowledgement. On the healthy path, one quote side can therefore be
+briefly absent between the venue cancel and the replacement submit. That
+transient interval is bounded by the normal cancel/ACK/requote round trip and is
+not a missed-fill signal. Alert on refresh cancel rejection or synchronous
+failure, `bot.orders.cancel_ack_expired{reason="ttl_refresh"}`, and quote-submit
+failure or `bot.orders.quote_restore_rejected` instead; those signals mean the
+healthy bound was not met or the side could not be restored. The generic
+`bot.orders.rejected` counter still includes restoration rejects; the specific
+counter adds the bounded cancel trigger without emitting a second warning.
+The trigger is staged on the vacant `(symbol, side)` at cancel ACK and consumed
+atomically by whichever submit wins next, so a concurrent reconcile replacement
+retains the same restoration telemetry.
 
 Configured-symbol counters publish bounded zero baselines when the metric
 publisher starts. Position, average-entry, and realized-P&L gauges likewise

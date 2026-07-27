@@ -1595,9 +1595,10 @@ metric_names=(
     bot_pnl_fill_delta_mismatch_total
     bot_orders_rejected_total
     bot_orders_cancelled_total
-    bot_orders_stale_cancelled_total
-    bot_orders_stale_cancel_rejected_total
-    bot_orders_stale_cancel_submit_failed_total
+    bot_orders_ttl_refresh_total
+    bot_orders_ttl_refresh_cancel_rejected_total
+    bot_orders_ttl_refresh_cancel_submit_failed_total
+    bot_orders_quote_restore_rejected_total
     bot_orders_safety_cap_hit_total
     bot_orders_book_driven_requote_total
     bot_orders_book_driven_requote_submit_failed_total
@@ -1630,16 +1631,6 @@ metric_value() {
         return 1
     fi
     printf '%s\n' "$value" || return 1
-}
-
-sum_metric_values() {
-    local total=0 value name
-    for name in "$@"; do
-        value="$(metric_value "sum(${name})")" || return 1
-        total="$(awk -v total="$total" -v value="$value" 'BEGIN { print total + value }')" ||
-            return 1
-    done
-    printf '%s\n' "$total" || return 1
 }
 
 readonly bot_container_id="$(jq -er '.[] | select(.service == "market-maker-bot") | .containerId' \
@@ -1735,8 +1726,10 @@ mandatory_metric_requirements() {
         symbol("bot_pnl_fills_inconsistent_total"),
         symbol("bot_pnl_fill_delta_mismatch_total"),
         symbol("bot_orders_rejected_total"),
-        symbol("bot_orders_stale_cancel_rejected_total"),
-        symbol("bot_orders_stale_cancel_submit_failed_total"),
+        symbol("bot_orders_ttl_refresh_total"),
+        symbol("bot_orders_ttl_refresh_cancel_rejected_total"),
+        symbol("bot_orders_ttl_refresh_cancel_submit_failed_total"),
+        symbol("bot_orders_quote_restore_rejected_total"),
         symbol("bot_orders_safety_cap_hit_total"),
         symbol("bot_orders_book_driven_requote_submit_failed_total"),
         symbol("bot_orders_book_driven_requote_cancel_rejected_total"),
@@ -2486,7 +2479,7 @@ for configured_symbol in "${configured_symbols[@]}"; do
         final_quotes_exact=false
     fi
 done
-corruption_total="$(sum_metric_values \
+corruption_total="$(soak_sum_metric_values \
     bot_pnl_fills_unknown_order_total \
     bot_pnl_fills_duplicate_total \
     bot_pnl_fills_invalid_total \
@@ -2495,15 +2488,7 @@ corruption_total="$(sum_metric_values \
 safety_total="$(metric_value 'sum(bot_orders_safety_cap_hit_total{service_name="b3-market-maker-bot"})')"
 fill_received="$(metric_value 'sum(bot_fills_received_total{service_name="b3-market-maker-bot"})')"
 fills_applied="$(metric_value 'sum(bot_pnl_fills_applied_total{service_name="b3-market-maker-bot"})')"
-operational_errors="$(sum_metric_values \
-    bot_orders_submit_failed_total \
-    bot_orders_rejected_total \
-    bot_orders_stale_cancel_rejected_total \
-    bot_orders_stale_cancel_submit_failed_total \
-    bot_orders_book_driven_requote_submit_failed_total \
-    bot_orders_book_driven_requote_cancel_rejected_total \
-    bot_orders_feed_unavailable_cancel_rejected_total \
-    bot_orders_feed_unavailable_cancel_submit_failed_total)"
+operational_errors="$(soak_operational_error_total)"
 continuity="$(jq -s --arg symbol "$symbol" '
     [.[] | select(.phase == "duration" and .metric == "bot_orders_open" and .labels.symbol == $symbol)] as $rows |
     if ($rows | length) == 0 then 0
@@ -2692,7 +2677,7 @@ record_check "own-fills-accounted" \
     "received=applied>0" "received=$fill_received applied=$fills_applied"
 record_check "operational-error-counters" \
     "$(numeric_test "$operational_errors == 0" && echo true || echo false)" \
-    "0 submit/reject/cancel error events" "$operational_errors"
+    "0 submit/reject/cancel/ACK-timeout error events" "$operational_errors"
 record_check "credential-child-environments" true \
     "exported password names/values absent from child environments; curl checks every request and docker events is checked before launch" \
     "artifact=credential-environment.json"

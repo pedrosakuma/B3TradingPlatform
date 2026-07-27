@@ -121,6 +121,56 @@ public class OrderTrackerTests
     }
 
     [Fact]
+    public void TryTakeRestoreReason_ConsumesContextOnce()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(
+            1UL,
+            "PETR4",
+            30m,
+            100,
+            isBuy: true,
+            restoreReason: CancelReason.TtlRefresh));
+
+        Assert.True(t.TryTakeRestoreReason(1UL, out var reason));
+        Assert.Equal(CancelReason.TtlRefresh, reason);
+        Assert.False(t.TryTakeRestoreReason(1UL, out _));
+    }
+
+    [Fact]
+    public void OnAccepted_ClearsRestoreContext()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(
+            1UL,
+            "PETR4",
+            30m,
+            100,
+            isBuy: true,
+            restoreReason: CancelReason.TtlRefresh));
+
+        t.OnAccepted(1UL, leaves: null);
+
+        Assert.False(t.TryTakeRestoreReason(1UL, out _));
+    }
+
+    [Fact]
+    public void PendingRestoreReason_AttachesToWinningSubmit_ThenDoesNotLeak()
+    {
+        var t = new OrderTracker();
+        Assert.True(t.TryRegisterSubmit(1UL, "PETR4", 30m, 100, isBuy: true));
+        t.OnCancelledForRestore(1UL, CancelReason.TtlRefresh);
+
+        Assert.True(t.TryRegisterSubmit(2UL, "PETR4", 30m, 100, isBuy: true));
+        Assert.True(t.TryTakeRestoreReason(2UL, out var reason));
+        Assert.Equal(CancelReason.TtlRefresh, reason);
+        t.OnTerminal(2UL);
+
+        Assert.True(t.TryRegisterSubmit(3UL, "PETR4", 30m, 100, isBuy: true));
+        Assert.False(t.TryTakeRestoreReason(3UL, out _));
+    }
+
+    [Fact]
     public void TryGet_UnknownClOrdId_ReturnsFalse()
     {
         var t = new OrderTracker();
@@ -418,14 +468,14 @@ public class OrderTrackerTests
         Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 90UL, origClOrdId: 1UL));
         // Book-driven reactive cancels are explicitly tagged PriceDrift — this
         // is how MarketMakerWorker.HandleEventAsync's OrderRejected case
-        // tells a stale-order cancel reject apart from a book-driven
+        // tells a TTL-refresh cancel reject apart from a book-driven
         // requote cancel reject once both share the same submit path.
         Assert.True(t.TryRegisterCancelAttempt(cancelClOrdId: 91UL, origClOrdId: 2UL,
             minIntervalSinceLastAttempt: null, reason: CancelReason.PriceDrift));
 
         Assert.True(t.TryResolveCancelAttempt(90UL, out var origA, out var reasonA));
         Assert.Equal(1UL, origA);
-        Assert.Equal(CancelReason.StaleOrder, reasonA);
+        Assert.Equal(CancelReason.TtlRefresh, reasonA);
 
         Assert.True(t.TryResolveCancelAttempt(91UL, out var origB, out var reasonB));
         Assert.Equal(2UL, origB);

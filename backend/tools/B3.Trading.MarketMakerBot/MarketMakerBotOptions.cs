@@ -50,14 +50,14 @@ public sealed class MarketMakerBotOptions
     public TimeSpan ReconcileInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// RFC #703 miss-fill / staleness guard: the SDK exposes no mass
+    /// RFC #703 order lease: the SDK exposes no mass
     /// order-status query, so there is no way to ask the venue "what do I
     /// actually have open right now" — this is a purely time-based
     /// heuristic instead. Any resting order older than this is cancelled
     /// (and, via the normal <c>OrderCancelled</c> event path, immediately
-    /// re-quoted) by <see cref="ReconcileLoopAsync"/> on every tick, so a
-    /// resting order the bot's own event stream silently dropped (a
-    /// "miss-fill") can't linger on the book indefinitely.
+    /// re-quoted) by <see cref="ReconcileLoopAsync"/> on every tick. This
+    /// expected TTL renewal also bounds how long an order whose terminal
+    /// event was silently dropped can linger on the book.
     /// </summary>
     public TimeSpan MaxOrderAge { get; set; } = TimeSpan.FromMinutes(5);
 
