@@ -39,6 +39,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
+            (_, _) => Task.FromResult(true),
             (_, _) => Task.CompletedTask,
             cleanup =>
             {
@@ -83,6 +84,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
+            (_, _) => Task.FromResult(true),
             (_, _) => Task.CompletedTask,
             cleanup =>
             {
@@ -126,6 +128,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
+            (_, _) => Task.FromResult(true),
             (venueOrderId, _) =>
             {
                 provedAbsent.Add(venueOrderId!.Value);
@@ -162,6 +165,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
+            (_, _) => Task.FromResult(true),
             (_, _) => Task.CompletedTask,
             _ =>
             {
@@ -200,6 +204,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
+            (_, _) => Task.FromResult(true),
             (_, _) => Task.CompletedTask,
             cleanup =>
             {
@@ -213,6 +218,48 @@ public sealed class SessionRollOrderCleanupTests
 
         Assert.Equal(1, detailReads);
         Assert.Equal("Cancelled", states[155].Status);
+    }
+
+    [Fact]
+    public async Task Cleanup_ResolvesActiveCancelVenueAbsent_BeforeTargetedRetry()
+    {
+        var states = new Dictionary<ulong, OrderState>();
+        var resolved = new List<string>();
+        using var http = CreateHttp((request, clOrdId) =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return GetResponse(request, states);
+            if (request.RequestUri!.AbsolutePath.EndsWith("/evidence", StringComparison.Ordinal))
+                return Response(HttpStatusCode.OK);
+            if (request.RequestUri.AbsolutePath.EndsWith("/resolve", StringComparison.Ordinal))
+            {
+                resolved.Add(request.RequestUri.AbsolutePath);
+                states[180] = states[180] with { ActiveCancelRequiresReconciliation = false };
+                return Response(HttpStatusCode.OK);
+            }
+
+            states[clOrdId] = states[clOrdId] with { Status = "Cancelled" };
+            return Response(HttpStatusCode.NoContent);
+        });
+
+        await SessionRollSpecSupport.RunWithOrderCleanupAsync(
+            http,
+            UserAuth,
+            AdminAuth,
+            (_, _) => Task.FromResult(true),
+            (_, _) => Task.CompletedTask,
+            cleanup =>
+            {
+                states[180] = new(
+                    "Working",
+                    IsStale: false,
+                    ActiveCancelRequiresReconciliation: true);
+                cleanup.TrackOrder(180, "PETR4", "Buy", 30m, 100);
+                return Task.CompletedTask;
+            });
+
+        Assert.Single(resolved);
+        Assert.Equal("Cancelled", states[180].Status);
     }
 
     [Fact]
@@ -232,6 +279,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
+            (_, _) => Task.FromResult(true),
             (_, _) => Task.CompletedTask,
             _ =>
             {
@@ -260,6 +308,7 @@ public sealed class SessionRollOrderCleanupTests
                 http,
                 UserAuth,
                 AdminAuth,
+            (_, _) => Task.FromResult(true),
                 (_, _) => Task.CompletedTask,
                 _ =>
                 {
@@ -303,6 +352,7 @@ public sealed class SessionRollOrderCleanupTests
                 http,
                 UserAuth,
                 AdminAuth,
+            (_, _) => Task.FromResult(true),
                 (_, _) => Task.CompletedTask,
                 cleanup =>
                 {
@@ -345,6 +395,7 @@ public sealed class SessionRollOrderCleanupTests
                 http,
                 UserAuth,
                 AdminAuth,
+            (_, _) => Task.FromResult(true),
                 (_, _) => Task.CompletedTask,
                 cleanup =>
                 {
@@ -420,24 +471,43 @@ public sealed class SessionRollOrderCleanupTests
             return Orders(states);
         if (request.RequestUri.AbsolutePath == "/api/admin/outbound-mutations/")
         {
+            var mutations = new List<object>();
+            foreach (var entry in states)
+            {
+                mutations.Add(new
+                {
+                    mutationId = entry.Key.ToString(),
+                    kind = "new",
+                    primaryClOrdId = entry.Key,
+                    originalClOrdId = (ulong?)null,
+                    state = entry.Value.AcknowledgementPending
+                        ? "transport_write_completed"
+                        : entry.Value.ReconciliationRequired
+                        ? "ambiguous"
+                        : entry.Value.VenueAbsent
+                        ? "operator_resolved"
+                        : "venue_acknowledged",
+                    requiresReconciliation = entry.Value.ReconciliationRequired,
+                });
+                if (entry.Value.ActiveCancelRequiresReconciliation)
+                {
+                    mutations.Add(new
+                    {
+                        mutationId = $"cancel-{entry.Key}",
+                        kind = "cancel",
+                        primaryClOrdId = entry.Key + 1000,
+                        originalClOrdId = (ulong?)entry.Key,
+                        state = "ambiguous",
+                        requiresReconciliation = true,
+                    });
+                }
+            }
+
             return Response(
                 HttpStatusCode.OK,
                 new
                 {
-                    mutations = states.Select(entry => new
-                    {
-                        mutationId = entry.Key.ToString(),
-                        kind = "new",
-                        primaryClOrdId = entry.Key,
-                        state = entry.Value.AcknowledgementPending
-                            ? "transport_write_completed"
-                            : entry.Value.ReconciliationRequired
-                            ? "ambiguous"
-                            : entry.Value.VenueAbsent
-                            ? "operator_resolved"
-                            : "venue_acknowledged",
-                        requiresReconciliation = entry.Value.ReconciliationRequired,
-                    }),
+                    mutations,
                 });
         }
 
@@ -499,5 +569,6 @@ public sealed class SessionRollOrderCleanupTests
         ulong? VenueOrderId = null,
         bool VenueAbsent = false,
         bool ReconciliationRequired = false,
-        bool AcknowledgementPending = false);
+        bool AcknowledgementPending = false,
+        bool ActiveCancelRequiresReconciliation = false);
 }

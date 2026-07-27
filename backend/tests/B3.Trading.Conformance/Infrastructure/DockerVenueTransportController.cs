@@ -112,10 +112,47 @@ internal sealed class DockerVenueTransportController
         TimeSpan timeout,
         CancellationToken ct = default)
     {
-        await EnsureDockerAvailableAsync(ct);
-
         var deadline = DateTimeOffset.UtcNow + timeout;
         string? lastSnapshot = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            lastSnapshot = await CaptureFreshMatchingSnapshotAsync(
+                deadline,
+                ct);
+            if (!SnapshotContainsTrackedOrder(
+                    lastSnapshot,
+                    venueOrderId,
+                    clOrdId))
+                return;
+        }
+
+        throw new InvalidOperationException(
+            $"Timed out after {timeout.TotalSeconds:F0}s proving venue order " +
+            $"{venueOrderId?.ToString() ?? $"ClOrdID {clOrdId}"} absent " +
+            $"lastSnapshot={lastSnapshot ?? "<none>"}.");
+    }
+
+    public async Task<bool> IsVenueOrderPresentAsync(
+        ulong? venueOrderId,
+        ulong clOrdId,
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        var snapshot = await CaptureFreshMatchingSnapshotAsync(
+            DateTimeOffset.UtcNow + timeout,
+            ct);
+        return SnapshotContainsTrackedOrder(
+            snapshot,
+            venueOrderId,
+            clOrdId);
+    }
+
+    private async Task<string> CaptureFreshMatchingSnapshotAsync(
+        DateTimeOffset deadline,
+        CancellationToken ct)
+    {
+        await EnsureDockerAvailableAsync(ct);
+
         string? lastError = null;
         while (DateTimeOffset.UtcNow < deadline)
         {
@@ -136,56 +173,35 @@ internal sealed class DockerVenueTransportController
                 continue;
             }
 
-            DateTimeOffset? freshSnapshotWriteUtc = null;
             while (DateTimeOffset.UtcNow < deadline)
             {
-                freshSnapshotWriteUtc = await GetLatestMatchingSnapshotWriteUtcAsync(ct);
+                var freshSnapshotWriteUtc =
+                    await GetLatestMatchingSnapshotWriteUtcAsync(ct);
                 if (freshSnapshotWriteUtc is not null &&
                     (priorSnapshotWriteUtc is null ||
                      freshSnapshotWriteUtc > priorSnapshotWriteUtc))
                 {
+                    var snapshot = await RunDockerAsync(
+                        new[]
+                        {
+                            "exec", _matchingContainer,
+                            "wget", "-qO-",
+                            "http://localhost:8080/admin/channels/84/snapshot",
+                        },
+                        ct,
+                        allowNonZeroExit: true);
+                    if (snapshot.ExitCode == 0)
+                        return snapshot.StdOut;
+                    lastError = snapshot.StdErr;
                     break;
                 }
                 await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
             }
-
-            if (freshSnapshotWriteUtc is null ||
-                (priorSnapshotWriteUtc is not null &&
-                 freshSnapshotWriteUtc <= priorSnapshotWriteUtc))
-            {
-                lastError = "forced matching snapshot did not produce a newer persisted generation";
-                continue;
-            }
-
-            var snapshot = await RunDockerAsync(
-                new[]
-                {
-                    "exec", _matchingContainer,
-                    "wget", "-qO-",
-                    "http://localhost:8080/admin/channels/84/snapshot",
-                },
-                ct,
-                allowNonZeroExit: true);
-            if (snapshot.ExitCode != 0)
-            {
-                lastError = snapshot.StdErr;
-                continue;
-            }
-
-            lastSnapshot = snapshot.StdOut;
-            lastError = null;
-            if (!SnapshotContainsTrackedOrder(
-                    snapshot.StdOut,
-                    venueOrderId,
-                    clOrdId))
-                return;
         }
 
         throw new InvalidOperationException(
-            $"Timed out after {timeout.TotalSeconds:F0}s proving venue order " +
-            $"{venueOrderId?.ToString() ?? $"ClOrdID {clOrdId}"} absent " +
-            $"from matching channel 84. lastError={lastError ?? "<none>"} " +
-            $"lastSnapshot={lastSnapshot ?? "<none>"}.");
+            "Timed out capturing a fresh matching channel-84 snapshot. " +
+            $"lastError={lastError ?? "<none>"}.");
     }
 
     private async Task<DateTimeOffset?> GetLatestMatchingSnapshotWriteUtcAsync(

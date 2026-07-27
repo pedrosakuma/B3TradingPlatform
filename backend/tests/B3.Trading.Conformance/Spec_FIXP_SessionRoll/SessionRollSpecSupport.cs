@@ -20,6 +20,7 @@ internal static class SessionRollSpecSupport
         HttpClient http,
         AuthenticationHeaderValue userAuth,
         AuthenticationHeaderValue adminAuth,
+        Func<ulong?, ulong, Task<bool>> isVenueOrderPresent,
         Func<ulong?, ulong, Task> proveVenueOrderAbsent,
         Func<OrderCleanupScope, Task> scenario,
         Func<Task>? beforeOrderCleanup = null)
@@ -28,6 +29,7 @@ internal static class SessionRollSpecSupport
             http,
             userAuth,
             adminAuth,
+            isVenueOrderPresent,
             proveVenueOrderAbsent);
         await cleanup.CaptureBaselineAsync();
         Exception? scenarioFailure = null;
@@ -157,48 +159,20 @@ internal static class SessionRollSpecSupport
         await docker.WaitForMarketDataTradeDrainAsync(submitStartUtc, TradeTimeout);
     }
 
-    internal static async Task<ulong?> StimulateGatewayWriteAsync(
-        OrderCleanupScope cleanup,
+    internal static async Task StimulateGatewayWriteAsync(
         HttpClient http,
         AuthenticationHeaderValue auth,
-        string symbol,
-        decimal price,
-        string side = "Buy")
+        ulong clOrdId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
-        {
-            Headers = { Authorization = auth },
-            Content = JsonContent.Create(new
-            {
-                symbol,
-                side,
-                type = "Limit",
-                quantity = RoundTripQuantity,
-                price,
-                timeInForce = "IOC",
-            }),
-        };
+        using var req = new HttpRequestMessage(
+            HttpMethod.Delete,
+            $"/api/orders/{clOrdId}");
+        req.Headers.Authorization = auth;
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         try
         {
             using var response = await http.SendAsync(req, cts.Token);
-            if (response.StatusCode != HttpStatusCode.Accepted)
-                return null;
-
-            var body = await response.Content.ReadFromJsonAsync<JsonElement>(
-                cancellationToken: cts.Token);
-            if (body.TryGetProperty("clOrdId", out var clOrdIdProperty) &&
-                ulong.TryParse(clOrdIdProperty.GetString(), out var clOrdId))
-            {
-                cleanup.TrackOrder(
-                    clOrdId,
-                    symbol,
-                    side,
-                    price,
-                    RoundTripQuantity);
-                return clOrdId;
-            }
         }
         catch (OperationCanceledException)
         {
@@ -209,8 +183,6 @@ internal static class SessionRollSpecSupport
         catch (HttpRequestException)
         {
         }
-
-        return null;
     }
 
     internal static async Task<OrderSnapshot> WaitForOrderAsync(
@@ -406,6 +378,7 @@ internal static class SessionRollSpecSupport
         HttpClient http,
         AuthenticationHeaderValue userAuth,
         AuthenticationHeaderValue adminAuth,
+        Func<ulong?, ulong, Task<bool>> isVenueOrderPresent,
         Func<ulong?, ulong, Task> proveVenueOrderAbsent)
     {
         private readonly Dictionary<ulong, TrackedOrder> _orders = [];
@@ -521,6 +494,22 @@ internal static class SessionRollSpecSupport
                     await MarkVenueAbsentAsync(order.ClOrdId, before);
                     return;
                 }
+                if (proof.ActiveCancelMutationId is { } activeCancelMutationId)
+                {
+                    if (!await isVenueOrderPresent(
+                            proof.VenueOrderId,
+                            order.ClOrdId))
+                    {
+                        throw new InvalidOperationException(
+                            $"Tracked order {order.ClOrdId} is already absent from matching, " +
+                            $"but active cancel mutation {activeCancelMutationId} cannot be " +
+                            "truthfully resolved VenueAbsent.");
+                    }
+
+                    await ResolveCancelMutationVenueAbsentAsync(
+                        activeCancelMutationId);
+                    continue;
+                }
                 if (proof.VenueOrderId is not { } venueOrderId)
                 {
                     if (proof.AwaitingVenueAcknowledgement)
@@ -625,9 +614,22 @@ internal static class SessionRollSpecSupport
             string? mutationId = null;
             string? mutationState = null;
             var requiresReconciliation = false;
+            string? activeCancelMutationId = null;
             foreach (var mutation in mutations.EnumerateArray())
             {
                 var kind = mutation.GetProperty("kind").GetString();
+                if (kind == "cancel" &&
+                    mutation.TryGetProperty("originalClOrdId", out var original) &&
+                    original.ValueKind is not JsonValueKind.Null &&
+                    TryReadUInt64(original, out var originalClOrdId) &&
+                    originalClOrdId == clOrdId &&
+                    mutation.TryGetProperty("requiresReconciliation", out var cancelRequires) &&
+                    cancelRequires.ValueKind == JsonValueKind.True)
+                {
+                    activeCancelMutationId =
+                        mutation.GetProperty("mutationId").GetString();
+                    continue;
+                }
                 if (kind is not ("new" or "replace") ||
                     !TryReadUInt64(mutation.GetProperty("primaryClOrdId"), out var primaryClOrdId) ||
                     primaryClOrdId != clOrdId)
@@ -640,7 +642,6 @@ internal static class SessionRollSpecSupport
                 requiresReconciliation =
                     mutation.TryGetProperty("requiresReconciliation", out var requires) &&
                     requires.ValueKind == JsonValueKind.True;
-                break;
             }
 
             if (string.IsNullOrWhiteSpace(mutationId))
@@ -663,7 +664,10 @@ internal static class SessionRollSpecSupport
                 resolution.TryGetProperty("venueOrderId", out var venueOrderId) &&
                 TryReadUInt64(venueOrderId, out var parsedVenueOrderId))
             {
-                return new VenueOrderProof(parsedVenueOrderId, VenueAbsent: false);
+                return new VenueOrderProof(
+                    parsedVenueOrderId,
+                    VenueAbsent: false,
+                    ActiveCancelMutationId: activeCancelMutationId);
             }
 
             if (root.TryGetProperty("operatorEvidence", out var operatorEvidence) &&
@@ -677,7 +681,8 @@ internal static class SessionRollSpecSupport
                 return new VenueOrderProof(
                     null,
                     VenueAbsent: true,
-                    AwaitingVenueAcknowledgement: false);
+                    AwaitingVenueAcknowledgement: false,
+                    ActiveCancelMutationId: activeCancelMutationId);
             }
 
             if (mutationState == "proven_unsent")
@@ -685,7 +690,8 @@ internal static class SessionRollSpecSupport
                 return new VenueOrderProof(
                     null,
                     VenueAbsent: true,
-                    AwaitingVenueAcknowledgement: false);
+                    AwaitingVenueAcknowledgement: false,
+                    ActiveCancelMutationId: activeCancelMutationId);
             }
 
             return new VenueOrderProof(
@@ -697,7 +703,58 @@ internal static class SessionRollSpecSupport
                         "approved_to_send" or
                         "attempt_intent_prepared" or
                         "frame_prepared" or
-                        "transport_write_completed");
+                        "transport_write_completed",
+                ActiveCancelMutationId: activeCancelMutationId);
+        }
+
+        private async Task ResolveCancelMutationVenueAbsentAsync(
+            string mutationId)
+        {
+            var digest = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes(
+                            $"cleanup-cancel-resolution:{mutationId}")))
+                .ToLowerInvariant();
+            var evidenceReference = $"official-extract:{digest}";
+            var now = DateTimeOffset.UtcNow;
+            using var evidenceRequest = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"/api/admin/outbound-mutations/{mutationId}/evidence")
+            {
+                Content = JsonContent.Create(new
+                {
+                    sourceType = "official_extract",
+                    evidenceReference,
+                    coverageStartUtc = now.AddHours(-1),
+                    coverageEndUtc = now.AddHours(1),
+                    attestationReference = $"attestation:{digest}",
+                }),
+            };
+            evidenceRequest.Headers.Authorization = adminAuth;
+            using var evidenceResponse = await http.SendAsync(evidenceRequest);
+            evidenceResponse.EnsureSuccessStatusCode();
+
+            using var resolutionRequest = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"/api/admin/outbound-mutations/{mutationId}/resolve")
+            {
+                Content = JsonContent.Create(new
+                {
+                    decision = "venue_absent",
+                    evidenceType = "official_extract",
+                    evidenceReference,
+                    reason = "official_extract_attested",
+                }),
+            };
+            resolutionRequest.Headers.Authorization = adminAuth;
+            using var resolutionResponse = await http.SendAsync(resolutionRequest);
+            var body = await resolutionResponse.Content.ReadAsStringAsync();
+            if (resolutionResponse.StatusCode != HttpStatusCode.OK)
+            {
+                throw new InvalidOperationException(
+                    $"Cancel mutation {mutationId} VenueAbsent resolution expected 200, got " +
+                    $"{(int)resolutionResponse.StatusCode}: {body}");
+            }
         }
 
         private async Task ClearStaleAsync(ulong clOrdId)
@@ -805,6 +862,7 @@ internal static class SessionRollSpecSupport
     private sealed record VenueOrderProof(
         ulong? VenueOrderId,
         bool VenueAbsent,
-        bool AwaitingVenueAcknowledgement = false);
+        bool AwaitingVenueAcknowledgement = false,
+        string? ActiveCancelMutationId = null);
 
 }

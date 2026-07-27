@@ -27,6 +27,10 @@ public class SuspendedTimeoutBoundarySpecTests
             http,
             userAuth,
             adminAuth,
+            (venueOrderId, clOrdId) => docker.IsVenueOrderPresentAsync(
+                venueOrderId,
+                clOrdId,
+                SessionRollSpecSupport.TradeTimeout),
             (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
                 venueOrderId,
                 clOrdId,
@@ -35,17 +39,25 @@ public class SuspendedTimeoutBoundarySpecTests
             {
                 var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
                 var clOrdId = await cleanup.SubmitOrderAsync("PETR4", restingPrice);
+                var probeClOrdId = await cleanup.SubmitOrderAsync(
+                    "VALE3",
+                    probePrice,
+                    side: "Sell");
                 await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
                         order.Status == "Working" && !order.IsStale,
                     SessionRollSpecSupport.OrderTimeout,
                     "order to reach Working before transport interruption");
+                await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, probeClOrdId, order =>
+                        order.Status == "Working" && !order.IsStale,
+                    SessionRollSpecSupport.OrderTimeout,
+                    "probe order to reach Working before transport interruption");
 
                 var disconnectStartedUtc = DateTimeOffset.UtcNow;
                 await using (var detached = await docker.DisconnectMatchingAsync())
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(250));
-                    _ = await SessionRollSpecSupport.StimulateGatewayWriteAsync(
-                        cleanup, http, userAuth, "VALE3", probePrice);
+                    await SessionRollSpecSupport.StimulateGatewayWriteAsync(
+                        http, userAuth, probeClOrdId);
                     await SessionRollSpecSupport.DelayUntilAsync(disconnectStartedUtc, WithinWindowDisconnect);
                     await detached.ReconnectAsync();
                 }
@@ -93,6 +105,10 @@ public class SuspendedTimeoutBoundarySpecTests
             http,
             userAuth,
             adminAuth,
+            (venueOrderId, clOrdId) => docker.IsVenueOrderPresentAsync(
+                venueOrderId,
+                clOrdId,
+                SessionRollSpecSupport.TradeTimeout),
             (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
                 venueOrderId,
                 clOrdId,
@@ -101,17 +117,22 @@ public class SuspendedTimeoutBoundarySpecTests
             {
                 var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
                 var clOrdId = await cleanup.SubmitOrderAsync("VALE3", restingPrice);
+                var probeClOrdId = await cleanup.SubmitOrderAsync("PETR4", probePrice);
                 await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
                         order.Status == "Working" && !order.IsStale,
                     SessionRollSpecSupport.OrderTimeout,
                     "order to reach Working before transport interruption");
+                await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, probeClOrdId, order =>
+                        order.Status == "Working" && !order.IsStale,
+                    SessionRollSpecSupport.OrderTimeout,
+                    "probe order to reach Working before transport interruption");
 
                 var disconnectStartedUtc = DateTimeOffset.UtcNow;
                 await using (var detached = await docker.DisconnectMatchingAsync())
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(250));
-                    _ = await SessionRollSpecSupport.StimulateGatewayWriteAsync(
-                        cleanup, http, userAuth, "PETR4", probePrice);
+                    await SessionRollSpecSupport.StimulateGatewayWriteAsync(
+                        http, userAuth, probeClOrdId);
                     await SessionRollSpecSupport.DelayUntilAsync(disconnectStartedUtc, PastWindowDisconnect);
                     await detached.ReconnectAsync();
                 }

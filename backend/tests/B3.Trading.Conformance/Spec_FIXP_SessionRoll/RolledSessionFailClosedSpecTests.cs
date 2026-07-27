@@ -48,6 +48,10 @@ public sealed class RolledSessionFailClosedSpecTests
             http,
             user,
             maker,
+            (venueOrderId, clOrdId) => docker.IsVenueOrderPresentAsync(
+                venueOrderId,
+                clOrdId,
+                SessionRollSpecSupport.TradeTimeout),
             (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
                 venueOrderId,
                 clOrdId,
