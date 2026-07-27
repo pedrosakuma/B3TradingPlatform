@@ -275,8 +275,14 @@ public class ThrottleChecksTests
     }
 
     [Fact]
-    public async Task ThrottleLedgerSweeper_SweepsExpiredAlgoBuckets()
+    public void ThrottleLedgerSweeper_SweepsExpiredAlgoBuckets()
     {
+        // Deterministic clock shared by both accountants and the
+        // sweeper: advance past the window and invoke a single sweep
+        // pass directly (bypassing the hosted-service PeriodicTimer),
+        // so the assertion never races real wall-clock scheduling
+        // under parallel test execution (see #616).
+        var clock = new TestClock(DateTimeOffset.UtcNow);
         var opts = new RiskOptions
         {
             RollingNotional = new RollingNotionalOptions { WindowSeconds = 1 },
@@ -284,8 +290,8 @@ public class ThrottleChecksTests
         };
         var monitor = Wrap(opts);
         var refPx = new StubRef(("PETR4", 30m));
-        var notional = new RollingNotionalAccountant(monitor, refPx, TimeProvider.System);
-        var rate = new OrderRateAccountant(monitor, TimeProvider.System);
+        var notional = new RollingNotionalAccountant(monitor, refPx, clock);
+        var rate = new OrderRateAccountant(monitor, clock);
         var ctx = AlgoCtx("default", parentAlgoId: 7777UL, qty: 100, price: 30m);
 
         notional.RecordAccepted(ctx);
@@ -293,27 +299,16 @@ public class ThrottleChecksTests
         Assert.Equal(1, notional.AlgoLedger.ActiveBucketCount);
         Assert.Equal(1, rate.AlgoLedger.ActiveBucketCount);
 
-        await Task.Delay(TimeSpan.FromMilliseconds(1100));
+        clock.Advance(TimeSpan.FromSeconds(2));
 
         var sweeper = new ThrottleLedgerSweeper(
             notional,
             rate,
             monitor,
             NullLogger<ThrottleLedgerSweeper>.Instance,
-            TimeProvider.System)
-        {
-            SweepInterval = TimeSpan.FromMilliseconds(25),
-        };
+            clock);
 
-        await sweeper.StartAsync(CancellationToken.None);
-        try
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(150));
-        }
-        finally
-        {
-            await sweeper.StopAsync(CancellationToken.None);
-        }
+        sweeper.SweepOnce();
 
         Assert.Equal(0, notional.AlgoLedger.ActiveBucketCount);
         Assert.Equal(0, rate.AlgoLedger.ActiveBucketCount);
