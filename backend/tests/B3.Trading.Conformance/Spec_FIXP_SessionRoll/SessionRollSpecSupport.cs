@@ -157,18 +157,47 @@ internal static class SessionRollSpecSupport
         await docker.WaitForMarketDataTradeDrainAsync(submitStartUtc, TradeTimeout);
     }
 
-    internal static async Task StimulateGatewayWriteAsync(
+    internal static async Task<ulong?> StimulateGatewayWriteAsync(
+        OrderCleanupScope cleanup,
         HttpClient http,
         AuthenticationHeaderValue auth,
-        ulong clOrdId)
+        string symbol,
+        decimal price,
+        string side = "Buy")
     {
-        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{clOrdId}");
-        req.Headers.Authorization = auth;
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
+        {
+            Headers = { Authorization = auth },
+            Content = JsonContent.Create(new
+            {
+                symbol,
+                side,
+                type = "Limit",
+                quantity = RoundTripQuantity,
+                price,
+            }),
+        };
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         try
         {
             using var response = await http.SendAsync(req, cts.Token);
+            if (response.StatusCode != HttpStatusCode.Accepted)
+                return null;
+
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>(
+                cancellationToken: cts.Token);
+            if (body.TryGetProperty("clOrdId", out var clOrdIdProperty) &&
+                ulong.TryParse(clOrdIdProperty.GetString(), out var clOrdId))
+            {
+                cleanup.TrackOrder(
+                    clOrdId,
+                    symbol,
+                    side,
+                    price,
+                    RoundTripQuantity);
+                return clOrdId;
+            }
         }
         catch (OperationCanceledException)
         {
@@ -179,6 +208,8 @@ internal static class SessionRollSpecSupport
         catch (HttpRequestException)
         {
         }
+
+        return null;
     }
 
     internal static async Task<OrderSnapshot> WaitForOrderAsync(

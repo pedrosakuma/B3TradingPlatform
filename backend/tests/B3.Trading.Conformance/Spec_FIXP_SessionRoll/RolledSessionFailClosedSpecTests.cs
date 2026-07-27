@@ -113,10 +113,11 @@ public sealed class RolledSessionFailClosedSpecTests
                     mutation => Assert.Contains(
                         blocking,
                         candidate => candidate.MutationId == mutation.MutationId));
-                foreach (var mutation in blocking)
-                    await ResolveVenueAbsentAsync(http, maker, checker, mutation.MutationId);
-
-                await WaitForReadyAsync(http);
+                await ResolveScenarioMutationsUntilReadyAsync(
+                    http,
+                    maker,
+                    checker,
+                    baseline);
                 using var reopened = await SubmitOrderAsync(
                     http,
                     user,
@@ -126,14 +127,11 @@ public sealed class RolledSessionFailClosedSpecTests
             },
             beforeOrderCleanup: async () =>
             {
-                var unresolvedScenarioMutations = (await GetMutationsAsync(http, maker))
-                    .Where(mutation =>
-                        !baseline.Contains(mutation.MutationId)
-                        && mutation.RequiresReconciliation)
-                    .ToArray();
-                foreach (var mutation in unresolvedScenarioMutations)
-                    await ResolveVenueAbsentAsync(http, maker, checker, mutation.MutationId);
-                await WaitForReadyAsync(http);
+                await ResolveScenarioMutationsUntilReadyAsync(
+                    http,
+                    maker,
+                    checker,
+                    baseline);
             });
     }
 
@@ -317,20 +315,41 @@ public sealed class RolledSessionFailClosedSpecTests
         approvalResponse.EnsureSuccessStatusCode();
     }
 
-    private static async Task WaitForReadyAsync(HttpClient http)
+    private static async Task ResolveScenarioMutationsUntilReadyAsync(
+        HttpClient http,
+        AuthenticationHeaderValue maker,
+        AuthenticationHeaderValue checker,
+        IReadOnlySet<string> baseline)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
         HttpStatusCode? last = null;
+        IReadOnlyList<MutationSummary> remaining = [];
         while (DateTimeOffset.UtcNow < deadline)
         {
+            remaining = (await GetMutationsAsync(http, maker))
+                .Where(mutation =>
+                    !baseline.Contains(mutation.MutationId) &&
+                    mutation.RequiresReconciliation)
+                .ToArray();
+            foreach (var mutation in remaining)
+            {
+                await ResolveVenueAbsentAsync(
+                    http,
+                    maker,
+                    checker,
+                    mutation.MutationId);
+            }
+
             using var response = await http.GetAsync("/ready");
             last = response.StatusCode;
-            if (last == HttpStatusCode.OK)
+            if (last == HttpStatusCode.OK && remaining.Count == 0)
                 return;
             await Task.Delay(SessionRollSpecSupport.PollInterval);
         }
 
-        Assert.Fail($"Readiness did not reopen after authoritative resolution; last status={(int?)last}.");
+        Assert.Fail(
+            $"Readiness did not reopen after authoritative resolution; last status={(int?)last}; " +
+            $"remaining=[{string.Join(", ", remaining.Select(mutation => $"{mutation.MutationId}:{mutation.State}"))}].");
     }
 
     private sealed record MutationList(IReadOnlyList<MutationSummary> Mutations);

@@ -20,8 +20,6 @@ public class MatchingPlatformRestartSpecTests
             await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, "ITUB4"));
         var freshRoundTripPrice = SessionRollSpecSupport.PriceNearUpperCollar(
             await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, "PETR4"));
-        var probePrice = SessionRollSpecSupport.PriceNearUpperCollar(
-            await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, "VALE3"));
 
         await SessionRollSpecSupport.RunWithOrderCleanupAsync(
             http,
@@ -34,39 +32,26 @@ public class MatchingPlatformRestartSpecTests
             {
                 var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
                 var restingClOrdId = await cleanup.SubmitOrderAsync("ITUB4", survivorPrice);
-                var probeClOrdIds = new List<ulong>();
-                for (var index = 0; index < 4; index++)
-                {
-                    var probeClOrdId = await cleanup.SubmitOrderAsync(
-                        "VALE3",
-                        probePrice,
-                        side: "Sell");
-                    probeClOrdIds.Add(probeClOrdId);
-                }
-
                 await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, restingClOrdId, order =>
                         order.Status == "Working" && !order.IsStale,
                     SessionRollSpecSupport.OrderTimeout,
                     "pre-restart order to reach Working before the matching-platform restart");
-                foreach (var probeClOrdId in probeClOrdIds)
-                {
-                    await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, probeClOrdId, order =>
-                            order.Status == "Working" && !order.IsStale,
-                        SessionRollSpecSupport.OrderTimeout,
-                        "probe order to reach Working before the matching-platform restart");
-                }
 
                 await docker.RestartMatchingAsync(
                     MatchingRestartTimeout,
                     whileRestarting: async () =>
                     {
-                        foreach (var probeClOrdId in probeClOrdIds)
+                        var stimulationDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+                        while (DateTimeOffset.UtcNow < stimulationDeadline)
                         {
-                            await Task.Delay(TimeSpan.FromMilliseconds(250));
-                            await SessionRollSpecSupport.StimulateGatewayWriteAsync(
+                            _ = await SessionRollSpecSupport.StimulateGatewayWriteAsync(
+                                cleanup,
                                 http,
                                 userAuth,
-                                probeClOrdId);
+                                "VALE3",
+                                60.00m,
+                                side: "Sell");
+                            await Task.Delay(TimeSpan.FromMilliseconds(250));
                         }
                     });
 
