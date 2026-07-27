@@ -1,0 +1,59 @@
+name: Protocol research / blocker
+description: Track protocol discovery or blockers before downstream implementation is safe.
+title: "research: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when the upstream wire behavior is proposed, uncertain, blocked, or not yet merged.
+        This template is intentionally not an implementation request; promote or replace it only after merged upstream evidence and official schema details exist.
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question or blocker
+      description: What needs to be proven before B3TradingPlatform can implement anything?
+      placeholder: "Does B3MarketDataPlatform expose a dedicated official InstrumentStatus event for halt reasons?"
+    validations:
+      required: true
+  - type: textarea
+    id: discovery-links
+    attributes:
+      label: Discovery links
+      description: Link upstream issues, RFCs, drafts, vendor docs, or discussions. These are context, not implementation evidence.
+      placeholder: |
+        - B3MarketDataPlatform issue #...
+        - Official schema section ...
+    validations:
+      required: false
+  - type: textarea
+    id: missing-evidence
+    attributes:
+      label: Missing evidence
+      description: List the merged PR / commit, official schema version, template ID, fields, or enums still missing.
+      placeholder: "No merged upstream PR yet; template ID and enum values still unknown."
+    validations:
+      required: true
+  - type: textarea
+    id: participant-impact
+    attributes:
+      label: Participant-side impact
+      description: Explain the user or operational impact without prescribing nonexistent venue wire messages.
+    validations:
+      required: true
+  - type: textarea
+    id: exit-criteria
+    attributes:
+      label: Exit criteria for implementation
+      description: What evidence would allow a follow-up protocol implementation request?
+      placeholder: "Merged upstream PR + commit SHA, official schema version, template ID, and exact fields/enums."
+    validations:
+      required: true
+  - type: checkboxes
+    id: research-gate
+    attributes:
+      label: Research gate
+      options:
+        - label: I understand this issue alone is not evidence to implement downstream wire behavior.
+          required: true
+        - label: The request describes participant-side impact, not a venue message contract that has not been proven.
+          required: true

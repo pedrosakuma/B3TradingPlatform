@@ -1,0 +1,93 @@
+name: Protocol Evidence Gate
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-pr-body:
+    name: Validate PR protocol evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Validate protocol evidence gate
+        env:
+          PR_BODY_JSON: ${{ toJson(github.event.pull_request.body) }}
+        run: |
+          node <<'NODE'
+          const body = JSON.parse(process.env.PR_BODY_JSON || '""') || '';
+          const errors = [];
+
+          const checked = (label) => {
+            const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            return new RegExp(`^- \\[[xX]\\] ${escaped}\\s*$`, 'm').test(body);
+          };
+
+          const noProtocol = checked('No, this PR does not change cross-repo wire assumptions.');
+          const yesProtocol = checked('Yes, and merged upstream evidence plus official schema details are listed below.');
+
+          if (Number(noProtocol) + Number(yesProtocol) !== 1) {
+            errors.push('Check exactly one protocol evidence choice: No or Yes.');
+          }
+
+          const proposalEvidence = checked('Upstream issues, RFCs, or proposals are not the only evidence for implementation, or this PR has no cross-repo wire dependency.');
+          const participantBoundary = checked('Participant-side / product requirements do not prescribe venue messages, templates, fields, or enums that do not exist in the official schema and merged upstream implementation.');
+
+          if (!proposalEvidence) {
+            errors.push('Confirm that proposals/issues are not the only implementation evidence, or that this PR has no cross-repo wire dependency.');
+          }
+
+          if (!participantBoundary) {
+            errors.push('Confirm participant-side requirements do not invent venue wire contracts.');
+          }
+
+          const lines = body.split(/\r?\n/);
+          const valueAfter = (label) => {
+            const prefix = `- ${label}:`;
+            const line = lines.find((candidate) => candidate.startsWith(prefix));
+            if (!line) {
+              return '';
+            }
+
+            return line.slice(prefix.length).replace(/<!--.*?-->/g, '').trim();
+          };
+
+          const meaningful = (value) => value && !/^(n\/a|na|none|tbd|todo|-+)$/i.test(value);
+
+          if (yesProtocol) {
+            const upstream = valueAfter('Merged upstream PR(s) / commit(s)');
+            const officialSchema = valueAfter('Official schema version(s)');
+            const templateIds = valueAfter('Template ID(s)');
+            const fieldsEnums = valueAfter('Fields / enums');
+
+            for (const [label, value] of [
+              ['Merged upstream PR(s) / commit(s)', upstream],
+              ['Official schema version(s)', officialSchema],
+              ['Template ID(s)', templateIds],
+              ['Fields / enums', fieldsEnums],
+            ]) {
+              if (!meaningful(value)) {
+                errors.push(`Fill '${label}' on the same line when the protocol dependency answer is Yes.`);
+              }
+            }
+
+            if (meaningful(upstream) && !/(\/pull\/\d+|\bPR\s*#?\d+\b|\b[0-9a-f]{7,40}\b)/i.test(upstream)) {
+              errors.push('Merged upstream evidence must cite a PR or commit, not only an issue or proposal.');
+            }
+          }
+
+          if (errors.length) {
+            console.error('Protocol evidence gate failed:');
+            for (const error of errors) {
+              console.error(`- ${error}`);
+            }
+            process.exit(1);
+          }
+
+          console.log('Protocol evidence gate passed.');
+          NODE

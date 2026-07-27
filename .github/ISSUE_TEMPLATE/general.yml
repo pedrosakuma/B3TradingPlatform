@@ -1,0 +1,42 @@
+name: General issue
+description: Bugs, docs, product requirements, or features that do not need new cross-repo wire assumptions.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for normal B3TradingPlatform work. If the request depends on B3MatchingPlatform / B3MarketDataPlatform wire behavior, use the protocol implementation or protocol research / blocker template instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should change?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link issues, PRs, logs, screenshots, or user journeys that explain the request.
+    validations:
+      required: false
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What should users, operators, or systems observe when this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: How should reviewers verify the change?
+    validations:
+      required: false
+  - type: checkboxes
+    id: protocol-check
+    attributes:
+      label: Protocol check
+      options:
+        - label: This issue does not depend on new B3MatchingPlatform / B3MarketDataPlatform wire behavior, or I selected the dedicated protocol template instead.
+          required: true

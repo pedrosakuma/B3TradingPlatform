@@ -20,6 +20,12 @@ experience gets a user to place a safe first order and recognize it in Working
 Orders, while preserving immediate access for experts who already know what to
 do.
 
+Product requirements describe participant-side capabilities and outcomes. They
+must not invent venue messages, templates, statuses, fields, or enums; any
+requirement that depends on EntryPoint / UMDF wire behavior needs official
+schema evidence plus a merged upstream implementation, or stays in research /
+blocker status.
+
 ## Brand Personality
 
 Calm, precise, and professional. The product should communicate operational
