@@ -106,7 +106,9 @@ internal sealed class MarketMakerWorker : BackgroundService
             throw new MarketMakerReconciliationRequiredException(
                 $"Startup blocked by persisted reconciliation requirement: {requirement.Reason}");
         }
-        var recovered = await _sessionStateStore.ReplayAsync(stoppingToken);
+        var recovered = await ReplayAndValidateRecoveryStateAsync(
+            _sessionStateStore,
+            stoppingToken);
 
         var ep = EndpointParser.Parse(_options.Endpoint);
         var addrs = System.Net.Dns.GetHostAddresses(ep.Host);
@@ -196,6 +198,28 @@ internal sealed class MarketMakerWorker : BackgroundService
     internal Task RunConnectedSessionAsync(IEntryPointClient client, CancellationToken ct) =>
         ConnectAndRunSessionAsync(client, _ => Task.CompletedTask, ct);
 
+    internal async Task<UpState.SessionSnapshot?> ReplayAndValidateRecoveryStateAsync(
+        MarketMakerSessionStateStore stateStore,
+        CancellationToken ct = default)
+    {
+        var recovered = await stateStore.ReplayAsync(ct);
+        var belongsToSession = recovered is
+        {
+            SessionId: var sessionId,
+            SessionVerId: > 0,
+        } && sessionId == _options.SessionId;
+
+        if (belongsToSession && !_options.StartupCleanupEnabled)
+        {
+            throw new MarketMakerRecoveryCompatibilityException(
+                $"Recovered FIXP session {_options.SessionId} version {recovered!.SessionVerId} requires terminal startup cleanup, " +
+                "but MarketMaker:StartupCleanupEnabled is false. Upgrade matching-platform to a release containing " +
+                "B3MatchingPlatform#569 and enable startup cleanup, or reconcile and remove restored venue orders before clearing persisted state.");
+        }
+
+        return recovered;
+    }
+
     internal async Task ConnectAndRunSessionAsync(
         IEntryPointClient client,
         Func<CancellationToken, Task> connectAsync,
@@ -272,14 +296,6 @@ internal sealed class MarketMakerWorker : BackgroundService
             SessionVerId: > 0,
         } && sessionId == _options.SessionId;
         var resumed = belongsToSession && recovered!.SessionVerId == effectiveSessionVerId;
-
-        if (belongsToSession && !_options.StartupCleanupEnabled)
-        {
-            throw new MarketMakerRecoveryCompatibilityException(
-                $"Recovered FIXP session {_options.SessionId} version {recovered!.SessionVerId} requires terminal startup cleanup, " +
-                "but MarketMaker:StartupCleanupEnabled is false. Upgrade matching-platform to a release containing " +
-                "B3MatchingPlatform#569 and enable startup cleanup, or reconcile and remove restored venue orders before clearing persisted state.");
-        }
 
         _effectiveSessionVerId = effectiveSessionVerId;
         _inboundSequence.Reset(resumed ? recovered!.LastInboundSeqNum : 0);

@@ -279,31 +279,74 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task ConnectAndRunSessionAsync_RecoveredSessionWithCleanupDisabledFailsClosed()
+    public async Task ReplayAndValidateRecoveryStateAsync_RecoveredSessionWithCleanupDisabledFailsAtReplaySeam()
     {
-        var (worker, _, client, _) = CreateWorker();
-        var recovered = new SessionSnapshot
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "incompatible-recovery-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
         {
-            SessionId = 1,
-            SessionVerId = 5,
-            LastInboundSeqNum = 8,
-            OutstandingOrders = new Dictionary<string, ulong> { ["100"] = 1 },
-        };
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            await stateStore.SaveAsync(new SessionSnapshot
+            {
+                SessionId = 1,
+                SessionVerId = 5,
+                LastInboundSeqNum = 8,
+                OutstandingOrders = new Dictionary<string, ulong> { ["100"] = 1 },
+            });
+            var (worker, _, _, _) = CreateWorker(out _, sessionStateStore: stateStore);
 
-        var error = await Assert.ThrowsAsync<MarketMakerRecoveryCompatibilityException>(
-            () => worker.ConnectAndRunSessionAsync(
-                client,
-                _ =>
-                {
-                    worker.ConfigureRecoveryState(recovered, effectiveSessionVerId: 5);
-                    return Task.CompletedTask;
-                },
-                CancellationToken.None));
+            var error = await Assert.ThrowsAsync<MarketMakerRecoveryCompatibilityException>(
+                () => worker.ReplayAndValidateRecoveryStateAsync(stateStore));
 
-        Assert.Contains("StartupCleanupEnabled is false", error.Message, StringComparison.Ordinal);
-        Assert.Contains("B3MatchingPlatform#569", error.Message, StringComparison.Ordinal);
-        Assert.Empty(client.SubmittedMassActions);
-        Assert.Empty(client.SubmittedOrders);
+            Assert.Contains("StartupCleanupEnabled is false", error.Message, StringComparison.Ordinal);
+            Assert.Contains("B3MatchingPlatform#569", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReplayAndValidateRecoveryStateAsync_FreshOrCleanupEnabledStartupIsAllowed()
+    {
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "compatible-recovery-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            var (freshWorker, _, _, _) = CreateWorker(out _, sessionStateStore: stateStore);
+            Assert.Null(await freshWorker.ReplayAndValidateRecoveryStateAsync(stateStore));
+
+            var recovered = new SessionSnapshot
+            {
+                SessionId = 1,
+                SessionVerId = 5,
+                LastInboundSeqNum = 8,
+                OutstandingOrders = new Dictionary<string, ulong> { ["100"] = 1 },
+            };
+            await stateStore.SaveAsync(recovered);
+            var (recoveredWorker, _, _, _) = CreateWorker(
+                out _,
+                options => options.StartupCleanupEnabled = true,
+                stateStore);
+
+            var replayed = await recoveredWorker.ReplayAndValidateRecoveryStateAsync(stateStore);
+
+            Assert.NotNull(replayed);
+            Assert.Equal(recovered.SessionId, replayed!.SessionId);
+            Assert.Equal(recovered.SessionVerId, replayed.SessionVerId);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
