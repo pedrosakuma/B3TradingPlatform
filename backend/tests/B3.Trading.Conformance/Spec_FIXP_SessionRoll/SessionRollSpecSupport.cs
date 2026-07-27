@@ -20,7 +20,7 @@ internal static class SessionRollSpecSupport
         HttpClient http,
         AuthenticationHeaderValue userAuth,
         AuthenticationHeaderValue adminAuth,
-        Func<ulong, Task> proveVenueOrderAbsent,
+        Func<ulong?, ulong, Task> proveVenueOrderAbsent,
         Func<OrderCleanupScope, Task> scenario,
         Func<Task>? beforeOrderCleanup = null)
     {
@@ -175,6 +175,7 @@ internal static class SessionRollSpecSupport
                 type = "Limit",
                 quantity = RoundTripQuantity,
                 price,
+                timeInForce = "IOC",
             }),
         };
 
@@ -405,7 +406,7 @@ internal static class SessionRollSpecSupport
         HttpClient http,
         AuthenticationHeaderValue userAuth,
         AuthenticationHeaderValue adminAuth,
-        Func<ulong, Task> proveVenueOrderAbsent)
+        Func<ulong?, ulong, Task> proveVenueOrderAbsent)
     {
         private readonly Dictionary<ulong, TrackedOrder> _orders = [];
         private readonly HashSet<ulong> _baselineOrderIds = [];
@@ -504,6 +505,8 @@ internal static class SessionRollSpecSupport
         private async Task TerminalizeAsync(TrackedOrder order)
         {
             var deadline = DateTimeOffset.UtcNow + TradeTimeout;
+            var acknowledgementDeadline =
+                DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
             while (DateTimeOffset.UtcNow < deadline)
             {
                 var before = await TryGetOrderAsync(http, userAuth, order.ClOrdId)
@@ -522,6 +525,11 @@ internal static class SessionRollSpecSupport
                 {
                     if (proof.AwaitingVenueAcknowledgement)
                     {
+                        if (DateTimeOffset.UtcNow >= acknowledgementDeadline)
+                        {
+                            await proveVenueOrderAbsent(null, order.ClOrdId);
+                            return;
+                        }
                         await Task.Delay(PollInterval);
                         continue;
                     }
@@ -561,7 +569,7 @@ internal static class SessionRollSpecSupport
                         return;
                     }
 
-                    await proveVenueOrderAbsent(venueOrderId);
+                    await proveVenueOrderAbsent(venueOrderId, order.ClOrdId);
                     var venueAbsentLast = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
                     if (venueAbsentLast is not null && !IsTerminal(venueAbsentLast))
                         await MarkVenueAbsentAsync(order.ClOrdId, venueAbsentLast);

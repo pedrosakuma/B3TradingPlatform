@@ -27,8 +27,9 @@ public class SuspendedTimeoutBoundarySpecTests
             http,
             userAuth,
             adminAuth,
-            venueOrderId => docker.WaitForVenueOrderAbsentAsync(
+            (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
                 venueOrderId,
+                clOrdId,
                 SessionRollSpecSupport.TradeTimeout),
             async cleanup =>
             {
@@ -44,7 +45,7 @@ public class SuspendedTimeoutBoundarySpecTests
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(250));
                     _ = await SessionRollSpecSupport.StimulateGatewayWriteAsync(
-                        cleanup, http, userAuth, "VALE3", probePrice, side: "Sell");
+                        cleanup, http, userAuth, "VALE3", probePrice);
                     await SessionRollSpecSupport.DelayUntilAsync(disconnectStartedUtc, WithinWindowDisconnect);
                     await detached.ReconnectAsync();
                 }
@@ -92,8 +93,9 @@ public class SuspendedTimeoutBoundarySpecTests
             http,
             userAuth,
             adminAuth,
-            venueOrderId => docker.WaitForVenueOrderAbsentAsync(
+            (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
                 venueOrderId,
+                clOrdId,
                 SessionRollSpecSupport.TradeTimeout),
             async cleanup =>
             {

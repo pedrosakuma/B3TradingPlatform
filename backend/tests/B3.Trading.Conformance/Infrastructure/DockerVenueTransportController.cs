@@ -107,7 +107,8 @@ internal sealed class DockerVenueTransportController
     }
 
     public async Task WaitForVenueOrderAbsentAsync(
-        ulong venueOrderId,
+        ulong? venueOrderId,
+        ulong clOrdId,
         TimeSpan timeout,
         CancellationToken ct = default)
     {
@@ -173,12 +174,16 @@ internal sealed class DockerVenueTransportController
 
             lastSnapshot = snapshot.StdOut;
             lastError = null;
-            if (!SnapshotContainsVenueOrder(snapshot.StdOut, venueOrderId))
+            if (!SnapshotContainsTrackedOrder(
+                    snapshot.StdOut,
+                    venueOrderId,
+                    clOrdId))
                 return;
         }
 
         throw new InvalidOperationException(
-            $"Timed out after {timeout.TotalSeconds:F0}s proving venue order {venueOrderId} absent " +
+            $"Timed out after {timeout.TotalSeconds:F0}s proving venue order " +
+            $"{venueOrderId?.ToString() ?? $"ClOrdID {clOrdId}"} absent " +
             $"from matching channel 84. lastError={lastError ?? "<none>"} " +
             $"lastSnapshot={lastSnapshot ?? "<none>"}.");
     }
@@ -232,6 +237,16 @@ internal sealed class DockerVenueTransportController
         }
 
         return latest;
+    }
+
+    public async Task RestartTradingHostAsync(
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        await EnsureDockerAvailableAsync(ct);
+        var restartStartedUtc = DateTimeOffset.UtcNow;
+        await RunDockerAsync(new[] { "restart", _tradingHostContainer }, ct);
+        await WaitForTradingHostRestartAsync(restartStartedUtc, timeout, ct);
     }
 
     public async Task KillTradingHostAsync(CancellationToken ct = default)
@@ -616,7 +631,10 @@ internal sealed class DockerVenueTransportController
         return false;
     }
 
-    internal static bool SnapshotContainsVenueOrder(string snapshotJson, ulong venueOrderId)
+    internal static bool SnapshotContainsTrackedOrder(
+        string snapshotJson,
+        ulong? venueOrderId,
+        ulong clOrdId)
     {
         using var document = JsonDocument.Parse(snapshotJson);
         if (!TryGetPropertyIgnoreCase(document.RootElement, "Engine", out var engine) ||
@@ -639,7 +657,19 @@ internal sealed class DockerVenueTransportController
             {
                 if (TryGetPropertyIgnoreCase(order, "OrderId", out var orderId) &&
                     orderId.TryGetUInt64(out var parsed) &&
-                    parsed == venueOrderId)
+                    venueOrderId is { } expectedVenueOrderId &&
+                    parsed == expectedVenueOrderId)
+                {
+                    return true;
+                }
+                if (venueOrderId is null &&
+                    TryGetPropertyIgnoreCase(order, "ClOrdId", out var clOrdIdProperty) &&
+                    clOrdIdProperty.ValueKind == JsonValueKind.String &&
+                    ulong.TryParse(clOrdIdProperty.GetString(), out var parsedClOrdId) &&
+                    parsedClOrdId == clOrdId &&
+                    TryGetPropertyIgnoreCase(order, "EnteringFirm", out var enteringFirm) &&
+                    enteringFirm.TryGetUInt32(out var parsedFirm) &&
+                    parsedFirm == 100)
                 {
                     return true;
                 }

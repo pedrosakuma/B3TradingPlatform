@@ -39,7 +39,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
-            _ => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
             cleanup =>
             {
                 cleanup.TrackOrder(101, "PETR4", "Buy", 30m, 100);
@@ -83,7 +83,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
-            _ => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
             cleanup =>
             {
                 states[101] = new("Working", IsStale: false, "PETR4", "Buy", 30m);
@@ -126,9 +126,9 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
-            venueOrderId =>
+            (venueOrderId, _) =>
             {
-                provedAbsent.Add(venueOrderId);
+                provedAbsent.Add(venueOrderId!.Value);
                 return Task.CompletedTask;
             },
             cleanup =>
@@ -162,7 +162,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
-            _ => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
             _ =>
             {
                 states[151] = new("Working", IsStale: false, "VALE3", "Sell", 60m);
@@ -200,7 +200,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
-            _ => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
             cleanup =>
             {
                 states[155] = new(
@@ -232,7 +232,7 @@ public sealed class SessionRollOrderCleanupTests
             http,
             UserAuth,
             AdminAuth,
-            _ => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
             _ =>
             {
                 states[160] = new(
@@ -260,7 +260,7 @@ public sealed class SessionRollOrderCleanupTests
                 http,
                 UserAuth,
                 AdminAuth,
-                _ => Task.CompletedTask,
+                (_, _) => Task.CompletedTask,
                 _ =>
                 {
                     states[165] = new(
@@ -303,7 +303,7 @@ public sealed class SessionRollOrderCleanupTests
                 http,
                 UserAuth,
                 AdminAuth,
-                _ => Task.CompletedTask,
+                (_, _) => Task.CompletedTask,
                 cleanup =>
                 {
                     cleanup.TrackOrder(201, "PETR4", "Buy", 30m, 100);
@@ -345,7 +345,7 @@ public sealed class SessionRollOrderCleanupTests
                 http,
                 UserAuth,
                 AdminAuth,
-                _ => Task.CompletedTask,
+                (_, _) => Task.CompletedTask,
                 cleanup =>
                 {
                     cleanup.TrackOrder(301, "PETR4", "Buy", 30m, 100);
@@ -369,14 +369,33 @@ public sealed class SessionRollOrderCleanupTests
             {
               "Engine": {
                 "Books": [
-                  { "Orders": [ { "OrderId": 9001 }, { "OrderId": 9002 } ] }
+                  {
+                    "Orders": [
+                      { "OrderId": 9001, "ClOrdId": "101", "EnteringFirm": 100 },
+                      { "OrderId": 9002, "ClOrdId": "102", "EnteringFirm": 200 }
+                    ]
+                  }
                 ]
               }
             }
             """;
 
-        Assert.True(DockerVenueTransportController.SnapshotContainsVenueOrder(snapshot, 9001));
-        Assert.False(DockerVenueTransportController.SnapshotContainsVenueOrder(snapshot, 9003));
+        Assert.True(DockerVenueTransportController.SnapshotContainsTrackedOrder(
+            snapshot,
+            venueOrderId: 9001,
+            clOrdId: 0));
+        Assert.False(DockerVenueTransportController.SnapshotContainsTrackedOrder(
+            snapshot,
+            venueOrderId: 9003,
+            clOrdId: 0));
+        Assert.True(DockerVenueTransportController.SnapshotContainsTrackedOrder(
+            snapshot,
+            venueOrderId: null,
+            clOrdId: 101));
+        Assert.False(DockerVenueTransportController.SnapshotContainsTrackedOrder(
+            snapshot,
+            venueOrderId: null,
+            clOrdId: 102));
     }
 
     private static HttpClient CreateHttp(

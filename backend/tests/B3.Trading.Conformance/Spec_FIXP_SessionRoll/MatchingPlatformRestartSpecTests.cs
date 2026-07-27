@@ -25,8 +25,9 @@ public class MatchingPlatformRestartSpecTests
             http,
             userAuth,
             adminAuth,
-            venueOrderId => docker.WaitForVenueOrderAbsentAsync(
+            (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
                 venueOrderId,
+                clOrdId,
                 SessionRollSpecSupport.TradeTimeout),
             async cleanup =>
             {
@@ -49,8 +50,7 @@ public class MatchingPlatformRestartSpecTests
                                 http,
                                 userAuth,
                                 "VALE3",
-                                60.00m,
-                                side: "Sell");
+                                60.00m);
                             await Task.Delay(TimeSpan.FromMilliseconds(250));
                         }
                     });

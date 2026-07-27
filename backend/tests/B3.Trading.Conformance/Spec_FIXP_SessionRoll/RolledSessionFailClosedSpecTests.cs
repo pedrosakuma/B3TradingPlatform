@@ -48,8 +48,9 @@ public sealed class RolledSessionFailClosedSpecTests
             http,
             user,
             maker,
-            venueOrderId => docker.WaitForVenueOrderAbsentAsync(
+            (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
                 venueOrderId,
+                clOrdId,
                 SessionRollSpecSupport.TradeTimeout),
             async _cleanup =>
             {
@@ -117,7 +118,8 @@ public sealed class RolledSessionFailClosedSpecTests
                     http,
                     maker,
                     checker,
-                    baseline);
+                    baseline,
+                    docker);
                 using var reopened = await SubmitOrderAsync(
                     http,
                     user,
@@ -131,7 +133,8 @@ public sealed class RolledSessionFailClosedSpecTests
                     http,
                     maker,
                     checker,
-                    baseline);
+                    baseline,
+                    docker);
             });
     }
 
@@ -319,31 +322,48 @@ public sealed class RolledSessionFailClosedSpecTests
         HttpClient http,
         AuthenticationHeaderValue maker,
         AuthenticationHeaderValue checker,
-        IReadOnlySet<string> baseline)
+        IReadOnlySet<string> baseline,
+        DockerVenueTransportController docker)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
         HttpStatusCode? last = null;
         IReadOnlyList<MutationSummary> remaining = [];
+        var restartedAfterResolution = false;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            remaining = (await GetMutationsAsync(http, maker))
-                .Where(mutation =>
-                    !baseline.Contains(mutation.MutationId) &&
-                    mutation.RequiresReconciliation)
-                .ToArray();
-            foreach (var mutation in remaining)
+            try
             {
-                await ResolveVenueAbsentAsync(
-                    http,
-                    maker,
-                    checker,
-                    mutation.MutationId);
-            }
+                remaining = (await GetMutationsAsync(http, maker))
+                    .Where(mutation =>
+                        !baseline.Contains(mutation.MutationId) &&
+                        mutation.RequiresReconciliation)
+                    .ToArray();
+                foreach (var mutation in remaining)
+                {
+                    await ResolveVenueAbsentAsync(
+                        http,
+                        maker,
+                        checker,
+                        mutation.MutationId);
+                }
 
-            using var response = await http.GetAsync("/ready");
-            last = response.StatusCode;
-            if (last == HttpStatusCode.OK && remaining.Count == 0)
-                return;
+                using var response = await http.GetAsync("/ready");
+                last = response.StatusCode;
+                if (last == HttpStatusCode.OK && remaining.Count == 0)
+                    return;
+                if (remaining.Count == 0 &&
+                    last == HttpStatusCode.ServiceUnavailable &&
+                    !restartedAfterResolution)
+                {
+                    await docker.RestartTradingHostAsync(
+                        SessionRollSpecSupport.ReconnectTimeout);
+                    restartedAfterResolution = true;
+                }
+            }
+            catch (HttpRequestException)
+            {
+                last = null;
+            }
             await Task.Delay(SessionRollSpecSupport.PollInterval);
         }
 
