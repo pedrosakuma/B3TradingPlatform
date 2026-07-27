@@ -29,6 +29,9 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
     public Func<CancelOrderRequest, CancellationToken, Task>? CancelHandler { get; set; }
     public Func<MassActionRequest, CancellationToken, Task<MassActionReport>>? MassActionHandler { get; set; }
     public Func<CancellationToken, Task>? ConnectHandler { get; set; }
+    public Func<EntryPointEvent, CancellationToken, ValueTask>? InboundPersistenceCallback { get; set; }
+    public Func<EntryPointEvent, CancellationToken, Task>? BeforeEventDelivery { get; set; }
+    public Action<EntryPointEvent>? AfterEventConsumed { get; set; }
     private readonly Channel<EntryPointEvent> _events = Channel.CreateUnbounded<EntryPointEvent>();
 
     public async Task<ClOrdID> SubmitAsync(NewOrderRequest request, CancellationToken ct)
@@ -93,8 +96,11 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
         {
             while (_events.Reader.TryRead(out var ev))
             {
+                if (BeforeEventDelivery is not null)
+                    await BeforeEventDelivery(ev, ct);
                 Operations.Enqueue($"event:{ev.GetType().Name}");
                 yield return ev;
+                AfterEventConsumed?.Invoke(ev);
             }
         }
     }
@@ -110,6 +116,16 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     public void Publish(EntryPointEvent ev) => _events.Writer.TryWrite(ev);
+    public async Task ReceiveAsync(EntryPointEvent ev, CancellationToken ct = default)
+    {
+        if (InboundPersistenceCallback is not null)
+        {
+            Operations.Enqueue($"persist:{ev.GetType().Name}");
+            await InboundPersistenceCallback(ev, ct);
+        }
+        Operations.Enqueue($"queue:{ev.GetType().Name}");
+        await _events.Writer.WriteAsync(ev, ct);
+    }
     public void CompleteEvents() => _events.Writer.TryComplete();
     public void PublishTerminated(
         TerminationCode code = TerminationCode.Unspecified,

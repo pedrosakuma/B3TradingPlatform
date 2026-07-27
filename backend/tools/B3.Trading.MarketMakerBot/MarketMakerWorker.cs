@@ -440,7 +440,7 @@ internal sealed class MarketMakerWorker : BackgroundService
         throw new InvalidOperationException("FIXP event stream ended during market-maker startup.");
     }
 
-    private async Task ReceiveLoopAsync(IEntryPointClient client, CancellationToken ct)
+    internal async Task ReceiveLoopAsync(IEntryPointClient client, CancellationToken ct)
     {
         await foreach (var ev in client.Events(ct).ConfigureAwait(false))
         {

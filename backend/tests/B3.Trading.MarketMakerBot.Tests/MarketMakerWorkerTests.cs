@@ -422,6 +422,128 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task ReceiveLoopAsync_SdkReceiveAheadBeforeTermination_ReplaysUnprocessedEventAfterRestart()
+    {
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "inbound-receive-ahead-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            const ulong clOrdId = 700;
+            var baseline = new SessionSnapshot
+            {
+                SessionId = 1,
+                SessionVerId = 42,
+                LastInboundSeqNum = 8,
+                CapturedAt = DateTimeOffset.UtcNow,
+                OutstandingOrders = new Dictionary<string, ulong>
+                {
+                    [clOrdId.ToString()] = 1,
+                },
+            };
+            var rejected = new OrderRejected
+            {
+                ClOrdID = new ClOrdID(clOrdId),
+                OrderId = 0,
+                RejectCode = 1,
+                Reason = "replayed reject",
+                SeqNum = 9,
+                SendingTime = DateTimeOffset.UtcNow,
+            };
+
+            var firstStore = new MarketMakerSessionStateStore(directory);
+            await firstStore.SaveAsync(baseline);
+            var (firstWorker, _, firstClient, _) = CreateWorker(
+                out _,
+                options => options.SessionVerId = 42,
+                firstStore);
+            firstWorker.ConfigureRecoveryState(baseline, effectiveSessionVerId: 42);
+
+            firstClient.InboundPersistenceCallback = async (ev, ct) =>
+            {
+                var orderRejected = Assert.IsType<OrderRejected>(ev);
+                await firstStore.AppendDeltaAsync(
+                    new OrderClosedDelta(orderRejected.ClOrdID),
+                    ct);
+                await firstStore.AppendDeltaAsync(new InboundDelta(ev.SeqNum), ct);
+            };
+            var deliveryStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            firstClient.BeforeEventDelivery = async (_, ct) =>
+            {
+                deliveryStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            };
+
+            using (var firstCts = new CancellationTokenSource())
+            {
+                var firstReceive = firstWorker.ReceiveLoopAsync(firstClient, firstCts.Token);
+                await firstClient.ReceiveAsync(rejected);
+                await deliveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+                firstCts.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => firstReceive.WaitAsync(TimeSpan.FromSeconds(1)));
+            }
+
+            var firstOperations = firstClient.Operations.ToArray();
+            var persistedAt = Array.IndexOf(firstOperations, "persist:OrderRejected");
+            var queuedAt = Array.IndexOf(firstOperations, "queue:OrderRejected");
+            Assert.True(persistedAt >= 0);
+            Assert.True(queuedAt > persistedAt);
+            Assert.DoesNotContain("event:OrderRejected", firstOperations);
+
+            var sdkReceived = await new FileSessionStateStore(directory).ReplayAsync();
+            Assert.NotNull(sdkReceived);
+            Assert.Equal(9ul, sdkReceived.LastInboundSeqNum);
+
+            var restartedStore = new MarketMakerSessionStateStore(directory);
+            var recovered = await restartedStore.ReplayAsync();
+            Assert.NotNull(recovered);
+            Assert.Equal(8ul, recovered.LastInboundSeqNum);
+            Assert.DoesNotContain(clOrdId.ToString(), recovered.OutstandingOrders.Keys);
+
+            var (restartedWorker, _, restartedClient, _) = CreateWorker(
+                out _,
+                options => options.SessionVerId = 42,
+                restartedStore);
+            restartedWorker.ConfigureRecoveryState(recovered, effectiveSessionVerId: 42);
+            restartedClient.InboundPersistenceCallback = async (ev, ct) =>
+            {
+                var orderRejected = Assert.IsType<OrderRejected>(ev);
+                await restartedStore.AppendDeltaAsync(
+                    new OrderClosedDelta(orderRejected.ClOrdID),
+                    ct);
+                await restartedStore.AppendDeltaAsync(new InboundDelta(ev.SeqNum), ct);
+            };
+            var replayProcessed = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            restartedClient.AfterEventConsumed = _ => replayProcessed.TrySetResult();
+
+            using (var restartedCts = new CancellationTokenSource())
+            {
+                var restartedReceive =
+                    restartedWorker.ReceiveLoopAsync(restartedClient, restartedCts.Token);
+                await restartedClient.ReceiveAsync(rejected);
+                await replayProcessed.Task.WaitAsync(TimeSpan.FromSeconds(1));
+                restartedCts.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => restartedReceive.WaitAsync(TimeSpan.FromSeconds(1)));
+            }
+
+            var afterReplay = await new MarketMakerSessionStateStore(directory).ReplayAsync();
+            Assert.NotNull(afterReplay);
+            Assert.Equal(9ul, afterReplay.LastInboundSeqNum);
+            Assert.Contains("event:OrderRejected", restartedClient.Operations);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PrepareConnectedSessionAsync_TerminalReportThenEventStreamCompletionFailsClosed()
     {
         var (worker, _, client, _) = CreateWorker(

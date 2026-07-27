@@ -5,10 +5,11 @@ using System.Text.Json;
 namespace B3.Trading.MarketMakerBot;
 
 /// <summary>
-/// Serializes the SDK state store with bot-owned terminal evidence. SDK 0.17.0
-/// persists an explicit cancel acknowledgement under the cancel request's
-/// ClOrdID, not the original NEW's ClOrdID, so the original can otherwise
-/// reappear in a later compacted snapshot.
+/// Serializes the SDK state store with bot-owned terminal evidence and the
+/// contiguous public events processed by the bot. SDK 0.17.0 persists inbound
+/// receive state before public channel delivery and records explicit cancel
+/// acknowledgements under the cancel request's ClOrdID, so both need a
+/// bot-owned durability fence.
 /// </summary>
 internal sealed class MarketMakerSessionStateStore : ISessionStateStore
 {
@@ -55,15 +56,10 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         {
             await EnsureRetirementsLoadedAsync(ct);
             await EnsureInboundFenceLoadedAsync(ct);
+            await EnsureInboundFenceSeededAsync(snapshot, ct);
             var filtered = FilterRetired(snapshot)!;
             await _inner.SaveAsync(filtered, ct);
             await CompactPriorProcessRetirementsAsync(ct);
-            if (_inboundFenceSessionVerId != 0 &&
-                (_inboundFenceSessionId != filtered.SessionId ||
-                 _inboundFenceSessionVerId != filtered.SessionVerId))
-            {
-                ClearInboundFence();
-            }
         }
         finally
         {
@@ -113,12 +109,6 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
             {
                 await _inner.SaveAsync(snapshot, ct);
                 await CompactPriorProcessRetirementsAsync(ct);
-                if (_inboundFenceSessionVerId != 0 &&
-                    (_inboundFenceSessionId != snapshot.SessionId ||
-                     _inboundFenceSessionVerId != snapshot.SessionVerId))
-                {
-                    ClearInboundFence();
-                }
             }
         }
         finally
@@ -154,23 +144,11 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         try
         {
             await EnsureInboundFenceLoadedAsync(ct);
-            if (_inboundFenceSessionId != sessionId ||
-                _inboundFenceSessionVerId != sessionVerId)
-            {
-                _inboundFenceSessionId = sessionId;
-                _inboundFenceSessionVerId = sessionVerId;
-                _contiguousInboundSeqNum = 0;
-            }
-            if (contiguousSeqNum <= _contiguousInboundSeqNum)
+            if (MatchesInboundFence(sessionId, sessionVerId) &&
+                contiguousSeqNum <= _contiguousInboundSeqNum)
                 return;
 
-            var temporaryPath = _inboundFencePath + ".tmp";
-            await File.WriteAllTextAsync(
-                temporaryPath,
-                $"{sessionId}|{sessionVerId}|{contiguousSeqNum}",
-                ct);
-            File.Move(temporaryPath, _inboundFencePath, overwrite: true);
-            _contiguousInboundSeqNum = contiguousSeqNum;
+            await PersistInboundFenceAsync(sessionId, sessionVerId, contiguousSeqNum, ct);
         }
         finally
         {
@@ -276,14 +254,56 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         return snapshot with
         {
-            LastInboundSeqNum =
-                snapshot.SessionId == _inboundFenceSessionId &&
-                snapshot.SessionVerId == _inboundFenceSessionVerId
-                ? Math.Max(snapshot.LastInboundSeqNum, _contiguousInboundSeqNum)
+            LastInboundSeqNum = MatchesInboundFence(snapshot.SessionId, snapshot.SessionVerId)
+                ? _contiguousInboundSeqNum
                 : snapshot.LastInboundSeqNum,
             OutstandingOrders = outstanding,
         };
     }
+
+    private async Task EnsureInboundFenceSeededAsync(
+        SessionSnapshot snapshot,
+        CancellationToken ct)
+    {
+        if (snapshot.SessionId == 0 ||
+            snapshot.SessionVerId == 0 ||
+            MatchesInboundFence(snapshot.SessionId, snapshot.SessionVerId))
+        {
+            return;
+        }
+
+        // The SDK saves once after Establish and before starting its inbound
+        // loop. Seed there so later receive-ahead snapshots cannot outrun the
+        // bot's processed-event fence.
+        await PersistInboundFenceAsync(
+            snapshot.SessionId,
+            snapshot.SessionVerId,
+            snapshot.LastInboundSeqNum,
+            ct);
+    }
+
+    private async Task PersistInboundFenceAsync(
+        uint sessionId,
+        uint sessionVerId,
+        ulong contiguousSeqNum,
+        CancellationToken ct)
+    {
+        var temporaryPath = _inboundFencePath + ".tmp";
+        await File.WriteAllTextAsync(
+            temporaryPath,
+            $"{sessionId}|{sessionVerId}|{contiguousSeqNum}",
+            ct);
+        File.Move(temporaryPath, _inboundFencePath, overwrite: true);
+        _inboundFenceSessionId = sessionId;
+        _inboundFenceSessionVerId = sessionVerId;
+        _contiguousInboundSeqNum = contiguousSeqNum;
+    }
+
+    private bool MatchesInboundFence(uint sessionId, uint sessionVerId) =>
+        sessionId != 0 &&
+        sessionVerId != 0 &&
+        sessionId == _inboundFenceSessionId &&
+        sessionVerId == _inboundFenceSessionVerId;
 
     private async Task EnsureInboundFenceLoadedAsync(CancellationToken ct)
     {
@@ -310,14 +330,6 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         }
     }
 
-    private void ClearInboundFence()
-    {
-        _inboundFenceSessionId = 0;
-        _inboundFenceSessionVerId = 0;
-        _contiguousInboundSeqNum = 0;
-        if (File.Exists(_inboundFencePath))
-            File.Delete(_inboundFencePath);
-    }
 }
 
 internal sealed record ReconciliationRequirement(DateTimeOffset DetectedAtUtc, string Reason);
