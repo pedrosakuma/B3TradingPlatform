@@ -4,7 +4,6 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using B3.Trading.Application;
 using B3.Trading.Application.MarketData;
-using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -1891,26 +1890,18 @@ public class PeggedAlgoEndpointTests
         //   * ResolveRepegOnFillAsync emits
         //     AlgoPeggedRepegResolvedEvent so the audit pair is
         //     balanced and the PeggedRepegBook entry is cleared.
-        //   * ResolveRepegOnFillAsync's TryConsumeByOriginal release
-        //     also drops the in-flight PendingReplacementRegistry
-        //     intent + any held margin reservation. A late Replaced
-        //     ER would therefore be silently dropped (no orphan
-        //     replacement child in the book).
+        //   * ExecutionReportProcessor atomically retires the in-flight
+        //     PendingReplacementRegistry intent + held margin when it
+        //     applies the terminal Fill. ResolveRepegOnFillAsync retains
+        //     the same consume as an idempotent fallback. A late Replaced
+        //     ER is therefore silently dropped (no orphan child).
         //
         // **Guard pinned**: removing the IsCancelledChild check in
         // the Filled case (AlgoEngine OnChildErAsync) causes the
         // Fill ER to fall through to SubmitNextSliceAsync — a SECOND
         // child would get submitted and Assert.Single(allChildren)
         // below fails.
-        using var f = TestAppFactory.WithOverrides(
-            Simulator(),
-            services =>
-            {
-                services.RemoveAll<IReplaceMarginCoordinator>();
-                services.AddSingleton<BlockingAbortReplaceMarginCoordinator>();
-                services.AddSingleton<IReplaceMarginCoordinator>(sp =>
-                    sp.GetRequiredService<BlockingAbortReplaceMarginCoordinator>());
-            });
+        using var f = TestAppFactory.WithOverrides(Simulator());
         using var http = f.CreateClient();
         var token = await f.LoginAsync(http);
         var adminToken = await f.LoginAsync(http, "admin");
@@ -1926,14 +1917,11 @@ public class PeggedAlgoEndpointTests
         var mock = f.Services.GetRequiredService<MockEntryPointClient>();
         var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
         var registry = f.Services.GetRequiredService<PendingReplacementRegistry>();
-        var engine = f.Services.GetRequiredService<AlgoEngine>();
-        var abortGate = f.Services.GetRequiredService<BlockingAbortReplaceMarginCoordinator>();
 
         // Hold the engine's CancelReplaceAsync await via a TCS so we
         // have a deterministic window to race the Fill ER against.
         var replaceGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         mock.ReplaceDelayInjector = _ => replaceGate.Task;
-        abortGate.BlockNextAbort();
 
         // Drift the mid → engine issues cancel-replace; the wire-
         // call now parks on the gate.
@@ -1955,26 +1943,6 @@ public class PeggedAlgoEndpointTests
         // which also consumes the in-flight replace intent.
         replaceGate.SetResult();
 
-        try
-        {
-            // #548. ResolveRepegOnFillAsync consumes the replacement
-            // intent, then aborts its margin reservation. Hold that abort
-            // so the test observes the exact cleanup window. The filled
-            // child must remain published until the whole resolution
-            // sequence retires; otherwise a queued scheduler/reconcile tick
-            // can observe an empty slot and submit an orphan slice.
-            await abortGate.WaitUntilAbortEnteredAsync(TimeSpan.FromSeconds(3));
-            Assert.False(registry.IsOriginalInFlight(child1.ClOrdId));
-            Assert.Equal(
-                child1.ClOrdId,
-                engine.TryGetLiveChildClOrdId("default", ulong.Parse(algoId)));
-            Assert.Single(book.EnumerateChildrenOf("default", ulong.Parse(algoId)));
-        }
-        finally
-        {
-            abortGate.ReleaseAbort();
-        }
-
         await WaitForAlgoStatus(http, token, algoId, "Completed");
         var snap = await GetAlgo(http, token, algoId);
         Assert.Equal(100, snap.GetProperty("filledQuantity").GetInt64());
@@ -1985,8 +1953,8 @@ public class PeggedAlgoEndpointTests
             TimeSpan.FromSeconds(3),
             "PeggedRepegBook still has an entry after the fill race resolved");
 
-        // ResolveRepegOnFillAsync's TryConsumeByOriginal must have
-        // released the in-flight intent — IsOriginalInFlight false.
+        // The terminal-Fill processor path (or the resolver fallback)
+        // must have released the in-flight intent.
         Assert.False(registry.IsOriginalInFlight(child1.ClOrdId),
             "in-flight replace intent for the OLD child must be released after fill-race resolution");
 
@@ -1995,6 +1963,84 @@ public class PeggedAlgoEndpointTests
         Assert.Single(mock.SubmittedReplaces);
         Assert.Empty(mock.SubmittedCancels);
         var allChildren = book.EnumerateChildrenOf("default", ulong.Parse(algoId)).ToList();
+        Assert.Single(allChildren);
+        Assert.Equal(child1.ClOrdId, allChildren[0].ClOrdId);
+    }
+
+    [Fact]
+    public async Task Pegged_ReplacedErBeforeFillResolver_DoesNotHydrateReplacement()
+    {
+        using var f = TestAppFactory.WithOverrides(Simulator());
+        using var http = f.CreateClient();
+        var token = await f.LoginAsync(http);
+        var adminToken = await f.LoginAsync(http, "admin");
+
+        var cache = f.Services.GetRequiredService<PegBookTopCache>();
+        cache.UpdateBookTop("PETR4", 29.5m, 30.5m, DateTimeOffset.UtcNow);
+
+        var algoId = await PostAlgo(http, token, PeggedBody(total: 100, repegMs: 100));
+        var algoIdValue = ulong.Parse(algoId);
+        var book = f.Services.GetRequiredService<WorkingOrderBook>();
+        var child1 = await WaitForAnyChild(book, algoId, TimeSpan.FromSeconds(3));
+        var mock = f.Services.GetRequiredService<MockEntryPointClient>();
+        var registry = f.Services.GetRequiredService<PendingReplacementRegistry>();
+        var repegBook = f.Services.GetRequiredService<PeggedRepegBook>();
+
+        var replaceGate = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        mock.ReplaceDelayInjector = _ => replaceGate.Task;
+
+        cache.UpdateBookTop("PETR4", 30.5m, 31.5m, DateTimeOffset.UtcNow);
+        await WaitFor(
+            () => mock.SubmittedReplaces.Any(r =>
+                r.OriginalClOrdId == child1.ClOrdId),
+            TimeSpan.FromSeconds(3),
+            "engine did not invoke CancelReplaceAsync after the mid drift");
+
+        var replace = mock.SubmittedReplaces.Single(r =>
+            r.OriginalClOrdId == child1.ClOrdId);
+
+        // Simulate cold replay before AlgoPeggedRepegStartedEvent: remove
+        // the optimistic live-only cancelled-child marker. The replacement
+        // intent itself must retain the durable repeg discriminator recorded
+        // by OrderReplaceRequestedEvent, before OutboundApprovedEvent.
+        Assert.True(repegBook.UnmarkCancelledChild(
+            "default",
+            algoIdValue,
+            child1.ClOrdId));
+        Assert.True(registry.TryGetByOriginal(child1.ClOrdId, out var pendingIntent));
+        Assert.True(pendingIntent?.IsPeggedRepeg);
+
+        // Apply the terminal Fill while the engine is still parked in the
+        // replace wire call. The processor must retire the replacement
+        // intent before it enqueues the fill signal. Then deliver Replaced
+        // before releasing the engine: pre-#548 this ER consumed the intent
+        // first and hydrated child2, which the later fill resolver could no
+        // longer suppress.
+        try
+        {
+            await InjectEr(http, adminToken, child1.ClOrdId, "Fill", lastQty: 100);
+
+            await InjectReplacedEr(
+                http,
+                adminToken,
+                replace.NewClOrdId,
+                child1.ClOrdId,
+                leavesQuantity: replace.NewQuantity,
+                cumQty: 0);
+
+            Assert.False(registry.IsOriginalInFlight(child1.ClOrdId));
+            Assert.False(book.TryGet(replace.NewClOrdId, out _));
+            Assert.Single(book.EnumerateChildrenOf("default", algoIdValue));
+        }
+        finally
+        {
+            replaceGate.TrySetResult();
+        }
+
+        await WaitForAlgoStatus(http, token, algoId, "Completed");
+
+        var allChildren = book.EnumerateChildrenOf("default", algoIdValue).ToList();
         Assert.Single(allChildren);
         Assert.Equal(child1.ClOrdId, allChildren[0].ClOrdId);
     }
@@ -2491,82 +2537,6 @@ public class PeggedAlgoEndpointTests
         var resp = await http.SendAsync(req);
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
         return resp;
-    }
-
-    private sealed class BlockingAbortReplaceMarginCoordinator(
-        ReserveOnSubmitMarginProvider inner) : IReplaceMarginCoordinator, IDisposable
-    {
-        private readonly ManualResetEventSlim _abortRelease = new(initialState: true);
-        private TaskCompletionSource? _abortEntered;
-        private int _blockNextAbort;
-
-        public void BlockNextAbort()
-        {
-            _abortEntered = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            _abortRelease.Reset();
-            Volatile.Write(ref _blockNextAbort, 1);
-        }
-
-        public async Task WaitUntilAbortEnteredAsync(TimeSpan timeout)
-        {
-            var entered = _abortEntered
-                ?? throw new InvalidOperationException("Abort gate was not armed.");
-            await entered.Task.WaitAsync(timeout);
-        }
-
-        public void ReleaseAbort() => _abortRelease.Set();
-
-        public Task<RiskDecision> PrepareReplaceAsync(
-            ulong originalClOrdId,
-            ulong newClOrdId,
-            EndClientId owner,
-            decimal newRemainingNotional,
-            CancellationToken ct) =>
-            inner.PrepareReplaceAsync(
-                originalClOrdId,
-                newClOrdId,
-                owner,
-                newRemainingNotional,
-                ct);
-
-        public Task<RiskDecision> PrepareReplaceAsync(
-            ulong originalClOrdId,
-            ulong newClOrdId,
-            EndClientId owner,
-            string firmId,
-            decimal newRemainingNotional,
-            CancellationToken ct) =>
-            inner.PrepareReplaceAsync(
-                originalClOrdId,
-                newClOrdId,
-                owner,
-                firmId,
-                newRemainingNotional,
-                ct);
-
-        public void CommitReplace(
-            ulong originalClOrdId,
-            ulong newClOrdId,
-            decimal confirmedRemainingNotional) =>
-            inner.CommitReplace(
-                originalClOrdId,
-                newClOrdId,
-                confirmedRemainingNotional);
-
-        public void AbortReplace(ulong newClOrdId)
-        {
-            if (Interlocked.Exchange(ref _blockNextAbort, 0) == 1)
-            {
-                _abortEntered?.TrySetResult();
-                if (!_abortRelease.Wait(TimeSpan.FromSeconds(10)))
-                    throw new TimeoutException("Timed out waiting to release AbortReplace.");
-            }
-
-            inner.AbortReplace(newClOrdId);
-        }
-
-        public void Dispose() => _abortRelease.Dispose();
     }
 
     /// <summary>

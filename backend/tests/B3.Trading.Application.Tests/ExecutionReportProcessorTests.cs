@@ -351,6 +351,69 @@ public class ExecutionReportProcessorTests
         Assert.True(order.IsStale);
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void TerminalFill_ConsumesOnlyDurablyClassifiedPeggedRepegIntent(
+        bool isPeggedRepeg,
+        bool expectedInFlight)
+    {
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        var replacements = new PendingReplacementRegistry();
+        var proc = new ExecutionReportProcessor(
+            ownership,
+            book,
+            new PositionKeeper(),
+            new RecordingSink(),
+            new NoOpMarginProvider(),
+            NullLogger<ExecutionReportProcessor>.Instance,
+            replacements: replacements);
+
+        var owner = new EndClientId("alice");
+        var order = new Order(
+            1UL,
+            owner,
+            "PETR4",
+            4321UL,
+            OrderSide.Buy,
+            OrderType.Limit,
+            100,
+            30m,
+            firmId: "FIRM01",
+            parentAlgoId: 42UL,
+            algoSliceSeq: 1);
+        book.TryAdd(order);
+        ownership.Register(order.ClOrdId, owner);
+        order.MarkWorking();
+
+        Assert.True(replacements.TryAdd(new OrderReplacementIntent(
+            OriginalClOrdId: order.ClOrdId,
+            NewClOrdId: 2UL,
+            Owner: owner,
+            Symbol: order.Symbol,
+            SecurityId: order.SecurityId,
+            Side: order.Side,
+            Type: order.Type,
+            NewQuantity: order.Quantity,
+            NewPrice: 30.1m,
+            FirmId: order.FirmId,
+            ParentAlgoId: order.ParentAlgoId,
+            AlgoSliceSeq: order.AlgoSliceSeq,
+            IsPeggedRepeg: isPeggedRepeg)));
+
+        proc.Apply(
+            order.ClOrdId,
+            ExecKind.Fill,
+            leaves: 0,
+            cumQty: 100,
+            lastQty: 100,
+            lastPx: 30m,
+            rejectReason: null);
+
+        Assert.Equal(expectedInFlight, replacements.IsOriginalInFlight(order.ClOrdId));
+    }
+
     [Fact]
     public void ApplyReplaceRejected_EmitsUiVisibleEvent_ScopedToOriginalClOrdId()
     {

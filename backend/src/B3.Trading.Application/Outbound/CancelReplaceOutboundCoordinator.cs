@@ -674,7 +674,7 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             cancellationToken).ConfigureAwait(false);
         if (!margin.Approved)
             return false;
-        var intent = CreateReplacementIntent(original, canonical);
+        var intent = CreateReplacementIntent(original, canonical, mutation.AlgoOriginIdentity);
         if (!_replacements.TryGet(canonical.ClOrdId, out _)
             && !_replacements.TryAdd(intent))
         {
@@ -778,7 +778,8 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
 
     private static OrderReplacementIntent CreateReplacementIntent(
         Order original,
-        OutboundCanonicalCommand canonical) =>
+        OutboundCanonicalCommand canonical,
+        AlgoOutboundOriginIdentity? algoOriginIdentity) =>
         new(
             original.ClOrdId,
             canonical.ClOrdId,
@@ -794,7 +795,12 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             original.AlgoSliceSeq,
             Enum.Parse<TimeInForce>(canonical.TimeInForce, ignoreCase: true),
             canonical.StopPrice,
-            canonical.GoodTillDate);
+            canonical.GoodTillDate,
+            algoOriginIdentity is
+            {
+                ParentAlgoId: var parentAlgoId,
+                ActionKind: AlgoOutboundActionKind.Repeg,
+            } && parentAlgoId == original.ParentAlgoId);
 
     private static void ValidateFrame(
         OutboundMutationSnapshot mutation,

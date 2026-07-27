@@ -2370,10 +2370,12 @@ public sealed class AlgoEngine : BackgroundService
         // the parent's POV, so the replace is now meaningless: if the
         // venue eventually emits a Replaced ER the adoption block
         // will pick up a residue-zero new child and orphan it.
-        // Consume the intent here so the registry + margin reserve
-        // are released; the late Replaced ER will then bypass
-        // PendingReplacementRegistry's intercept and the synthetic
-        // child is silently dropped.
+        // ExecutionReportProcessor normally consumes this intent on the
+        // terminal Fill before enqueueing the child signal (#548), closing
+        // the Fill-applied → algo-reactor window in which a Replaced ER
+        // could otherwise hydrate an orphan child. Keep this consume as an
+        // idempotent fallback for legacy/test compositions whose processor
+        // does not own the replacement registry.
         if (_replacements is not null)
         {
             if (_replacements.TryConsumeByOriginal(child.ClOrdId, out var intent, out var ambiguousHeld))

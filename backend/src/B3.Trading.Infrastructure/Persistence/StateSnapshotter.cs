@@ -264,7 +264,8 @@ public sealed class StateSnapshotter
                     AmbiguousMarginHeld: s.AmbiguousMarginHeld,
                     AmbiguousAtUtc: s.AmbiguousAt,
                     NewRemainingNotional: s.NewRemainingNotional,
-                    ReleasedForVenueAbsent: s.ReleasedForVenueAbsent))
+                    ReleasedForVenueAbsent: s.ReleasedForVenueAbsent,
+                    IsPeggedRepeg: s.Intent.IsPeggedRepeg))
                 .ToArray(),
             PendingCancels = _pendingCancels is null
             ? Array.Empty<PendingCancelRaw>()
@@ -532,7 +533,8 @@ public sealed class StateSnapshotter
                 AmbiguousMarginHeld: r.AmbiguousMarginHeld,
                 AmbiguousAtUtc: r.AmbiguousAtUtc,
                 NewRemainingNotional: r.NewRemainingNotional,
-                ReleasedForVenueAbsent: r.ReleasedForVenueAbsent));
+                ReleasedForVenueAbsent: r.ReleasedForVenueAbsent,
+                IsPeggedRepeg: r.IsPeggedRepeg));
         }
         pendingReplacements.Sort(static (a, b) => a.NewClOrdId.CompareTo(b.NewClOrdId));
 
@@ -735,6 +737,27 @@ public sealed class StateSnapshotter
             var entries = new List<PendingReplacementEntrySnapshot>(snap.PendingReplacements.Count);
             foreach (var p in snap.PendingReplacements)
             {
+                var isPeggedRepeg = p.IsPeggedRepeg
+                    || (_outboundLedger?.TryGetByClOrdId(
+                            p.NewClOrdId,
+                            out var restoredMutation) == true
+                        && restoredMutation?.AlgoOriginIdentity is
+                        {
+                            ParentAlgoId: var restoredParentAlgoId,
+                            ActionKind: AlgoOutboundActionKind.Repeg,
+                        }
+                        && restoredParentAlgoId == p.ParentAlgoId);
+                if (isPeggedRepeg
+                    && _orders.TryGet(p.OriginalClOrdId, out var restoredOriginal)
+                    && restoredOriginal?.Status == OrderStatus.Filled)
+                {
+                    // A pre-#548 snapshot can capture the old Fill-applied →
+                    // algo-resolver window. The restored outbound ledger is
+                    // already available here, so suppress that proven repeg
+                    // intent before a late Replaced ER can hydrate it.
+                    continue;
+                }
+
                 var intent = new OrderReplacementIntent(
                     OriginalClOrdId: p.OriginalClOrdId,
                     NewClOrdId: p.NewClOrdId,
@@ -752,7 +775,8 @@ public sealed class StateSnapshotter
                         ? Enum.Parse<TimeInForce>(tif, ignoreCase: true)
                         : (TimeInForce?)null,
                     RequestedStopPrice: p.RequestedStopPrice,
-                    RequestedGoodTillDate: p.RequestedGoodTillDate);
+                    RequestedGoodTillDate: p.RequestedGoodTillDate,
+                    IsPeggedRepeg: isPeggedRepeg);
                 entries.Add(new PendingReplacementEntrySnapshot(
                     Intent: intent,
                     CreatedAt: p.CreatedAtUtc,
@@ -764,6 +788,7 @@ public sealed class StateSnapshotter
             _replacements.Restore(entries);
             foreach (var p in snap.PendingReplacements)
             {
+                if (!_replacements.TryGet(p.NewClOrdId, out _)) continue;
                 // Snapshot restore runs BEFORE WAL replay, but the
                 // ownership map was already restored above from
                 // snap.Ownership. The orig SHOULD be present
@@ -1303,7 +1328,8 @@ public sealed class EventReplayer
                             ? Enum.Parse<TimeInForce>(rrTif, ignoreCase: true)
                             : (TimeInForce?)null,
                         RequestedStopPrice: rr.RequestedStopPrice,
-                        RequestedGoodTillDate: rr.RequestedGoodTillDate);
+                        RequestedGoodTillDate: rr.RequestedGoodTillDate,
+                        IsPeggedRepeg: rr.IsPeggedRepeg);
                     _replacements.TryAdd(intent);
                     _ownership.RegisterReplaceLink(rr.OriginalClOrdId, rr.NewClOrdId);
                 }
@@ -1392,6 +1418,32 @@ public sealed class EventReplayer
                 if (_outboundLedger is not null)
                 {
                     _outboundLedger.Apply(approved);
+                    if (approved.AlgoOriginIdentity is
+                        {
+                            ActionKind: AlgoOutboundActionKind.Repeg,
+                            ParentAlgoId: var approvedParentAlgoId,
+                        }
+                        && approved.OriginalClOrdId is { } approvedOriginalClOrdId
+                        && _orders.TryGet(approvedOriginalClOrdId, out var approvedOriginal)
+                        && approvedOriginal is
+                        {
+                            Status: OrderStatus.Filled,
+                            ParentAlgoId: var originalParentAlgoId,
+                        }
+                        && originalParentAlgoId == approvedParentAlgoId
+                        && _replacements?.TryConsumeByOriginal(
+                            approvedOriginalClOrdId,
+                            out var legacyRepegIntent,
+                            out _) == true
+                        && legacyRepegIntent is not null)
+                    {
+                        // Upgrade compatibility for a pre-#548 WAL ordering
+                        // OrderReplaceRequested → Fill → OutboundApproved.
+                        // The old requested event has no repeg discriminator;
+                        // retire it as soon as the later durable approval
+                        // proves its identity, before a Replaced ER can hydrate.
+                        _replaceMargin?.AbortReplace(legacyRepegIntent.NewClOrdId);
+                    }
                     if (_outboundLedger.TryResolveWatermarkOwner(
                             approved.MutationId, out var approvalOwner)
                         && approvalOwner is not null)

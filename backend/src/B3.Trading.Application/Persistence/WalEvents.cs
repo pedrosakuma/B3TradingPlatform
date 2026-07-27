@@ -300,6 +300,7 @@ public sealed record OrderReplaceRequestedEvent : WalEvent
     public decimal? NewPrice { get; init; }
     public ulong? ParentAlgoId { get; init; }
     public int? AlgoSliceSeq { get; init; }
+    public bool IsPeggedRepeg { get; init; }
 
     // Q1.1 (#253) — optional modify-pipeline overrides for the three
     // Q1.1 fields. Null defaults so deserializing pre-Q1.1 WAL payloads
