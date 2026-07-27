@@ -152,53 +152,28 @@ internal static class SessionRollSpecSupport
         await docker.WaitForMarketDataTradeDrainAsync(submitStartUtc, TradeTimeout);
     }
 
-    internal static async Task<ulong?> StimulateGatewayWriteAsync(
-        OrderCleanupScope cleanup,
+    internal static async Task StimulateGatewayWriteAsync(
         HttpClient http,
         AuthenticationHeaderValue auth,
-        string symbol,
-        decimal price,
-        string side = "Buy")
+        ulong clOrdId)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/orders")
-        {
-            Headers = { Authorization = auth },
-            Content = JsonContent.Create(new
-            {
-                symbol,
-                side,
-                type = "Limit",
-                quantity = 100,
-                price,
-            }),
-        };
+        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{clOrdId}");
+        req.Headers.Authorization = auth;
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         try
         {
-            using var resp = await http.SendAsync(req, cts.Token);
-            if (resp.StatusCode != HttpStatusCode.Accepted)
-                return null;
-
-            var body = await resp.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cts.Token);
-            if (body.TryGetProperty("clOrdId", out var clOrdIdProp) &&
-                ulong.TryParse(clOrdIdProp.GetString(), out var clOrdId))
-            {
-                cleanup.TrackOrder(clOrdId, symbol, side, price, RoundTripQuantity);
-                return clOrdId;
-            }
+            using var response = await http.SendAsync(req, cts.Token);
         }
         catch (OperationCanceledException)
         {
             // Intentional: the point is to force the host to attempt a FIXP
             // write while the venue leg is severed, not to assert on the
-            // HTTP outcome of this probe order.
+            // HTTP outcome of this probe cancel.
         }
         catch (HttpRequestException)
         {
         }
-
-        return null;
     }
 
     internal static async Task<OrderSnapshot> WaitForOrderAsync(
@@ -400,8 +375,8 @@ internal static class SessionRollSpecSupport
 
         internal async Task CaptureBaselineAsync()
         {
-            foreach (var clOrdId in await GetOrderIdsAsync())
-                _baselineOrderIds.Add(clOrdId);
+            foreach (var order in await GetOrdersAsync())
+                _baselineOrderIds.Add(order.ClOrdId);
         }
 
         internal async Task<ulong> SubmitOrderAsync(
@@ -436,10 +411,10 @@ internal static class SessionRollSpecSupport
             var failures = new List<Exception>();
             try
             {
-                foreach (var clOrdId in await GetOrderIdsAsync())
+                foreach (var order in await GetOrdersAsync())
                 {
-                    if (!_baselineOrderIds.Contains(clOrdId))
-                        TrackOrder(clOrdId, "<discovered>", "<unknown>", 0, 0);
+                    if (!_baselineOrderIds.Contains(order.ClOrdId))
+                        _orders.TryAdd(order.ClOrdId, order);
                 }
             }
             catch (Exception ex)
@@ -449,7 +424,7 @@ internal static class SessionRollSpecSupport
                     ex));
             }
 
-            foreach (var order in _orders.Values)
+            foreach (var order in _orders.Values.ToArray())
             {
                 try
                 {
@@ -467,7 +442,7 @@ internal static class SessionRollSpecSupport
             return failures;
         }
 
-        private async Task<IReadOnlyList<ulong>> GetOrderIdsAsync()
+        private async Task<IReadOnlyList<TrackedOrder>> GetOrdersAsync()
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
             request.Headers.Authorization = userAuth;
@@ -478,9 +453,14 @@ internal static class SessionRollSpecSupport
                 return [];
 
             return orders
-                .Select(order => order.GetProperty("clOrdId").GetString())
-                .Where(static clOrdId => ulong.TryParse(clOrdId, out _))
-                .Select(static clOrdId => ulong.Parse(clOrdId!))
+                .Select(static order => new TrackedOrder(
+                    ClOrdId: ulong.Parse(order.GetProperty("clOrdId").GetString()!),
+                    Symbol: order.GetProperty("symbol").GetString()!,
+                    Side: order.GetProperty("side").GetString()!,
+                    Price: order.TryGetProperty("price", out var price) && price.ValueKind == JsonValueKind.Number
+                        ? price.GetDecimal()
+                        : null,
+                    Quantity: order.GetProperty("quantity").GetInt64()))
                 .ToArray();
         }
 
@@ -495,6 +475,21 @@ internal static class SessionRollSpecSupport
                 if (IsTerminal(before))
                     return;
 
+                if (before.IsStale)
+                {
+                    await ClearStaleAsync(order.ClOrdId);
+                    before = await TryGetOrderAsync(http, userAuth, order.ClOrdId)
+                        ?? throw new InvalidOperationException(
+                            $"Tracked order {order.ClOrdId} disappeared locally after clearing stale.");
+                    if (IsTerminal(before))
+                        return;
+                    if (before.IsStale)
+                    {
+                        throw new InvalidOperationException(
+                            $"Tracked order {order.ClOrdId} remained stale after the admin clear.");
+                    }
+                }
+
                 using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{order.ClOrdId}");
                 cancel.Headers.Authorization = userAuth;
                 using var response = await http.SendAsync(cancel);
@@ -502,14 +497,17 @@ internal static class SessionRollSpecSupport
 
                 if (response.StatusCode == HttpStatusCode.NoContent)
                 {
-                    await WaitForOrderAsync(
-                        http,
-                        userAuth,
-                        order.ClOrdId,
-                        IsTerminal,
-                        TradeTimeout,
-                        "cleanup cancel to produce a venue-terminal execution report");
-                    return;
+                    var remaining = deadline - DateTimeOffset.UtcNow;
+                    if (remaining > TimeSpan.Zero &&
+                        await WaitForTerminalAsync(order.ClOrdId, remaining))
+                    {
+                        return;
+                    }
+
+                    var terminalLast = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
+                    throw new TimeoutException(
+                        $"Targeted cleanup cancel for order {order.ClOrdId} did not produce a terminal execution report. " +
+                        $"Last observed={Format(terminalLast)}.");
                 }
 
                 var after = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
@@ -519,7 +517,7 @@ internal static class SessionRollSpecSupport
                 if (response.StatusCode == HttpStatusCode.Conflict &&
                     after?.IsStale == true)
                 {
-                    await ClearStaleForVenueCancelAsync(order.ClOrdId);
+                    await ClearStaleAsync(order.ClOrdId);
                     continue;
                 }
 
@@ -527,6 +525,13 @@ internal static class SessionRollSpecSupport
                 {
                     await Task.Delay(PollInterval);
                     continue;
+                }
+
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    throw new InvalidOperationException(
+                        $"DELETE /api/orders/{order.ClOrdId} returned 404 while local state remained nonterminal; " +
+                        $"venue absence cannot be proven. Last observed={Format(after)}.");
                 }
 
                 throw new InvalidOperationException(
@@ -540,7 +545,7 @@ internal static class SessionRollSpecSupport
                 $"Last observed={Format(last)}.");
         }
 
-        private async Task ClearStaleForVenueCancelAsync(ulong clOrdId)
+        private async Task ClearStaleAsync(ulong clOrdId)
         {
             using var clear = new HttpRequestMessage(
                 HttpMethod.Post,
@@ -554,6 +559,27 @@ internal static class SessionRollSpecSupport
                     $"POST clear-stale for tracked order {clOrdId} expected 204, got " +
                     $"{(int)response.StatusCode}: {body}");
             }
+        }
+
+        private async Task<bool> WaitForTerminalAsync(ulong clOrdId, TimeSpan timeout)
+        {
+            var deadline = DateTimeOffset.UtcNow + timeout;
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                try
+                {
+                    var order = await TryGetOrderAsync(http, userAuth, clOrdId);
+                    if (order is not null && IsTerminal(order))
+                        return true;
+                }
+                catch (HttpRequestException)
+                {
+                }
+
+                await Task.Delay(PollInterval);
+            }
+
+            return false;
         }
 
         private static bool IsTerminal(OrderSnapshot order) =>
@@ -575,7 +601,7 @@ internal static class SessionRollSpecSupport
         ulong ClOrdId,
         string Symbol,
         string Side,
-        decimal Price,
+        decimal? Price,
         long Quantity);
 
 }

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using Microsoft.Extensions.Logging;
@@ -60,6 +61,53 @@ public sealed class B3EntryPointClientGatewayReceiptTests
             name => name.Contains("Accepted", StringComparison.OrdinalIgnoreCase)
                 || name.Contains("Delivered", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("Sent", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ApprovedCancel_WithVenueOrderId_TargetsExactVenueOrder()
+    {
+        Up.CancelOrderRequest? captured = null;
+        await using var gateway = await BuildGatewayAsync(
+            cancel: async (request, callback, ct) =>
+            {
+                captured = request;
+                var frame = Frame(
+                    Up.OutboundOperationKind.Cancel,
+                    request.ClOrdID.Value,
+                    seq: 20);
+                await callback(frame, ct);
+                return new Up.OutboundAttemptReceipt(
+                    frame,
+                    Up.OutboundAttemptStage.TransportWriteCompleted);
+            });
+        var command = new OutboundCancelCommand(
+            OutboundMutationId.New(),
+            FirmId,
+            new OutboundCanonicalCommand
+            {
+                ClOrdId = 102,
+                OriginalClOrdId = 100,
+                SecurityId = 12345,
+                Symbol = "PETR4",
+                Side = "Buy",
+                OrderType = "Limit",
+                Quantity = 100,
+                Price = 30m,
+            },
+            new SensitiveOutboundCommand
+            {
+                EndClientId = "client-a",
+            },
+            VenueOrderId: 9001);
+
+        await gateway.CancelWithReceiptAsync(
+            command,
+            (_, _) => ValueTask.CompletedTask,
+            CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.Equal(100UL, captured.OrigClOrdID.Value);
+        Assert.Equal(9001UL, captured.OrderId);
     }
 
     [Fact]

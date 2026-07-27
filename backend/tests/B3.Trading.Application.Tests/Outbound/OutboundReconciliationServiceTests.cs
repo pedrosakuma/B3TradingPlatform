@@ -203,6 +203,33 @@ public sealed class OutboundReconciliationServiceTests
     }
 
     [Fact]
+    public void VenueAbsentCancel_ReleasesActiveRetryProjectionForTargetedRetry()
+    {
+        var fixture = Fixture.Create(
+            kind: OutboundMutationKind.Cancel,
+            retried: true);
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '4');
+        Assert.True(fixture.PendingCancels.TryGetByCancel(102, out var originalClOrdId));
+        Assert.Equal(99UL, originalClOrdId);
+        Assert.True(fixture.Ownership.TryResolveOrig(102, out _));
+
+        fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "operator",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+
+        Assert.False(fixture.PendingCancels.TryGetByCancel(102, out _));
+        Assert.False(fixture.Ownership.TryResolveOrig(102, out _));
+    }
+
+    [Fact]
     public void ManualAnnotation_NeverReleasesCapacity()
     {
         var fixture = Fixture.Create();
@@ -1269,6 +1296,8 @@ public sealed class OutboundReconciliationServiceTests
         public required RecordingMargin Margin { get; init; }
         public required RecordingReplaceMargin ReplaceMargin { get; init; }
         public required PendingReplacementRegistry Replacements { get; init; }
+        public required PendingCancelRegistry PendingCancels { get; init; }
+        public required OrderOwnershipMap Ownership { get; init; }
         public required OutboundMutationId MutationId { get; init; }
         public required OutboundAttemptId AttemptId { get; init; }
         public required IOutboundCommandProtector Protector { get; init; }
@@ -1276,7 +1305,8 @@ public sealed class OutboundReconciliationServiceTests
 
         public static Fixture Create(
             IAuditLogger? audit = null,
-            OutboundMutationKind kind = OutboundMutationKind.New)
+            OutboundMutationKind kind = OutboundMutationKind.New,
+            bool retried = false)
         {
             var protector = CreateProtector("test");
             var mutationId = new OutboundMutationId(Guid.Parse(
@@ -1337,33 +1367,86 @@ public sealed class OutboundReconciliationServiceTests
                 IntentPreparedAtUtc = T0.AddSeconds(1),
                 TimestampUtc = T0.AddSeconds(1),
             });
-            ledger.Apply(new OutboundFramePreparedEvent
+            if (retried)
             {
-                MutationId = mutationId,
-                AttemptId = attemptId,
-                FirmId = "F1",
-                SessionId = 11,
-                SessionVerId = 2,
-                OutboundSeqNum = 77,
-                EncodedFrameSha256 = new string('f', 64),
-                PreparedAtUtc = T0.AddSeconds(2),
-                TimestampUtc = T0.AddSeconds(2),
-            });
-            ledger.MarkAmbiguous(
-                mutationId,
-                attemptId,
-                OutboundAmbiguityReason.GatewayOutcomeUnknown,
-                T0.AddSeconds(3));
+                ledger.Apply(new OutboundProvenUnsentEvent
+                {
+                    MutationId = mutationId,
+                    AttemptId = attemptId,
+                    Evidence = OutboundProvenUnsentEvidence.TypedPreFrameFailure,
+                    TimestampUtc = T0.AddSeconds(2),
+                });
+                var retryAttemptId = OutboundAttemptId.New();
+                ledger.Apply(new OutboundAttemptIntentPreparedEvent
+                {
+                    MutationId = mutationId,
+                    AttemptId = retryAttemptId,
+                    AttemptNo = 2,
+                    ClOrdId = 102,
+                    ProcessEpochId = new ProcessEpochId(Guid.Parse(
+                        "88888888-7777-6666-5555-444444444444")),
+                    IntentPreparedAtUtc = T0.AddSeconds(3),
+                    TimestampUtc = T0.AddSeconds(3),
+                });
+                ledger.Apply(new OutboundFramePreparedEvent
+                {
+                    MutationId = mutationId,
+                    AttemptId = retryAttemptId,
+                    FirmId = "F1",
+                    SessionId = 11,
+                    SessionVerId = 2,
+                    OutboundSeqNum = 78,
+                    EncodedFrameSha256 = new string('e', 64),
+                    PreparedAtUtc = T0.AddSeconds(4),
+                    TimestampUtc = T0.AddSeconds(4),
+                });
+                ledger.MarkAmbiguous(
+                    mutationId,
+                    retryAttemptId,
+                    OutboundAmbiguityReason.GatewayOutcomeUnknown,
+                    T0.AddSeconds(5));
+            }
+            else
+            {
+                ledger.Apply(new OutboundFramePreparedEvent
+                {
+                    MutationId = mutationId,
+                    AttemptId = attemptId,
+                    FirmId = "F1",
+                    SessionId = 11,
+                    SessionVerId = 2,
+                    OutboundSeqNum = 77,
+                    EncodedFrameSha256 = new string('f', 64),
+                    PreparedAtUtc = T0.AddSeconds(2),
+                    TimestampUtc = T0.AddSeconds(2),
+                });
+                ledger.MarkAmbiguous(
+                    mutationId,
+                    attemptId,
+                    OutboundAmbiguityReason.GatewayOutcomeUnknown,
+                    T0.AddSeconds(3));
+            }
             var margin = new RecordingMargin();
             var replace = new RecordingReplaceMargin();
             var replacements = new PendingReplacementRegistry();
+            var pendingCancels = new PendingCancelRegistry();
+            var ownership = new OrderOwnershipMap();
+            if (kind == OutboundMutationKind.Cancel)
+            {
+                ownership.Register(99, new EndClientId(sensitive.EndClientId));
+                var activeCancelClOrdId = retried ? 102UL : 101UL;
+                ownership.RegisterCancelLink(activeCancelClOrdId, 99);
+                Assert.True(pendingCancels.TryAdd(99, activeCancelClOrdId));
+            }
             var service = new OutboundReconciliationService(
                 ledger,
                 new EventDispatcher(new NullEventStore()),
                 audit ?? new NullAuditLogger(),
                 margin,
                 replace,
-                replacements);
+                replacements,
+                pendingCancels: pendingCancels,
+                ownership: ownership);
             return new Fixture
             {
                 Ledger = ledger,
@@ -1371,6 +1454,8 @@ public sealed class OutboundReconciliationServiceTests
                 Margin = margin,
                 ReplaceMargin = replace,
                 Replacements = replacements,
+                PendingCancels = pendingCancels,
+                Ownership = ownership,
                 MutationId = mutationId,
                 AttemptId = attemptId,
                 Protector = protector,

@@ -4,6 +4,7 @@ using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.UserBots;
 
 namespace B3.Trading.Application.Outbound;
 
@@ -81,6 +82,9 @@ public sealed class OutboundReconciliationService
     private readonly IReplaceMarginCoordinator _replaceMargin;
     private readonly PendingReplacementRegistry _replacements;
     private readonly TimeProvider _clock;
+    private readonly PendingCancelRegistry? _pendingCancels;
+    private readonly OrderOwnershipMap? _ownership;
+    private readonly IUserBotOrderMappingRegistry? _botMappings;
 
     public OutboundReconciliationService(
         OutboundMutationLedger ledger,
@@ -89,7 +93,10 @@ public sealed class OutboundReconciliationService
         IMarginProvider margin,
         IReplaceMarginCoordinator replaceMargin,
         PendingReplacementRegistry replacements,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        PendingCancelRegistry? pendingCancels = null,
+        OrderOwnershipMap? ownership = null,
+        IUserBotOrderMappingRegistry? botMappings = null)
     {
         _ledger = ledger;
         _dispatcher = dispatcher;
@@ -98,6 +105,9 @@ public sealed class OutboundReconciliationService
         _replaceMargin = replaceMargin;
         _replacements = replacements;
         _clock = clock ?? TimeProvider.System;
+        _pendingCancels = pendingCancels;
+        _ownership = ownership;
+        _botMappings = botMappings;
     }
 
     public OutboundOperatorResolutionResult Resolve(
@@ -405,6 +415,8 @@ public sealed class OutboundReconciliationService
                     _ledger.Apply(resolved);
                     if (releaseCapacity)
                         ReleaseCapacity(resolved.MutationId);
+                    if (resolved.Decision == OutboundOperatorDecision.VenueAbsent)
+                        ReleaseVenueAbsentProjection(resolved.MutationId);
                 },
                 cancellationToken);
             if (!outcome.Applied)
@@ -443,6 +455,22 @@ public sealed class OutboundReconciliationService
                 _replaceMargin.AbortReplace(mutation.PrimaryClOrdId);
                 break;
         }
+    }
+
+    private void ReleaseVenueAbsentProjection(OutboundMutationId mutationId)
+    {
+        if (!_ledger.TryGet(mutationId, out var mutation) ||
+            mutation is null ||
+            mutation.Kind != OutboundMutationKind.Cancel)
+        {
+            return;
+        }
+
+        var activeClOrdId = mutation.Attempts.LastOrDefault()?.ClOrdId
+            ?? mutation.PrimaryClOrdId;
+        _pendingCancels?.TryConsumeByCancel(activeClOrdId, out _);
+        _ownership?.RemoveCancelLink(activeClOrdId);
+        _botMappings?.ReapCancel(activeClOrdId);
     }
 
     private void AuditFirst(

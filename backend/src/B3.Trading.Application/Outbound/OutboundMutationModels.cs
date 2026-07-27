@@ -317,7 +317,8 @@ public sealed record OutboundCancelCommand(
     OutboundMutationId MutationId,
     string FirmId,
     OutboundCanonicalCommand Canonical,
-    SensitiveOutboundCommand Sensitive);
+    SensitiveOutboundCommand Sensitive,
+    ulong? VenueOrderId = null);
 
 public sealed record OutboundReplaceCommand(
     OutboundMutationId MutationId,
@@ -353,6 +354,12 @@ public sealed record OutboundApprovalSnapshot
         Array.Empty<OutboundSensitiveFieldRef>();
     public required EncryptedOutboundCommandEnvelope SensitiveCommandEnvelope { get; init; }
     public required string StoredCommandIntegritySha256 { get; init; }
+    /// <summary>
+    /// Venue identity captured from the acknowledged new order for an exact
+    /// cancel after a session roll. Kept outside the canonical command so old
+    /// encrypted approvals retain their original AEAD associated data.
+    /// </summary>
+    public ulong? VenueOrderId { get; init; }
 }
 
 public sealed record OutboundFramePreparedSnapshot

@@ -12,6 +12,29 @@ namespace B3.Trading.Application.Tests.Outbound;
 
 public sealed class CancelReplaceOutboundCoordinatorTests
 {
+    [Theory]
+    [InlineData(OutboundMutationKind.New)]
+    [InlineData(OutboundMutationKind.Replace)]
+    public void CancelApproval_CarriesCurrentOrderVenueOrderId(
+        OutboundMutationKind sourceKind)
+    {
+        var fixture = CreateFixture(
+            new RecordingGateway(),
+            new RecordingReplaceMarginCoordinator());
+        var original = OriginalOrder();
+        SeedAcceptedMutation(fixture, original, sourceKind, venueOrderId: 9001);
+
+        var frozen = fixture.ApprovalFactory.CreateCancel(
+            OutboundMutationId.New(),
+            original,
+            cancelClOrdId: 2001,
+            DateTimeOffset.UtcNow);
+
+        Assert.Equal(
+            9001UL,
+            frozen.Approval.VenueOrderId);
+    }
+
     [Fact]
     public async Task Replace_PostFrameFailure_RemainsAmbiguousAndKeepsMargin()
     {
@@ -485,7 +508,9 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         var clOrdIds = new ClOrdIdPrefixRegistry();
         var orders = new WorkingOrderBook();
         var ownership = new OrderOwnershipMap();
-        var approvalFactory = new CancelReplaceApprovalFactory(protector);
+        var approvalFactory = new CancelReplaceApprovalFactory(
+            protector,
+            outboundLedger: ledger);
         var coordinator = new CancelReplaceOutboundCoordinator(
             ledger,
             new OutboundProcessEpoch(),
@@ -652,6 +677,100 @@ public sealed class CancelReplaceOutboundCoordinatorTests
     {
         Assert.True(fixture.Orders.TryAdd(original));
         fixture.Ownership.Register(original.ClOrdId, original.Owner);
+    }
+
+    private static void SeedAcceptedMutation(
+        Fixture fixture,
+        Order order,
+        OutboundMutationKind kind,
+        ulong venueOrderId)
+    {
+        var at = DateTimeOffset.UtcNow;
+        var mutationId = OutboundMutationId.New();
+        var attemptId = OutboundAttemptId.New();
+        var originalClOrdId = kind == OutboundMutationKind.Replace
+            ? order.ClOrdId - 1
+            : (ulong?)null;
+        var command = new OutboundCanonicalCommand
+        {
+            ClOrdId = order.ClOrdId,
+            OriginalClOrdId = originalClOrdId,
+            SecurityId = order.SecurityId,
+            Symbol = order.Symbol,
+            Side = order.Side.ToString(),
+            OrderType = order.Type.ToString(),
+            Quantity = order.Quantity,
+            Price = order.Price,
+        };
+        var sensitive = new SensitiveOutboundCommand
+        {
+            EndClientId = order.Owner.Value,
+        };
+        var approval = OutboundApprovalFactory.Create(
+            mutationId,
+            order.FirmId,
+            command,
+            sensitive,
+            [OutboundSensitiveFieldRef.EndClientId],
+            fixture.Protector,
+            at);
+        fixture.Ledger.Apply(new OutboundApprovedEvent
+        {
+            MutationId = mutationId,
+            MutationKind = kind,
+            FirmId = order.FirmId,
+            EndClientRef = fixture.Protector.CreateStableEndClientRef(
+                order.FirmId,
+                order.Owner.Value),
+            Origin = OutboundMutationOrigin.Rest,
+            PrimaryClOrdId = order.ClOrdId,
+            OriginalClOrdId = originalClOrdId,
+            RecordedAtUtc = at,
+            Approval = approval,
+            TimestampUtc = at,
+        });
+        fixture.Ledger.Apply(new OutboundAttemptIntentPreparedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            AttemptNo = 1,
+            ClOrdId = order.ClOrdId,
+            ProcessEpochId = ProcessEpochId.New(),
+            IntentPreparedAtUtc = at,
+            TimestampUtc = at,
+        });
+        fixture.Ledger.Apply(new OutboundFramePreparedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            FirmId = order.FirmId,
+            SessionId = 42,
+            SessionVerId = 7,
+            OutboundSeqNum = 1,
+            EncodedFrameSha256 = new string('a', 64),
+            PreparedAtUtc = at,
+            TimestampUtc = at,
+        });
+        fixture.Ledger.ApplyVenueAcknowledgement(
+            new ExecutionReportReceivedEvent
+            {
+                ClOrdId = order.ClOrdId,
+                OrigClOrdId = originalClOrdId ?? 0,
+                ExecKind = kind == OutboundMutationKind.Replace
+                    ? "Replaced"
+                    : "New",
+                LeavesQuantity = order.Quantity,
+                CumulativeQuantity = 0,
+                LastQuantity = 0,
+                LastPrice = 0,
+                Synthetic = false,
+                FirmId = order.FirmId,
+                SessionId = 42,
+                SessionVerId = 7,
+                InboundSeqNum = 1,
+                VenueOrderId = venueOrderId,
+                TimestampUtc = at,
+            });
     }
 
     private static AeadOutboundCommandProtector CreateProtector() =>

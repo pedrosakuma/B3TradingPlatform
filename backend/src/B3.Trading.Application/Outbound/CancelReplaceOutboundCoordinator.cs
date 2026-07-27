@@ -19,6 +19,7 @@ public sealed class CancelReplaceApprovalFactory
     private readonly IVenueAccountResolver? _accounts;
     private readonly IInvestorIdResolver? _investors;
     private readonly IRoutingInstructionResolver? _routing;
+    private readonly OutboundMutationLedger? _outboundLedger;
 
     public CancelReplaceApprovalFactory(
         IOutboundCommandProtector protector,
@@ -26,7 +27,8 @@ public sealed class CancelReplaceApprovalFactory
         ISubAccountWireIdMapper? subAccounts = null,
         IVenueAccountResolver? accounts = null,
         IInvestorIdResolver? investors = null,
-        IRoutingInstructionResolver? routing = null)
+        IRoutingInstructionResolver? routing = null,
+        OutboundMutationLedger? outboundLedger = null)
     {
         _protector = protector;
         _riskOptions = riskOptions;
@@ -34,6 +36,7 @@ public sealed class CancelReplaceApprovalFactory
         _accounts = accounts;
         _investors = investors;
         _routing = routing;
+        _outboundLedger = outboundLedger;
     }
 
     public (string EndClientRef, OutboundApprovalSnapshot Approval) CreateCancel(
@@ -63,7 +66,21 @@ public sealed class CancelReplaceApprovalFactory
             approvedAtUtc,
             marginReservationRef: null,
             marginAmount: null,
-            marginBasis: null);
+            marginBasis: null,
+            venueOrderId: ResolveVenueOrderId(original));
+
+    private ulong? ResolveVenueOrderId(Order original)
+    {
+        if (_outboundLedger?.TryGetByClOrdId(original.ClOrdId, out var mutation) != true ||
+            mutation is null ||
+            mutation.Kind is not (OutboundMutationKind.New or OutboundMutationKind.Replace) ||
+            !string.Equals(mutation.FirmId, original.FirmId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return mutation.Resolution?.VenueOrderId;
+    }
 
     public (string EndClientRef, OutboundApprovalSnapshot Approval) CreateReplace(
         OutboundMutationId mutationId,
@@ -102,7 +119,8 @@ public sealed class CancelReplaceApprovalFactory
             approvedAtUtc,
             marginReservationRef: $"replace:{mutationId}",
             marginAmount: newRemainingNotional,
-            marginBasis: "worst-case-original-plus-replacement-delta");
+            marginBasis: "worst-case-original-plus-replacement-delta",
+            venueOrderId: null);
 
     private (string EndClientRef, OutboundApprovalSnapshot Approval) Create(
         OutboundMutationId mutationId,
@@ -111,7 +129,8 @@ public sealed class CancelReplaceApprovalFactory
         DateTimeOffset approvedAtUtc,
         string? marginReservationRef,
         decimal? marginAmount,
-        string? marginBasis)
+        string? marginBasis,
+        ulong? venueOrderId)
     {
         var stp = _riskOptions is null
             ? SelfTradePreventionMode.None
@@ -141,19 +160,23 @@ public sealed class CancelReplaceApprovalFactory
         if (account is not null) refs.Add(OutboundSensitiveFieldRef.Account);
         if (investor is not null) refs.Add(OutboundSensitiveFieldRef.InvestorId);
         if (tradingSubAccount is not null) refs.Add(OutboundSensitiveFieldRef.TradingSubAccount);
+        var approval = OutboundApprovalFactory.Create(
+            mutationId,
+            original.FirmId,
+            command,
+            sensitive,
+            refs,
+            _protector,
+            approvedAtUtc,
+            marginReservationRef: marginReservationRef,
+            marginAmount: marginAmount,
+            marginBasis: marginBasis) with
+        {
+            VenueOrderId = venueOrderId,
+        };
         return (
             _protector.CreateStableEndClientRef(original.FirmId, original.Owner.Value),
-            OutboundApprovalFactory.Create(
-                mutationId,
-                original.FirmId,
-                command,
-                sensitive,
-                refs,
-                _protector,
-                approvedAtUtc,
-                marginReservationRef: marginReservationRef,
-                marginAmount: marginAmount,
-                marginBasis: marginBasis));
+            approval);
     }
 }
 
@@ -483,7 +506,8 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                         mutation.MutationId,
                         mutation.FirmId,
                         canonical,
-                        sensitive),
+                        sensitive,
+                        mutation.Approval.VenueOrderId),
                     OnFramePrepared,
                     CancellationToken.None).ConfigureAwait(false)
                 : await _gateway.CancelReplaceWithReceiptAsync(
@@ -601,8 +625,16 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             RemoveProjection(mutation.Kind, ActiveClOrdId(mutation));
             return;
         }
+        if (mutation.State == OutboundMutationState.OperatorResolved)
+        {
+            if (mutation.OperatorEvidence.LastOrDefault()?.Decision
+                == OutboundOperatorDecision.VenueAbsent)
+            {
+                RemoveProjection(mutation.Kind, ActiveClOrdId(mutation));
+            }
+            return;
+        }
         if (mutation.State is OutboundMutationState.VenueAcknowledged
-            or OutboundMutationState.OperatorResolved
             or OutboundMutationState.LegacyTerminal)
             return;
         var sensitive = _protector.Decrypt(

@@ -11,25 +11,26 @@ public sealed class SessionRollOrderCleanupTests
     private static readonly AuthenticationHeaderValue AdminAuth = new("Bearer", "admin");
 
     [Fact]
-    public async Task StaleConflict_ClearsOverlay_RetriesCancel_AndWaitsForTerminalEr()
+    public async Task StaleOrder_ClearsOverlay_ThenWaitsForTargetedCancelTerminalEr()
     {
-        var state = new OrderState("Working", IsStale: true);
+        var states = new Dictionary<ulong, OrderState>
+        {
+            [101] = new("Working", IsStale: true),
+        };
         var requests = new List<string>();
-        using var http = CreateHttp((request, _) =>
+        using var http = CreateHttp((request, clOrdId) =>
         {
             requests.Add($"{request.Method} {request.RequestUri!.AbsolutePath}");
             if (request.Method == HttpMethod.Get)
-                return Orders(state);
-            if (request.Method == HttpMethod.Post)
+                return Orders(states);
+            if (request.Method == HttpMethod.Post &&
+                request.RequestUri.AbsolutePath.EndsWith("/clear-stale", StringComparison.Ordinal))
             {
-                state = state with { IsStale = false };
+                states[101] = states[101] with { IsStale = false };
                 return Response(HttpStatusCode.NoContent);
             }
 
-            if (state.IsStale)
-                return Response(HttpStatusCode.Conflict, new { error = "order is marked stale" });
-
-            state = state with { Status = "Cancelled" };
+            states[clOrdId] = states[clOrdId] with { Status = "Cancelled" };
             return Response(HttpStatusCode.NoContent);
         });
 
@@ -43,15 +44,59 @@ public sealed class SessionRollOrderCleanupTests
                 return Task.CompletedTask;
             });
 
-        Assert.Equal("Cancelled", state.Status);
-        Assert.Equal(2, requests.Count(request => request == "DELETE /api/orders/101"));
-        Assert.Contains(
-            "POST /api/admin/firms/FIRM01/orders/101/clear-stale",
-            requests);
+        Assert.Equal("Cancelled", states[101].Status);
+        Assert.Contains("POST /api/admin/firms/FIRM01/orders/101/clear-stale", requests);
+        Assert.Single(requests, request => request == "DELETE /api/orders/101");
+        Assert.DoesNotContain("POST /api/orders", requests);
     }
 
     [Fact]
-    public async Task Cleanup_DiscoversOrdersWhoseSubmissionResponseWasLost()
+    public async Task CompetingBaselineOrder_IsUntouched_AndCleanupEmitsNoPostDrainTrade()
+    {
+        var states = new Dictionary<ulong, OrderState>
+        {
+            [100] = new("Working", IsStale: false, "PETR4", "Buy", 30m),
+        };
+        var deleted = new List<ulong>();
+        var marketDataTradesAfterDrain = 0;
+        var scenarioDrained = false;
+        using var http = CreateHttp((request, clOrdId) =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return Orders(states);
+            if (request.Method == HttpMethod.Post &&
+                request.RequestUri!.AbsolutePath == "/api/orders")
+            {
+                if (scenarioDrained)
+                    marketDataTradesAfterDrain++;
+                return Response(HttpStatusCode.InternalServerError);
+            }
+
+            deleted.Add(clOrdId);
+            states[clOrdId] = states[clOrdId] with { Status = "Cancelled" };
+            return Response(HttpStatusCode.NoContent);
+        });
+
+        await SessionRollSpecSupport.RunWithOrderCleanupAsync(
+            http,
+            UserAuth,
+            AdminAuth,
+            cleanup =>
+            {
+                states[101] = new("Working", IsStale: false, "PETR4", "Buy", 30m);
+                cleanup.TrackOrder(101, "PETR4", "Buy", 30m, 100);
+                scenarioDrained = true;
+                return Task.CompletedTask;
+            });
+
+        Assert.Equal([101UL], deleted);
+        Assert.Equal("Working", states[100].Status);
+        Assert.Equal("Cancelled", states[101].Status);
+        Assert.Equal(0, marketDataTradesAfterDrain);
+    }
+
+    [Fact]
+    public async Task Cleanup_DiscoversOrderWhoseSubmissionResponseWasLost()
     {
         var states = new Dictionary<ulong, OrderState>();
         var deleted = new List<ulong>();
@@ -71,25 +116,23 @@ public sealed class SessionRollOrderCleanupTests
             AdminAuth,
             _ =>
             {
-                states[150] = new OrderState("Working", IsStale: false);
+                states[151] = new("Working", IsStale: false, "VALE3", "Sell", 60m);
                 return Task.CompletedTask;
             });
 
-        Assert.Equal([150UL], deleted);
-        Assert.Equal("Cancelled", states[150].Status);
+        Assert.Equal([151UL], deleted);
+        Assert.Equal("Cancelled", states[151].Status);
     }
 
     [Fact]
-    public async Task PrimaryFailure_IsPreserved_AndCleanupAttemptsEveryTrackedOrder()
+    public async Task VenueAbsentWithoutTerminalEr_ReportsFailure_AndAttemptsEveryTrackedOrder()
     {
-        var primary = new XunitException("primary scenario assertion");
-        var restoration = new InvalidOperationException("recovery restoration fault");
-        var deleted = new List<ulong>();
         var states = new Dictionary<ulong, OrderState>
         {
             [201] = new("Working", IsStale: false),
             [202] = new("Working", IsStale: false),
         };
+        var deleted = new List<ulong>();
         using var http = CreateHttp((request, clOrdId) =>
         {
             if (request.Method == HttpMethod.Get)
@@ -97,8 +140,7 @@ public sealed class SessionRollOrderCleanupTests
 
             deleted.Add(clOrdId);
             if (clOrdId == 201)
-                return Response(HttpStatusCode.InternalServerError, new { error = "cleanup fault" });
-
+                return Response(HttpStatusCode.NotFound);
             states[clOrdId] = states[clOrdId] with { Status = "Cancelled" };
             return Response(HttpStatusCode.NoContent);
         });
@@ -112,24 +154,37 @@ public sealed class SessionRollOrderCleanupTests
                 {
                     cleanup.TrackOrder(201, "PETR4", "Buy", 30m, 100);
                     cleanup.TrackOrder(202, "VALE3", "Sell", 60m, 100);
-                    throw primary;
-                },
-                beforeOrderCleanup: () => Task.FromException(restoration)));
+                    return Task.CompletedTask;
+                }));
 
-        Assert.Same(primary, aggregate.InnerExceptions[0]);
-        Assert.Same(restoration, aggregate.InnerExceptions[1].InnerException);
-        Assert.Contains("tracked Buy order 201", aggregate.InnerExceptions[2].Message);
         Assert.Equal([201UL, 202UL], deleted);
+        Assert.Contains("venue absence cannot be proven", aggregate.ToString());
+        Assert.Equal("Working", states[201].Status);
         Assert.Equal("Cancelled", states[202].Status);
     }
 
     [Fact]
-    public async Task CompletedScenario_WithCleanupFailure_ReportsTheCleanupFailure()
+    public async Task PrimaryFailure_IsPreserved_AndCleanupErrorsRemainObservable()
     {
-        using var http = CreateHttp((request, _) =>
-            request.Method == HttpMethod.Get
-                ? Orders(new OrderState("Working", IsStale: false))
-                : Response(HttpStatusCode.NotFound));
+        var primary = new XunitException("primary scenario assertion");
+        var restoration = new InvalidOperationException("recovery restoration fault");
+        var states = new Dictionary<ulong, OrderState>
+        {
+            [301] = new("Working", IsStale: false),
+            [302] = new("Working", IsStale: false),
+        };
+        var deleted = new List<ulong>();
+        using var http = CreateHttp((request, clOrdId) =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return Orders(states);
+
+            deleted.Add(clOrdId);
+            if (clOrdId == 301)
+                return Response(HttpStatusCode.InternalServerError, new { error = "cleanup fault" });
+            states[clOrdId] = states[clOrdId] with { Status = "Cancelled" };
+            return Response(HttpStatusCode.NoContent);
+        });
 
         var aggregate = await Assert.ThrowsAsync<AggregateException>(() =>
             SessionRollSpecSupport.RunWithOrderCleanupAsync(
@@ -138,12 +193,17 @@ public sealed class SessionRollOrderCleanupTests
                 AdminAuth,
                 cleanup =>
                 {
-                    cleanup.TrackOrder(301, "ITUB4", "Buy", 25m, 100);
-                    return Task.CompletedTask;
-                }));
+                    cleanup.TrackOrder(301, "PETR4", "Buy", 30m, 100);
+                    cleanup.TrackOrder(302, "VALE3", "Sell", 60m, 100);
+                    throw primary;
+                },
+                beforeOrderCleanup: () => Task.FromException(restoration)));
 
-        Assert.Single(aggregate.InnerExceptions);
-        Assert.Contains("venue terminality", aggregate.InnerExceptions[0].InnerException!.Message);
+        Assert.Same(primary, aggregate.InnerExceptions[0]);
+        Assert.Same(restoration, aggregate.InnerExceptions[1].InnerException);
+        Assert.Contains("tracked Buy order 301", aggregate.InnerExceptions[2].Message);
+        Assert.Equal([301UL, 302UL], deleted);
+        Assert.Equal("Cancelled", states[302].Status);
     }
 
     private static HttpClient CreateHttp(
@@ -160,9 +220,6 @@ public sealed class SessionRollOrderCleanupTests
             BaseAddress = new Uri("http://conformance.test"),
         };
 
-    private static HttpResponseMessage Orders(OrderState state) =>
-        Orders(new Dictionary<ulong, OrderState> { [101] = state });
-
     private static HttpResponseMessage Orders(IReadOnlyDictionary<ulong, OrderState> states) =>
         Response(
             HttpStatusCode.OK,
@@ -170,6 +227,10 @@ public sealed class SessionRollOrderCleanupTests
             {
                 clOrdId = entry.Key.ToString(),
                 status = entry.Value.Status,
+                symbol = entry.Value.Symbol,
+                side = entry.Value.Side,
+                quantity = 100,
+                price = entry.Value.Price,
                 cumulativeQuantity = 0,
                 isStale = entry.Value.IsStale,
                 staleReason = entry.Value.IsStale ? "session_rolled:1-2" : null,
@@ -190,5 +251,10 @@ public sealed class SessionRollOrderCleanupTests
             Task.FromResult(respond(request));
     }
 
-    private sealed record OrderState(string Status, bool IsStale);
+    private sealed record OrderState(
+        string Status,
+        bool IsStale,
+        string Symbol = "PETR4",
+        string Side = "Buy",
+        decimal Price = 30m);
 }
