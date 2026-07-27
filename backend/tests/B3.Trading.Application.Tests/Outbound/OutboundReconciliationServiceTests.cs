@@ -208,6 +208,8 @@ public sealed class OutboundReconciliationServiceTests
         var fixture = Fixture.Create(
             kind: OutboundMutationKind.Cancel,
             retried: true);
+        fixture.Drain.BeginDrain(
+            "outbound_cancel_replace_reconciliation_required");
         var evidenceReference = fixture.RegisterEvidence(
             OutboundOperatorEvidenceType.OfficialExtract,
             '4');
@@ -227,6 +229,7 @@ public sealed class OutboundReconciliationServiceTests
 
         Assert.False(fixture.PendingCancels.TryGetByCancel(102, out _));
         Assert.False(fixture.Ownership.TryResolveOrig(102, out _));
+        Assert.False(fixture.Drain.IsDraining);
     }
 
     [Fact]
@@ -1355,6 +1358,7 @@ public sealed class OutboundReconciliationServiceTests
         public required PendingReplacementRegistry Replacements { get; init; }
         public required PendingCancelRegistry PendingCancels { get; init; }
         public required OrderOwnershipMap Ownership { get; init; }
+        public required RecordingDrain Drain { get; init; }
         public required OutboundMutationId MutationId { get; init; }
         public required OutboundAttemptId AttemptId { get; init; }
         public required IOutboundCommandProtector Protector { get; init; }
@@ -1488,6 +1492,7 @@ public sealed class OutboundReconciliationServiceTests
             var replacements = new PendingReplacementRegistry();
             var pendingCancels = new PendingCancelRegistry();
             var ownership = new OrderOwnershipMap();
+            var drain = new RecordingDrain();
             if (kind == OutboundMutationKind.Cancel)
             {
                 ownership.Register(99, new EndClientId(sensitive.EndClientId));
@@ -1503,7 +1508,8 @@ public sealed class OutboundReconciliationServiceTests
                 replace,
                 replacements,
                 pendingCancels: pendingCancels,
-                ownership: ownership);
+                ownership: ownership,
+                drain: drain);
             return new Fixture
             {
                 Ledger = ledger,
@@ -1513,6 +1519,7 @@ public sealed class OutboundReconciliationServiceTests
                 Replacements = replacements,
                 PendingCancels = pendingCancels,
                 Ownership = ownership,
+                Drain = drain,
                 MutationId = mutationId,
                 AttemptId = attemptId,
                 Protector = protector,
@@ -1699,6 +1706,33 @@ public sealed class OutboundReconciliationServiceTests
             Task.FromResult(RiskDecision.Approve);
 
         public void ReleaseReservation(ulong clOrdId) => ReleaseCount++;
+    }
+
+    private sealed class RecordingDrain : Lifecycle.IDrainController
+    {
+        private string? _reason;
+
+        public bool IsDraining { get; private set; }
+
+        public void BeginDrain(string reason)
+        {
+            _reason = reason;
+            IsDraining = true;
+        }
+
+        public bool TryEndOutboundReconciliationDrain()
+        {
+            if (_reason is not (
+                    "outbound_new_order_reconciliation_required" or
+                    "outbound_cancel_replace_reconciliation_required"))
+            {
+                return false;
+            }
+
+            _reason = null;
+            IsDraining = false;
+            return true;
+        }
     }
 
     private static EventReplayer CreateReplayer(

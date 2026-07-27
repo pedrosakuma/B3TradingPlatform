@@ -85,6 +85,7 @@ public sealed class OutboundReconciliationService
     private readonly PendingCancelRegistry? _pendingCancels;
     private readonly OrderOwnershipMap? _ownership;
     private readonly IUserBotOrderMappingRegistry? _botMappings;
+    private readonly Lifecycle.IDrainController? _drain;
 
     public OutboundReconciliationService(
         OutboundMutationLedger ledger,
@@ -96,7 +97,8 @@ public sealed class OutboundReconciliationService
         TimeProvider? clock = null,
         PendingCancelRegistry? pendingCancels = null,
         OrderOwnershipMap? ownership = null,
-        IUserBotOrderMappingRegistry? botMappings = null)
+        IUserBotOrderMappingRegistry? botMappings = null,
+        Lifecycle.IDrainController? drain = null)
     {
         _ledger = ledger;
         _dispatcher = dispatcher;
@@ -108,6 +110,7 @@ public sealed class OutboundReconciliationService
         _pendingCancels = pendingCancels;
         _ownership = ownership;
         _botMappings = botMappings;
+        _drain = drain;
     }
 
     public OutboundOperatorResolutionResult Resolve(
@@ -181,6 +184,7 @@ public sealed class OutboundReconciliationService
             mutation.FirmId,
             releaseCapacity: false,
             cancellationToken);
+        TryResumeAfterResolution(request.Decision);
         var committedMutation = GetScopedMutation(mutationId, callerFirmId);
         var status = request.Decision == OutboundOperatorDecision.LeaveAmbiguous
             ? OutboundOperatorResolutionStatus.Annotated
@@ -327,6 +331,7 @@ public sealed class OutboundReconciliationService
             mutation.FirmId,
             releaseCapacity: true,
             cancellationToken);
+        TryResumeAfterResolution(proposal.Decision);
         var committedMutation = GetScopedMutation(mutationId, callerFirmId);
         return new OutboundOperatorResolutionResult(
             mutationId,
@@ -474,6 +479,15 @@ public sealed class OutboundReconciliationService
             _pendingCancels?.TryConsumeByCancel(cancelClOrdId, out _);
             _ownership?.RemoveCancelLink(cancelClOrdId);
             _botMappings?.ReapCancel(cancelClOrdId);
+        }
+    }
+
+    private void TryResumeAfterResolution(OutboundOperatorDecision decision)
+    {
+        if (decision != OutboundOperatorDecision.LeaveAmbiguous &&
+            _ledger.ReadinessBlockingCount == 0)
+        {
+            _drain?.TryEndOutboundReconciliationDrain();
         }
     }
 

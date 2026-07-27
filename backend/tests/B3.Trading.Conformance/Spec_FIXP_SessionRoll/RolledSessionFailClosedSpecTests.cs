@@ -118,8 +118,7 @@ public sealed class RolledSessionFailClosedSpecTests
                     http,
                     maker,
                     checker,
-                    baseline,
-                    docker);
+                    baseline);
                 using var reopened = await SubmitOrderAsync(
                     http,
                     user,
@@ -133,8 +132,7 @@ public sealed class RolledSessionFailClosedSpecTests
                     http,
                     maker,
                     checker,
-                    baseline,
-                    docker);
+                    baseline);
             });
     }
 
@@ -322,13 +320,11 @@ public sealed class RolledSessionFailClosedSpecTests
         HttpClient http,
         AuthenticationHeaderValue maker,
         AuthenticationHeaderValue checker,
-        IReadOnlySet<string> baseline,
-        DockerVenueTransportController docker)
+        IReadOnlySet<string> baseline)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
         HttpStatusCode? last = null;
         IReadOnlyList<MutationSummary> remaining = [];
-        var restartedAfterResolution = false;
         while (DateTimeOffset.UtcNow < deadline)
         {
             try
@@ -351,14 +347,6 @@ public sealed class RolledSessionFailClosedSpecTests
                 last = response.StatusCode;
                 if (last == HttpStatusCode.OK && remaining.Count == 0)
                     return;
-                if (remaining.Count == 0 &&
-                    last == HttpStatusCode.ServiceUnavailable &&
-                    !restartedAfterResolution)
-                {
-                    await docker.RestartTradingHostAsync(
-                        SessionRollSpecSupport.ReconnectTimeout);
-                    restartedAfterResolution = true;
-                }
             }
             catch (HttpRequestException)
             {

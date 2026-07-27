@@ -239,16 +239,6 @@ internal sealed class DockerVenueTransportController
         return latest;
     }
 
-    public async Task RestartTradingHostAsync(
-        TimeSpan timeout,
-        CancellationToken ct = default)
-    {
-        await EnsureDockerAvailableAsync(ct);
-        var restartStartedUtc = DateTimeOffset.UtcNow;
-        await RunDockerAsync(new[] { "restart", _tradingHostContainer }, ct);
-        await WaitForTradingHostRestartAsync(restartStartedUtc, timeout, ct);
-    }
-
     public async Task KillTradingHostAsync(CancellationToken ct = default)
     {
         await EnsureDockerAvailableAsync(ct);

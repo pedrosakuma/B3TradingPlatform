@@ -19,4 +19,6 @@ public interface IDrainGate
 public interface IDrainController : IDrainGate
 {
     void BeginDrain(string reason);
+
+    bool TryEndOutboundReconciliationDrain() => false;
 }
