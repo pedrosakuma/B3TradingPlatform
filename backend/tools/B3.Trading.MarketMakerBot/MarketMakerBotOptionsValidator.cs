@@ -12,6 +12,8 @@ public sealed class MarketMakerBotOptionsValidator : IValidateOptions<MarketMake
 
         if (options.CancelAckTimeout <= TimeSpan.Zero)
             failures.Add("MarketMaker:CancelAckTimeout must be positive.");
+        if (options.StartupCleanupTimeout <= TimeSpan.Zero)
+            failures.Add("MarketMaker:StartupCleanupTimeout must be positive.");
 
         if (!Enum.IsDefined(options.MarketData.FeedLossPolicy))
         {

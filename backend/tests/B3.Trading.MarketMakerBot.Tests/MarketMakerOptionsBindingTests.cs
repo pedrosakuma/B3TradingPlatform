@@ -55,6 +55,8 @@ public class MarketMakerOptionsBindingTests
         Assert.Equal(FeedLossPolicy.StaticRefPrice, options.MarketData.FeedLossPolicy);
         Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
         Assert.Equal(TimeSpan.FromSeconds(10), options.CancelAckTimeout);
+        Assert.False(options.StartupCleanupEnabled);
+        Assert.Equal(TimeSpan.FromMinutes(5), options.StartupCleanupTimeout);
     }
 
     [Fact]
@@ -81,6 +83,20 @@ public class MarketMakerOptionsBindingTests
         Assert.Equal(TimeSpan.FromSeconds(15), options.CancelAckTimeout);
         Assert.Equal(TimeSpan.FromSeconds(5), options.ReconcileInterval);
         Assert.Equal(TimeSpan.FromMilliseconds(250), options.MinRequoteInterval);
+    }
+
+    [Fact]
+    public void StartupCleanupOverridesBindWithoutChangingCancelAckTimeout()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:StartupCleanupEnabled"] = "true",
+            ["MarketMaker:StartupCleanupTimeout"] = "00:03:00",
+        });
+
+        Assert.True(options.StartupCleanupEnabled);
+        Assert.Equal(TimeSpan.FromMinutes(3), options.StartupCleanupTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(10), options.CancelAckTimeout);
     }
 
     private static MarketMakerBotOptions Bind(Dictionary<string, string?> values)

@@ -142,6 +142,181 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareConnectedSessionAsync_CleanupDisabledDoesNotAssumePre569MatchingBarrier()
+    {
+        var (worker, _, client, _) = CreateWorker();
+        using var cts = new CancellationTokenSource();
+
+        var receive = await worker.PrepareConnectedSessionAsync(client, cts.Token);
+
+        Assert.Empty(client.SubmittedMassActions);
+        Assert.Equal(2, client.SubmittedOrders.Count);
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => receive);
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_CleanupEnabledWaitsForTerminalReportBeforeQuoting()
+    {
+        var (worker, _, client, _) = CreateWorker(
+            out _,
+            options => options.StartupCleanupEnabled = true);
+        using var cts = new CancellationTokenSource();
+        var requestObserved = new TaskCompletionSource<MassActionRequest>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.MassActionHandler = (request, _) =>
+        {
+            requestObserved.TrySetResult(request);
+            return Task.FromResult(MassActionSendResult(request));
+        };
+
+        var startup = worker.PrepareConnectedSessionAsync(client, cts.Token);
+        var request = await requestObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Empty(client.SubmittedOrders);
+        Assert.Equal(MassActionType.CancelOrders, request.ActionType);
+        Assert.Equal(MassActionScope.AllOrdersForATradingSession, request.Scope);
+
+        client.Publish(MassActionEvent(request, MassActionResponse.Accepted));
+        var receive = await startup;
+
+        Assert.Equal(2, client.SubmittedOrders.Count);
+        var operations = client.Operations.ToArray();
+        Assert.True(Array.IndexOf(operations, "events-started") < Array.IndexOf(operations, "mass-action"));
+        Assert.True(Array.IndexOf(operations, "event:MassActionExecuted") < Array.IndexOf(operations, "submit"));
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => receive);
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_TerminalReportThenEventStreamCompletionFailsClosed()
+    {
+        var (worker, _, client, _) = CreateWorker(
+            out _,
+            options => options.StartupCleanupEnabled = true);
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (request, _) =>
+        {
+            client.Publish(MassActionEvent(request, MassActionResponse.Accepted));
+            client.CompleteEvents();
+            return Task.FromResult(MassActionSendResult(request));
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => worker.PrepareConnectedSessionAsync(client, cts.Token));
+
+        Assert.Contains("event stream ended", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(client.SubmittedOrders);
+        cts.Cancel();
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_EventStreamCompletionDuringQuoteCancelsPriming()
+    {
+        var (worker, _, client, _) = CreateWorker(
+            out _,
+            options => options.StartupCleanupEnabled = true);
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (request, _) =>
+        {
+            client.Publish(MassActionEvent(request, MassActionResponse.Accepted));
+            return Task.FromResult(MassActionSendResult(request));
+        };
+        var submitCancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.SubmitHandler = async (_, operationToken) =>
+        {
+            client.CompleteEvents();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, operationToken);
+            }
+            catch (OperationCanceledException) when (operationToken.IsCancellationRequested)
+            {
+                submitCancelled.TrySetResult(true);
+                throw;
+            }
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => worker.PrepareConnectedSessionAsync(client, cts.Token));
+
+        Assert.Contains("event stream ended", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(await submitCancelled.Task.WaitAsync(TimeSpan.FromSeconds(1)));
+        Assert.Single(client.SubmittedOrders);
+        cts.Cancel();
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_RejectedCleanupFailsClosed()
+    {
+        var (worker, _, client, _) = CreateWorker(
+            out _,
+            options => options.StartupCleanupEnabled = true);
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (request, _) =>
+        {
+            client.Publish(MassActionEvent(
+                request,
+                MassActionResponse.Rejected,
+                MassActionRejectReason.Other));
+            return Task.FromResult(MassActionSendResult(request));
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => worker.PrepareConnectedSessionAsync(client, cts.Token));
+
+        Assert.Contains("rejected", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(client.SubmittedOrders);
+        cts.Cancel();
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_CleanupRequestFailureFailsClosed()
+    {
+        var (worker, _, client, _) = CreateWorker(
+            out _,
+            options => options.StartupCleanupEnabled = true);
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (_, _) =>
+            Task.FromException<MassActionReport>(new IOException("write failed"));
+
+        var error = await Assert.ThrowsAsync<IOException>(
+            () => worker.PrepareConnectedSessionAsync(client, cts.Token));
+
+        Assert.Equal("write failed", error.Message);
+        Assert.Empty(client.SubmittedOrders);
+        cts.Cancel();
+    }
+
+    [Fact]
+    public async Task PrepareConnectedSessionAsync_TerminalReportTimeoutFailsClosed()
+    {
+        var (worker, _, client, _) = CreateWorker(
+            out _,
+            options =>
+            {
+                options.StartupCleanupEnabled = true;
+                options.StartupCleanupTimeout = TimeSpan.FromMilliseconds(100);
+            });
+        using var cts = new CancellationTokenSource();
+        client.MassActionHandler = (request, _) =>
+            Task.FromResult(MassActionSendResult(request));
+
+        var startup = worker.PrepareConnectedSessionAsync(client, cts.Token);
+        Assert.Single(client.SubmittedMassActions);
+        Assert.Empty(client.SubmittedOrders);
+
+        var error = await Assert.ThrowsAsync<TimeoutException>(() => startup);
+
+        Assert.Contains("Terminal startup mass-action report", error.Message, StringComparison.Ordinal);
+        Assert.Empty(client.SubmittedOrders);
+        cts.Cancel();
+    }
+
+    [Fact]
     public async Task QuoteSideAsync_SubmitsOneRestingOrderPerSide()
     {
         var (worker, tracker, client, instrument) = CreateWorker();
@@ -2130,6 +2305,30 @@ public class MarketMakerWorkerTests : IDisposable
             MaxReferenceAge = TimeSpan.FromSeconds(10),
         };
     }
+
+    private static MassActionReport MassActionSendResult(MassActionRequest request) => new()
+    {
+        ClOrdID = request.ClOrdID,
+        ActionType = request.ActionType,
+        Scope = request.Scope,
+        Response = MassActionResponse.Accepted,
+        TotalAffectedOrders = 0,
+    };
+
+    private static MassActionExecuted MassActionEvent(
+        MassActionRequest request,
+        MassActionResponse response,
+        MassActionRejectReason? rejectReason = null) => new()
+        {
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+            ClOrdID = request.ClOrdID,
+            MassActionReportId = 1,
+            ActionType = request.ActionType,
+            Scope = request.Scope,
+            Response = response,
+            RejectReason = rejectReason,
+        };
 
     private static Task AckCancelAsync(
         MarketMakerWorker worker,
