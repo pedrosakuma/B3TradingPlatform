@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using B3.Trading.Conformance.Infrastructure;
 
@@ -15,13 +16,65 @@ internal static class SessionRollSpecSupport
     internal static readonly TimeSpan ReconnectTimeout = TimeSpan.FromSeconds(30);
     internal static readonly TimeSpan TradeTimeout = TimeSpan.FromSeconds(30);
 
+    internal static async Task RunWithOrderCleanupAsync(
+        HttpClient http,
+        AuthenticationHeaderValue userAuth,
+        AuthenticationHeaderValue adminAuth,
+        Func<OrderCleanupScope, Task> scenario,
+        Func<Task>? beforeOrderCleanup = null)
+    {
+        var cleanup = new OrderCleanupScope(http, userAuth, adminAuth);
+        await cleanup.CaptureBaselineAsync();
+        Exception? scenarioFailure = null;
+        try
+        {
+            await scenario(cleanup);
+        }
+        catch (Exception ex)
+        {
+            scenarioFailure = ex;
+        }
+
+        var cleanupFailures = new List<Exception>();
+        if (beforeOrderCleanup is not null)
+        {
+            try
+            {
+                await beforeOrderCleanup();
+            }
+            catch (Exception ex)
+            {
+                cleanupFailures.Add(new InvalidOperationException(
+                    "Failed to restore the session-roll scenario before order cleanup.",
+                    ex));
+            }
+        }
+
+        cleanupFailures.AddRange(await cleanup.CleanupAsync());
+        if (scenarioFailure is null)
+        {
+            if (cleanupFailures.Count > 0)
+                throw new AggregateException("Session-roll order cleanup failed.", cleanupFailures);
+            return;
+        }
+
+        if (cleanupFailures.Count > 0)
+        {
+            throw new AggregateException(
+                "The session-roll scenario failed and one or more tracked orders could not be terminalized.",
+                new[] { scenarioFailure }.Concat(cleanupFailures));
+        }
+
+        ExceptionDispatchInfo.Capture(scenarioFailure).Throw();
+    }
+
     internal static decimal PriceNearLowerCollar(decimal referencePrice)
         => decimal.Round(referencePrice * 0.92m, 2, MidpointRounding.AwayFromZero);
 
     internal static decimal PriceNearUpperCollar(decimal referencePrice)
         => decimal.Round(referencePrice * 1.08m, 2, MidpointRounding.AwayFromZero);
 
-    internal static async Task<ulong> SubmitOrderAsync(
+    private static async Task<ulong> SubmitOrderAsync(
         HttpClient http,
         AuthenticationHeaderValue auth,
         string symbol,
@@ -57,6 +110,7 @@ internal static class SessionRollSpecSupport
     }
 
     internal static async Task AssertPostRecoveryTradingRoundTripAsync(
+        OrderCleanupScope cleanup,
         HttpClient http,
         AuthenticationHeaderValue auth,
         DockerVenueTransportController docker,
@@ -65,14 +119,14 @@ internal static class SessionRollSpecSupport
         long quantity)
     {
         var submitStartUtc = DateTimeOffset.UtcNow;
-        var buyClOrdId = await SubmitOrderAsync(http, auth, symbol, price, side: "Buy", quantity: quantity);
+        var buyClOrdId = await cleanup.SubmitOrderAsync(symbol, price, side: "Buy", quantity: quantity);
         await WaitForOrderAsync(http, auth, buyClOrdId, order =>
                 (order.Status == "Working" && order.CumulativeQuantity == 0) ||
                 (order.Status == "Filled" && order.CumulativeQuantity == quantity),
             OrderTimeout,
             "post-recovery buy order to reach Working (or immediately Filled against a surviving opposite book)");
 
-        var sellClOrdId = await SubmitOrderAsync(http, auth, symbol, price, side: "Sell", quantity: quantity);
+        var sellClOrdId = await cleanup.SubmitOrderAsync(symbol, price, side: "Sell", quantity: quantity);
 
         // GET /api/orders is the full per-client history projection, not an
         // "open orders only" book view. Contract-level "disappears from the
@@ -99,6 +153,7 @@ internal static class SessionRollSpecSupport
     }
 
     internal static async Task<ulong?> StimulateGatewayWriteAsync(
+        OrderCleanupScope cleanup,
         HttpClient http,
         AuthenticationHeaderValue auth,
         string symbol,
@@ -129,6 +184,7 @@ internal static class SessionRollSpecSupport
             if (body.TryGetProperty("clOrdId", out var clOrdIdProp) &&
                 ulong.TryParse(clOrdIdProp.GetString(), out var clOrdId))
             {
+                cleanup.TrackOrder(clOrdId, symbol, side, price, RoundTripQuantity);
                 return clOrdId;
             }
         }
@@ -143,24 +199,6 @@ internal static class SessionRollSpecSupport
         }
 
         return null;
-    }
-
-    internal static async Task CancelOrderIfPresentAsync(
-        HttpClient http,
-        AuthenticationHeaderValue auth,
-        ulong clOrdId)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{clOrdId}");
-        req.Headers.Authorization = auth;
-        var resp = await http.SendAsync(req);
-        if (resp.StatusCode == HttpStatusCode.NotFound ||
-            resp.StatusCode == HttpStatusCode.Conflict)
-        {
-            return;
-        }
-
-        Assert.True(resp.StatusCode == HttpStatusCode.NoContent,
-            $"DELETE /api/orders/{clOrdId} expected 204/404/409, got {(int)resp.StatusCode}: {await resp.Content.ReadAsStringAsync()}");
     }
 
     internal static async Task<OrderSnapshot> WaitForOrderAsync(
@@ -352,6 +390,175 @@ internal static class SessionRollSpecSupport
         ? "<missing>"
         : $"{{ sessionState={firm.SessionState ?? "null"}, sessionVerId={firm.SessionVerId}, reconnecting={firm.Reconnecting} }}";
 
+    internal sealed class OrderCleanupScope(
+        HttpClient http,
+        AuthenticationHeaderValue userAuth,
+        AuthenticationHeaderValue adminAuth)
+    {
+        private readonly Dictionary<ulong, TrackedOrder> _orders = [];
+        private readonly HashSet<ulong> _baselineOrderIds = [];
+
+        internal async Task CaptureBaselineAsync()
+        {
+            foreach (var clOrdId in await GetOrderIdsAsync())
+                _baselineOrderIds.Add(clOrdId);
+        }
+
+        internal async Task<ulong> SubmitOrderAsync(
+            string symbol,
+            decimal price,
+            string side = "Buy",
+            long quantity = RoundTripQuantity)
+        {
+            var clOrdId = await SessionRollSpecSupport.SubmitOrderAsync(
+                http,
+                userAuth,
+                symbol,
+                price,
+                side,
+                quantity);
+            TrackOrder(clOrdId, symbol, side, price, quantity);
+            return clOrdId;
+        }
+
+        internal void TrackOrder(
+            ulong clOrdId,
+            string symbol,
+            string side,
+            decimal price,
+            long quantity)
+        {
+            _orders.TryAdd(clOrdId, new TrackedOrder(clOrdId, symbol, side, price, quantity));
+        }
+
+        internal async Task<IReadOnlyList<Exception>> CleanupAsync()
+        {
+            var failures = new List<Exception>();
+            try
+            {
+                foreach (var clOrdId in await GetOrderIdsAsync())
+                {
+                    if (!_baselineOrderIds.Contains(clOrdId))
+                        TrackOrder(clOrdId, "<discovered>", "<unknown>", 0, 0);
+                }
+            }
+            catch (Exception ex)
+            {
+                failures.Add(new InvalidOperationException(
+                    "Failed to discover unregistered orders created during the session-roll scenario.",
+                    ex));
+            }
+
+            foreach (var order in _orders.Values)
+            {
+                try
+                {
+                    await TerminalizeAsync(order);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(new InvalidOperationException(
+                        $"Failed to terminalize tracked {order.Side} order {order.ClOrdId} " +
+                        $"{order.Symbol} {order.Quantity}@{order.Price}.",
+                        ex));
+                }
+            }
+
+            return failures;
+        }
+
+        private async Task<IReadOnlyList<ulong>> GetOrderIdsAsync()
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/orders");
+            request.Headers.Authorization = userAuth;
+            using var response = await http.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+            var orders = await response.Content.ReadFromJsonAsync<JsonElement[]>();
+            if (orders is null)
+                return [];
+
+            return orders
+                .Select(order => order.GetProperty("clOrdId").GetString())
+                .Where(static clOrdId => ulong.TryParse(clOrdId, out _))
+                .Select(static clOrdId => ulong.Parse(clOrdId!))
+                .ToArray();
+        }
+
+        private async Task TerminalizeAsync(TrackedOrder order)
+        {
+            var deadline = DateTimeOffset.UtcNow + TradeTimeout;
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                var before = await TryGetOrderAsync(http, userAuth, order.ClOrdId)
+                    ?? throw new InvalidOperationException(
+                        $"Tracked order {order.ClOrdId} is absent from the client order history; venue terminality cannot be proven.");
+                if (IsTerminal(before))
+                    return;
+
+                using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{order.ClOrdId}");
+                cancel.Headers.Authorization = userAuth;
+                using var response = await http.SendAsync(cancel);
+                var body = await response.Content.ReadAsStringAsync();
+
+                if (response.StatusCode == HttpStatusCode.NoContent)
+                {
+                    await WaitForOrderAsync(
+                        http,
+                        userAuth,
+                        order.ClOrdId,
+                        IsTerminal,
+                        TradeTimeout,
+                        "cleanup cancel to produce a venue-terminal execution report");
+                    return;
+                }
+
+                var after = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
+                if (after is not null && IsTerminal(after))
+                    return;
+
+                if (response.StatusCode == HttpStatusCode.Conflict &&
+                    after?.IsStale == true)
+                {
+                    await ClearStaleForVenueCancelAsync(order.ClOrdId);
+                    continue;
+                }
+
+                if (response.StatusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable)
+                {
+                    await Task.Delay(PollInterval);
+                    continue;
+                }
+
+                throw new InvalidOperationException(
+                    $"DELETE /api/orders/{order.ClOrdId} did not establish terminality: " +
+                    $"{(int)response.StatusCode} {body}; last observed={Format(after)}.");
+            }
+
+            var last = await TryGetOrderAsync(http, userAuth, order.ClOrdId);
+            throw new TimeoutException(
+                $"Timed out after {TradeTimeout.TotalSeconds:F0}s terminalizing tracked order {order.ClOrdId}. " +
+                $"Last observed={Format(last)}.");
+        }
+
+        private async Task ClearStaleForVenueCancelAsync(ulong clOrdId)
+        {
+            using var clear = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"/api/admin/firms/{FirmId}/orders/{clOrdId}/clear-stale");
+            clear.Headers.Authorization = adminAuth;
+            using var response = await http.SendAsync(clear);
+            var body = await response.Content.ReadAsStringAsync();
+            if (response.StatusCode != HttpStatusCode.NoContent)
+            {
+                throw new InvalidOperationException(
+                    $"POST clear-stale for tracked order {clOrdId} expected 204, got " +
+                    $"{(int)response.StatusCode}: {body}");
+            }
+        }
+
+        private static bool IsTerminal(OrderSnapshot order) =>
+            order.Status is "Filled" or "Cancelled" or "Rejected" or "Replaced";
+    }
 
     internal sealed record OrderSnapshot(
         string Status,
@@ -363,5 +570,12 @@ internal static class SessionRollSpecSupport
         string? SessionState,
         uint SessionVerId,
         bool Reconnecting);
+
+    private sealed record TrackedOrder(
+        ulong ClOrdId,
+        string Symbol,
+        string Side,
+        decimal Price,
+        long Quantity);
 
 }

@@ -44,83 +44,94 @@ public sealed class RolledSessionFailClosedSpecTests
                 maker,
                 "PETR4"));
 
-        await using (var paused = await docker.PauseMatchingAsync())
-        {
-            var submissions = Enumerable.Range(0, 4)
-                .Select(index => SubmitFaultWindowProbeAsync(
+        await SessionRollSpecSupport.RunWithOrderCleanupAsync(
+            http,
+            user,
+            maker,
+            async _cleanup =>
+            {
+                await using (var paused = await docker.PauseMatchingAsync())
+                {
+                    var submissions = Enumerable.Range(0, 4)
+                        .Select(index => SubmitFaultWindowProbeAsync(
+                            http,
+                            user,
+                            price,
+                            runId,
+                            index))
+                        .ToArray();
+                    await Task.WhenAll(submissions);
+                    _ = await WaitForNewAttemptedMutationsAsync(
+                        http,
+                        maker,
+                        baseline);
+                    var crashStartedUtc = DateTimeOffset.UtcNow;
+                    await docker.KillTradingHostAsync();
+                    await docker.WaitForTradingHostNotRunningAsync(
+                        TimeSpan.FromSeconds(10));
+                    await paused.RestartAsync(TimeSpan.FromSeconds(30));
+                    await docker.StartTradingHostAsync();
+                    await docker.WaitForTradingHostRestartAsync(
+                        crashStartedUtc,
+                        TimeSpan.FromSeconds(30));
+                }
+
+                _ = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(
+                    http,
+                    maker,
+                    priorVerId: before.SessionVerId,
+                    expectAdvance: true);
+                var unresolved = await WaitForNewUnresolvedMutationsAsync(
+                    http,
+                    maker,
+                    baseline);
+
+                Assert.Contains(
+                    unresolved,
+                    mutation => string.Equals(
+                        mutation.State,
+                        "ambiguous",
+                        StringComparison.OrdinalIgnoreCase));
+                Assert.Equal(
+                    HttpStatusCode.ServiceUnavailable,
+                    (await http.GetAsync("/ready")).StatusCode);
+                using var blocked = await SubmitOrderAsync(
                     http,
                     user,
                     price,
-                    runId,
-                    index))
-                .ToArray();
-            await Task.WhenAll(submissions);
-            _ = await WaitForNewAttemptedMutationsAsync(
-                http,
-                maker,
-                baseline);
-            var crashStartedUtc = DateTimeOffset.UtcNow;
-            await docker.KillTradingHostAsync();
-            await docker.WaitForTradingHostNotRunningAsync(
-                TimeSpan.FromSeconds(10));
-            await paused.RestartAsync(TimeSpan.FromSeconds(30));
-            await docker.StartTradingHostAsync();
-            await docker.WaitForTradingHostRestartAsync(
-                crashStartedUtc,
-                TimeSpan.FromSeconds(30));
-        }
+                    $"{runId}-blocked-after-roll");
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, blocked.StatusCode);
 
-        _ = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(
-            http,
-            maker,
-            priorVerId: before.SessionVerId,
-            expectAdvance: true);
-        var unresolved = await WaitForNewUnresolvedMutationsAsync(
-            http,
-            maker,
-            baseline);
+                var blocking = (await GetMutationsAsync(http, maker))
+                    .Where(mutation => mutation.RequiresReconciliation)
+                    .ToArray();
+                Assert.All(
+                    unresolved,
+                    mutation => Assert.Contains(
+                        blocking,
+                        candidate => candidate.MutationId == mutation.MutationId));
+                foreach (var mutation in blocking)
+                    await ResolveVenueAbsentAsync(http, maker, checker, mutation.MutationId);
 
-        Assert.Contains(
-            unresolved,
-            mutation => string.Equals(
-                mutation.State,
-                "ambiguous",
-                StringComparison.OrdinalIgnoreCase));
-        Assert.Equal(
-            HttpStatusCode.ServiceUnavailable,
-            (await http.GetAsync("/ready")).StatusCode);
-        using var blocked = await SubmitOrderAsync(
-            http,
-            user,
-            price,
-            $"{runId}-blocked-after-roll");
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, blocked.StatusCode);
-
-        var blocking = (await GetMutationsAsync(http, maker))
-            .Where(mutation => mutation.RequiresReconciliation)
-            .ToArray();
-        Assert.All(
-            unresolved,
-            mutation => Assert.Contains(
-                blocking,
-                candidate => candidate.MutationId == mutation.MutationId));
-        foreach (var mutation in blocking)
-            await ResolveVenueAbsentAsync(http, maker, checker, mutation.MutationId);
-
-        await WaitForReadyAsync(http);
-        using var reopened = await SubmitOrderAsync(
-            http,
-            user,
-            price,
-            $"{runId}-reopened-after-authoritative-resolution");
-        Assert.Equal(HttpStatusCode.Accepted, reopened.StatusCode);
-        var reopenedPayload = await reopened.Content.ReadFromJsonAsync<JsonElement>();
-        var reopenedClOrdId = ulong.Parse(
-            reopenedPayload.GetProperty("clOrdId").GetString()!);
-        await SessionRollSpecSupport.CancelOrderIfPresentAsync(
-            http,
-            user,
-            reopenedClOrdId);
+                await WaitForReadyAsync(http);
+                using var reopened = await SubmitOrderAsync(
+                    http,
+                    user,
+                    price,
+                    $"{runId}-reopened-after-authoritative-resolution");
+                Assert.Equal(HttpStatusCode.Accepted, reopened.StatusCode);
+            },
+            beforeOrderCleanup: async () =>
+            {
+                var unresolvedScenarioMutations = (await GetMutationsAsync(http, maker))
+                    .Where(mutation =>
+                        !baseline.Contains(mutation.MutationId)
+                        && mutation.RequiresReconciliation)
+                    .ToArray();
+                foreach (var mutation in unresolvedScenarioMutations)
+                    await ResolveVenueAbsentAsync(http, maker, checker, mutation.MutationId);
+                await WaitForReadyAsync(http);
+            });
     }
 
     private static async Task SubmitFaultWindowProbeAsync(
