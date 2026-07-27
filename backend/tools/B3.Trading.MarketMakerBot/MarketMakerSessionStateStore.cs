@@ -14,16 +14,22 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
 {
     private readonly FileSessionStateStore _inner;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly Dictionary<string, ulong> _retiredOrders = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ulong> _currentProcessRetirements = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _retiredOrders = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _currentProcessRetirements = new(StringComparer.Ordinal);
     private readonly string _retirementsPath;
+    private readonly string _inboundFencePath;
     private readonly string _reconciliationPath;
     private bool _retirementsLoaded;
+    private bool _inboundFenceLoaded;
+    private uint _inboundFenceSessionId;
+    private uint _inboundFenceSessionVerId;
+    private ulong _contiguousInboundSeqNum;
 
     public MarketMakerSessionStateStore(string directory)
     {
         _inner = new FileSessionStateStore(directory);
         _retirementsPath = Path.Combine(directory, "retired-orders.txt");
+        _inboundFencePath = Path.Combine(directory, "contiguous-inbound.txt");
         _reconciliationPath = Path.Combine(directory, "reconciliation-required.json");
     }
 
@@ -33,6 +39,7 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         try
         {
             await EnsureRetirementsLoadedAsync(ct);
+            await EnsureInboundFenceLoadedAsync(ct);
             return FilterRetired(await _inner.LoadAsync(ct));
         }
         finally
@@ -47,8 +54,16 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         try
         {
             await EnsureRetirementsLoadedAsync(ct);
-            await _inner.SaveAsync(FilterRetired(snapshot)!, ct);
+            await EnsureInboundFenceLoadedAsync(ct);
+            var filtered = FilterRetired(snapshot)!;
+            await _inner.SaveAsync(filtered, ct);
             await CompactPriorProcessRetirementsAsync(ct);
+            if (_inboundFenceSessionVerId != 0 &&
+                (_inboundFenceSessionId != filtered.SessionId ||
+                 _inboundFenceSessionVerId != filtered.SessionVerId))
+            {
+                ClearInboundFence();
+            }
         }
         finally
         {
@@ -62,7 +77,7 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         try
         {
             if (delta is OrderClosedDelta closed)
-                await PersistRetirementAsync(closed.ClOrdID.ToString(), inboundSeqNum: 0, ct);
+                await PersistRetirementAsync(closed.ClOrdID.ToString(), ct);
             await _inner.AppendDeltaAsync(delta, ct);
         }
         finally
@@ -77,6 +92,7 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         try
         {
             await EnsureRetirementsLoadedAsync(ct);
+            await EnsureInboundFenceLoadedAsync(ct);
             return FilterRetired(await _inner.ReplayAsync(ct));
         }
         finally
@@ -91,11 +107,18 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         try
         {
             await EnsureRetirementsLoadedAsync(ct);
+            await EnsureInboundFenceLoadedAsync(ct);
             var snapshot = FilterRetired(await _inner.ReplayAsync(ct));
             if (snapshot is not null)
             {
                 await _inner.SaveAsync(snapshot, ct);
                 await CompactPriorProcessRetirementsAsync(ct);
+                if (_inboundFenceSessionVerId != 0 &&
+                    (_inboundFenceSessionId != snapshot.SessionId ||
+                     _inboundFenceSessionVerId != snapshot.SessionVerId))
+                {
+                    ClearInboundFence();
+                }
             }
         }
         finally
@@ -104,16 +127,50 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
         }
     }
 
-    public async ValueTask RetireOrderAsync(
-        ulong clOrdId,
-        ulong inboundSeqNum,
-        CancellationToken ct = default)
+    public async ValueTask RetireOrderAsync(ulong clOrdId, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
         try
         {
-            await PersistRetirementAsync(clOrdId.ToString(), inboundSeqNum, ct);
+            await PersistRetirementAsync(clOrdId.ToString(), ct);
             await _inner.AppendDeltaAsync(new OrderClosedDelta(new ClOrdID(clOrdId)), ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async ValueTask RecordContiguousInboundAsync(
+        uint sessionId,
+        uint sessionVerId,
+        ulong contiguousSeqNum,
+        CancellationToken ct = default)
+    {
+        if (sessionId == 0 || sessionVerId == 0 || contiguousSeqNum == 0)
+            return;
+
+        await _gate.WaitAsync(ct);
+        try
+        {
+            await EnsureInboundFenceLoadedAsync(ct);
+            if (_inboundFenceSessionId != sessionId ||
+                _inboundFenceSessionVerId != sessionVerId)
+            {
+                _inboundFenceSessionId = sessionId;
+                _inboundFenceSessionVerId = sessionVerId;
+                _contiguousInboundSeqNum = 0;
+            }
+            if (contiguousSeqNum <= _contiguousInboundSeqNum)
+                return;
+
+            var temporaryPath = _inboundFencePath + ".tmp";
+            await File.WriteAllTextAsync(
+                temporaryPath,
+                $"{sessionId}|{sessionVerId}|{contiguousSeqNum}",
+                ct);
+            File.Move(temporaryPath, _inboundFencePath, overwrite: true);
+            _contiguousInboundSeqNum = contiguousSeqNum;
         }
         finally
         {
@@ -173,46 +230,29 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
                 continue;
             var separator = line.IndexOf('|');
             var clOrdId = separator < 0 ? line : line[..separator];
-            var inboundSeqNum = separator < 0 ||
-                !ulong.TryParse(line[(separator + 1)..], out var parsedSeqNum)
-                    ? 0
-                    : parsedSeqNum;
-            AddOrAdvance(_retiredOrders, clOrdId, inboundSeqNum);
+            _retiredOrders.Add(clOrdId);
         }
     }
 
-    private async Task PersistRetirementAsync(
-        string clOrdId,
-        ulong inboundSeqNum,
-        CancellationToken ct)
+    private async Task PersistRetirementAsync(string clOrdId, CancellationToken ct)
     {
         await EnsureRetirementsLoadedAsync(ct);
-        AddOrAdvance(_retiredOrders, clOrdId, inboundSeqNum);
-        if (_currentProcessRetirements.TryGetValue(clOrdId, out var currentSeqNum) &&
-            currentSeqNum >= inboundSeqNum)
-        {
+        _retiredOrders.Add(clOrdId);
+        if (!_currentProcessRetirements.Add(clOrdId))
             return;
-        }
-        _currentProcessRetirements[clOrdId] = inboundSeqNum;
         await File.AppendAllTextAsync(
             _retirementsPath,
-            $"{clOrdId}|{inboundSeqNum}{Environment.NewLine}",
+            clOrdId + Environment.NewLine,
             ct);
     }
 
     private async Task CompactPriorProcessRetirementsAsync(CancellationToken ct)
     {
-        if (_retiredOrders.Count == _currentProcessRetirements.Count &&
-            _retiredOrders.All(pair =>
-                _currentProcessRetirements.TryGetValue(pair.Key, out var seqNum) &&
-                seqNum == pair.Value))
-        {
+        if (_retiredOrders.SetEquals(_currentProcessRetirements))
             return;
-        }
 
         _retiredOrders.Clear();
-        foreach (var pair in _currentProcessRetirements)
-            _retiredOrders.Add(pair.Key, pair.Value);
+        _retiredOrders.UnionWith(_currentProcessRetirements);
         if (_currentProcessRetirements.Count == 0)
         {
             if (File.Exists(_retirementsPath))
@@ -222,39 +262,61 @@ internal sealed class MarketMakerSessionStateStore : ISessionStateStore
 
         await File.WriteAllLinesAsync(
             _retirementsPath,
-            _currentProcessRetirements
-                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
-                .Select(pair => $"{pair.Key}|{pair.Value}"),
+            _currentProcessRetirements.Order(StringComparer.Ordinal),
             ct);
     }
 
     private SessionSnapshot? FilterRetired(SessionSnapshot? snapshot)
     {
-        if (snapshot is null || _retiredOrders.Count == 0)
+        if (snapshot is null)
             return snapshot;
 
         var outstanding = snapshot.OutstandingOrders
-            .Where(pair => !_retiredOrders.ContainsKey(pair.Key))
+            .Where(pair => !_retiredOrders.Contains(pair.Key))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         return snapshot with
         {
-            LastInboundSeqNum = Math.Max(
-                snapshot.LastInboundSeqNum,
-                _retiredOrders.Values.Max()),
+            LastInboundSeqNum =
+                snapshot.SessionId == _inboundFenceSessionId &&
+                snapshot.SessionVerId == _inboundFenceSessionVerId
+                ? Math.Max(snapshot.LastInboundSeqNum, _contiguousInboundSeqNum)
+                : snapshot.LastInboundSeqNum,
             OutstandingOrders = outstanding,
         };
     }
 
-    private static void AddOrAdvance(
-        Dictionary<string, ulong> retirements,
-        string clOrdId,
-        ulong inboundSeqNum)
+    private async Task EnsureInboundFenceLoadedAsync(CancellationToken ct)
     {
-        if (!retirements.TryGetValue(clOrdId, out var existing) ||
-            inboundSeqNum > existing)
+        if (_inboundFenceLoaded)
+            return;
+        _inboundFenceLoaded = true;
+        if (!File.Exists(_inboundFencePath))
+            return;
+
+        var value = await File.ReadAllTextAsync(_inboundFencePath, ct);
+        var firstSeparator = value.IndexOf('|');
+        var secondSeparator = firstSeparator < 0
+            ? -1
+            : value.IndexOf('|', firstSeparator + 1);
+        if (firstSeparator <= 0 ||
+            secondSeparator <= firstSeparator + 1 ||
+            !uint.TryParse(value[..firstSeparator], out _inboundFenceSessionId) ||
+            !uint.TryParse(
+                value[(firstSeparator + 1)..secondSeparator],
+                out _inboundFenceSessionVerId) ||
+            !ulong.TryParse(value[(secondSeparator + 1)..], out _contiguousInboundSeqNum))
         {
-            retirements[clOrdId] = inboundSeqNum;
+            throw new InvalidDataException("The contiguous-inbound marker is invalid.");
         }
+    }
+
+    private void ClearInboundFence()
+    {
+        _inboundFenceSessionId = 0;
+        _inboundFenceSessionVerId = 0;
+        _contiguousInboundSeqNum = 0;
+        if (File.Exists(_inboundFencePath))
+            File.Delete(_inboundFencePath);
     }
 }
 

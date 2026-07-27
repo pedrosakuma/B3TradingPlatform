@@ -50,7 +50,10 @@ internal sealed class MarketMakerWorker : BackgroundService
     private readonly HashSet<string> _configuredSymbols;
     private readonly ConcurrentDictionary<string, FeedAvailabilityObservation> _feedAvailability =
         new(StringComparer.Ordinal);
+    private readonly ContiguousInboundSequenceTracker _inboundSequence = new();
     private MarketMakerSessionStateStore? _sessionStateStore;
+    private bool _startupCleanupRequired;
+    private uint _effectiveSessionVerId;
 
     public MarketMakerWorker(IOptions<MarketMakerBotOptions> options, OrderTracker tracker,
         MarketPriceTracker priceTracker, VolatilitySpreadEstimator volatilitySpread,
@@ -70,6 +73,8 @@ internal sealed class MarketMakerWorker : BackgroundService
         _log = log;
         _clock = clock ?? TimeProvider.System;
         _sessionStateStore = sessionStateStore;
+        _startupCleanupRequired = _options.StartupCleanupEnabled;
+        _effectiveSessionVerId = _options.SessionVerId;
         _configuredSymbols = new HashSet<string>(
             _options.Instruments.Select(instrument => instrument.Symbol),
             StringComparer.Ordinal);
@@ -101,6 +106,7 @@ internal sealed class MarketMakerWorker : BackgroundService
             throw new MarketMakerReconciliationRequiredException(
                 $"Startup blocked by persisted reconciliation requirement: {requirement.Reason}");
         }
+        var recovered = await _sessionStateStore.ReplayAsync(stoppingToken);
 
         var ep = EndpointParser.Parse(_options.Endpoint);
         var addrs = System.Net.Dns.GetHostAddresses(ep.Host);
@@ -116,14 +122,25 @@ internal sealed class MarketMakerWorker : BackgroundService
         _marketData.ConnectionEligibilityChanged += OnMarketDataConnectionEligibilityChanged;
         try
         {
-            _log.LogInformation("[mm] connecting to {Endpoint} session={Session} configuredVerIdFloor={VerId}",
-                _options.Endpoint, _options.SessionId, _options.SessionVerId);
-            await _client.ConnectAsync(stoppingToken);
-            _log.LogInformation(
-                "[mm] connected; effectiveVerId={VerId} instruments={Count} reconcile={Interval}",
-                clientOpts.SessionVerId, _options.Instruments.Count, _options.ReconcileInterval);
-
-            await RunConnectedSessionAsync(_client, stoppingToken);
+            await ConnectAndRunSessionAsync(
+                _client,
+                async connectToken =>
+                {
+                    _log.LogInformation(
+                        "[mm] connecting to {Endpoint} session={Session} configuredVerIdFloor={VerId}",
+                        _options.Endpoint,
+                        _options.SessionId,
+                        _options.SessionVerId);
+                    await _client.ConnectAsync(connectToken);
+                    ConfigureRecoveryState(recovered, clientOpts.SessionVerId);
+                    _log.LogInformation(
+                        "[mm] connected; effectiveVerId={VerId} cleanupRequired={CleanupRequired} instruments={Count} reconcile={Interval}",
+                        clientOpts.SessionVerId,
+                        _startupCleanupRequired,
+                        _options.Instruments.Count,
+                        _options.ReconcileInterval);
+                },
+                stoppingToken);
         }
         catch (OperationCanceledException) { /* expected on shutdown */ }
         catch (Exception ex)
@@ -176,7 +193,13 @@ internal sealed class MarketMakerWorker : BackgroundService
         };
     }
 
-    internal async Task RunConnectedSessionAsync(IEntryPointClient client, CancellationToken ct)
+    internal Task RunConnectedSessionAsync(IEntryPointClient client, CancellationToken ct) =>
+        ConnectAndRunSessionAsync(client, _ => Task.CompletedTask, ct);
+
+    internal async Task ConnectAndRunSessionAsync(
+        IEntryPointClient client,
+        Func<CancellationToken, Task> connectAsync,
+        CancellationToken ct)
     {
         var terminated = new TaskCompletionSource<TerminatedEventArgs>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -189,6 +212,18 @@ internal sealed class MarketMakerWorker : BackgroundService
         using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
+            var connect = connectAsync(sessionCts.Token);
+            if (terminated.Task.IsCompleted ||
+                await Task.WhenAny(connect, terminated.Task) == terminated.Task)
+            {
+                sessionCts.Cancel();
+                await ObserveShutdownAsync(connect);
+                throw SessionTerminated(await terminated.Task);
+            }
+            await connect;
+            if (terminated.Task.IsCompleted)
+                throw SessionTerminated(await terminated.Task);
+
             var prepare = PrepareConnectedSessionAsync(client, sessionCts.Token);
             if (await Task.WhenAny(prepare, terminated.Task) == terminated.Task)
             {
@@ -229,6 +264,22 @@ internal sealed class MarketMakerWorker : BackgroundService
         }
     }
 
+    internal void ConfigureRecoveryState(UpState.SessionSnapshot? recovered, uint effectiveSessionVerId)
+    {
+        var belongsToSession = recovered is
+        {
+            SessionId: var sessionId,
+            SessionVerId: > 0,
+        } && sessionId == _options.SessionId;
+        var resumed = belongsToSession && recovered!.SessionVerId == effectiveSessionVerId;
+
+        _effectiveSessionVerId = effectiveSessionVerId;
+        _inboundSequence.Reset(resumed ? recovered!.LastInboundSeqNum : 0);
+        _startupCleanupRequired = _options.StartupCleanupEnabled || belongsToSession;
+    }
+
+    internal bool StartupCleanupRequired => _startupCleanupRequired;
+
     internal async Task<Task> PrepareConnectedSessionAsync(IEntryPointClient client, CancellationToken ct)
     {
         // Start draining the FIXP event stream before requesting cleanup. A
@@ -236,8 +287,13 @@ internal sealed class MarketMakerWorker : BackgroundService
         // cap, and the authoritative mass-action report itself arrives here.
         var receive = ReceiveLoopAsync(client, ct);
 
-        if (_options.StartupCleanupEnabled)
+        if (_startupCleanupRequired)
         {
+            if (!_options.StartupCleanupEnabled)
+            {
+                _log.LogWarning(
+                    "[mm] forcing terminal startup cleanup because a prior FIXP session was recovered; fresh quoting remains blocked until venue cleanup is authoritative.");
+            }
             await CleanupLegacySessionOrdersAsync(client, receive, ct);
             await Task.Yield();
             await ThrowIfReceiveLoopStoppedAsync(receive);
@@ -431,7 +487,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                     _tracker.SetOrderId(a.ClOrdID.Value, a.OrderId);
                     _tracker.OnAccepted(a.ClOrdID.Value, a.LeavesQty is { } aLeaves ? (long)aLeaves : null);
                 });
-                await RetirePersistedOrderAsync(a.ClOrdID.Value, a.SeqNum);
+                await RetirePersistedOrderAsync(a.ClOrdID.Value);
                 break;
             case UpModels.OrderTrade t:
                 {
@@ -471,7 +527,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                     });
 
                     if (transition.Known && isFilled)
-                        await RetirePersistedOrderAsync(t.ClOrdID.Value, t.SeqNum);
+                        await RetirePersistedOrderAsync(t.ClOrdID.Value);
                     _metrics.RecordFillReceived(transition.Symbol);
                     if (transition.FillResult is { } fillResult)
                     {
@@ -535,7 +591,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                             Symbol: known ? order.Symbol : null,
                             IsBuy: known && order.IsBuy);
                     });
-                    await RetirePersistedOrderAsync(transition.TargetClOrdId, c.SeqNum);
+                    await RetirePersistedOrderAsync(transition.TargetClOrdId);
                     if (transition.Known)
                     {
                         await RequoteAsync(client, transition.Symbol!, transition.IsBuy, ct);
@@ -642,7 +698,7 @@ internal sealed class MarketMakerWorker : BackgroundService
                         _pnlLedger.MarkTerminal(r.ClOrdID.Value);
                         return (Known: known, Symbol: symbol);
                     });
-                    await RetirePersistedOrderAsync(r.ClOrdID.Value, r.SeqNum);
+                    await RetirePersistedOrderAsync(r.ClOrdID.Value);
                     _metrics.RecordRejected(rejection.Symbol);
                     // Deliberately do NOT re-quote immediately here: an
                     // instrument-level reject (bad config, halt, risk
@@ -678,24 +734,53 @@ internal sealed class MarketMakerWorker : BackgroundService
                 _orderLifecycle.Synchronize(() => _tracker.SetOrderId(m.ClOrdID.Value, m.OrderId));
                 break;
         }
-
+        await PersistContiguousInboundAsync(ev.SeqNum);
     }
 
-    private async Task RetirePersistedOrderAsync(ulong clOrdId, ulong inboundSeqNum)
+    private async Task RetirePersistedOrderAsync(ulong clOrdId)
     {
         if (_sessionStateStore is null)
             return;
 
         try
         {
-            await _sessionStateStore.RetireOrderAsync(
-                clOrdId,
-                inboundSeqNum,
-                CancellationToken.None);
+            await _sessionStateStore.RetireOrderAsync(clOrdId, CancellationToken.None);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             var reason = $"Failed to retire persisted order clordid={clOrdId}; reconciliation is required.";
+            try
+            {
+                await MarkReconciliationRequiredAsync(reason);
+            }
+            catch (Exception markerException)
+            {
+                throw new MarketMakerReconciliationRequiredException(
+                    $"{reason} The durable reconciliation marker also failed.",
+                    new AggregateException(ex, markerException));
+            }
+            throw new MarketMakerReconciliationRequiredException(reason, ex);
+        }
+    }
+
+    private async Task PersistContiguousInboundAsync(ulong seqNum)
+    {
+        var contiguous = _inboundSequence.Observe(seqNum);
+        if (contiguous is null || _sessionStateStore is null || _effectiveSessionVerId == 0)
+            return;
+
+        try
+        {
+            await _sessionStateStore.RecordContiguousInboundAsync(
+                _options.SessionId,
+                _effectiveSessionVerId,
+                contiguous.Value,
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            var reason =
+                $"Failed to persist contiguous inbound FIXP watermark {_effectiveSessionVerId}/{contiguous}; reconciliation is required.";
             try
             {
                 await MarkReconciliationRequiredAsync(reason);

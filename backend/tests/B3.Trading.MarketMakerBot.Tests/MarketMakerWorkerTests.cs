@@ -187,51 +187,111 @@ public class MarketMakerWorkerTests : IDisposable
     [Fact]
     public async Task PrepareConnectedSessionAsync_SixRestoredOrders_RestartStaysAtSix()
     {
-        var (worker, _, client, _) = CreateWorker(out _, options =>
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "resumed-six-order-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
         {
-            options.StartupCleanupEnabled = true;
-            options.Instruments.Add(CreateInstrument("VALE3", 2, 60m));
-            options.Instruments.Add(CreateInstrument("ITUB4", 3, 30m));
-        });
-        using var cts = new CancellationTokenSource();
-        var liveOrders = 6;
-        client.SubmitHandler = (_, _) =>
-        {
-            Interlocked.Increment(ref liveOrders);
-            return Task.CompletedTask;
-        };
-        client.MassActionHandler = (request, _) =>
-        {
-            Interlocked.Exchange(ref liveOrders, 0);
-            for (ulong i = 1; i <= 6; i++)
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            var recovered = new SessionSnapshot
             {
-                client.Publish(new OrderCancelled
+                SessionId = 1,
+                SessionVerId = 42,
+                LastOutboundSeqNum = 3060,
+                LastInboundSeqNum = 100,
+                CapturedAt = DateTimeOffset.UtcNow,
+                OutstandingOrders = Enumerable.Range(1, 6).ToDictionary(
+                    value => (1000 + value).ToString(),
+                    value => (ulong)((value + 1) / 2),
+                    StringComparer.Ordinal),
+            };
+            await stateStore.SaveAsync(recovered);
+            var (worker, _, client, _) = CreateWorker(
+                out _,
+                options =>
                 {
-                    ClOrdID = new ClOrdID(1000 + i),
-                    OrigClOrdID = null,
-                    OrderId = 2000 + i,
-                    OrderStatus = OrderStatus.Cancelled,
-                    SeqNum = i,
-                    SendingTime = DateTimeOffset.UtcNow,
-                });
-            }
-            client.Publish(MassActionEvent(
-                request,
-                MassActionResponse.Accepted,
-                seqNum: 7));
-            return Task.FromResult(MassActionSendResult(request));
+                    options.SessionVerId = 42;
+                    options.Instruments.Add(CreateInstrument("VALE3", 2, 60m));
+                    options.Instruments.Add(CreateInstrument("ITUB4", 3, 30m));
+                },
+                stateStore);
+            worker.ConfigureRecoveryState(await stateStore.ReplayAsync(), effectiveSessionVerId: 42);
+            using var cts = new CancellationTokenSource();
+            var liveOrders = 6;
+            client.SubmitHandler = (_, _) =>
+            {
+                Interlocked.Increment(ref liveOrders);
+                return Task.CompletedTask;
+            };
+            client.MassActionHandler = (request, _) =>
+            {
+                Interlocked.Exchange(ref liveOrders, 0);
+                for (ulong i = 1; i <= 6; i++)
+                {
+                    client.Publish(new OrderCancelled
+                    {
+                        ClOrdID = new ClOrdID(1000 + i),
+                        OrigClOrdID = null,
+                        OrderId = 2000 + i,
+                        OrderStatus = OrderStatus.Cancelled,
+                        SeqNum = 100 + i,
+                        SendingTime = DateTimeOffset.UtcNow,
+                    });
+                }
+                client.Publish(MassActionEvent(
+                    request,
+                    MassActionResponse.Accepted,
+                    seqNum: 107));
+                return Task.FromResult(MassActionSendResult(request));
+            };
+
+            var receive = await worker.PrepareConnectedSessionAsync(client, cts.Token);
+
+            Assert.True(worker.StartupCleanupRequired);
+            Assert.Single(client.SubmittedMassActions);
+            Assert.Equal(6, client.SubmittedOrders.Count);
+            Assert.Equal(6, Volatile.Read(ref liveOrders));
+            Assert.All(
+                client.SubmittedOrders.GroupBy(order => order.SecurityId),
+                orders => Assert.Equal(2, orders.Count()));
+
+            cts.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => receive);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ConfigureRecoveryState_ForcesCleanupForResumeOrUnresolvedOrders()
+    {
+        var (worker, _, _, _) = CreateWorker();
+        var emptyResumed = new SessionSnapshot
+        {
+            SessionId = 1,
+            SessionVerId = 5,
+            LastInboundSeqNum = 8,
         };
+        worker.ConfigureRecoveryState(emptyResumed, effectiveSessionVerId: 5);
+        Assert.True(worker.StartupCleanupRequired);
 
-        var receive = await worker.PrepareConnectedSessionAsync(client, cts.Token);
+        var unresolvedAfterAdvance = emptyResumed with
+        {
+            SessionVerId = 5,
+            OutstandingOrders = new Dictionary<string, ulong> { ["100"] = 1 },
+        };
+        worker.ConfigureRecoveryState(unresolvedAfterAdvance, effectiveSessionVerId: 6);
+        Assert.True(worker.StartupCleanupRequired);
 
-        Assert.Equal(6, client.SubmittedOrders.Count);
-        Assert.Equal(6, Volatile.Read(ref liveOrders));
-        Assert.All(
-            client.SubmittedOrders.GroupBy(order => order.SecurityId),
-            orders => Assert.Equal(2, orders.Count()));
+        worker.ConfigureRecoveryState(emptyResumed, effectiveSessionVerId: 6);
+        Assert.True(worker.StartupCleanupRequired);
 
-        cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => receive);
+        worker.ConfigureRecoveryState(recovered: null, effectiveSessionVerId: 6);
+        Assert.False(worker.StartupCleanupRequired);
     }
 
     [Fact]
@@ -270,6 +330,95 @@ public class MarketMakerWorkerTests : IDisposable
         var error = await Assert.ThrowsAsync<MarketMakerSessionTerminatedException>(
             () => run.WaitAsync(TimeSpan.FromSeconds(1)));
         Assert.Contains("matching disappeared", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ConnectAndRunSessionAsync_CloseBeforeConnectReturnsStopsBeforePriming()
+    {
+        var (worker, _, client, _) = CreateWorker();
+        client.ConnectHandler = _ =>
+        {
+            client.PublishTerminated(reason: "closed after establish");
+            return Task.CompletedTask;
+        };
+
+        var error = await Assert.ThrowsAsync<MarketMakerSessionTerminatedException>(
+            () => worker.ConnectAndRunSessionAsync(
+                client,
+                client.ConnectAsync,
+                CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1)));
+
+        Assert.Contains("closed after establish", error.Message, StringComparison.Ordinal);
+        Assert.Empty(client.SubmittedOrders);
+    }
+
+    [Fact]
+    public async Task HandleEventAsync_OutOfOrderSeqDoesNotFenceMissingInbound()
+    {
+        var directory = Path.Combine(
+            AppContext.BaseDirectory,
+            "inbound-gap-state-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var stateStore = new MarketMakerSessionStateStore(directory);
+            var (worker, _, client, instrument) = CreateWorker(
+                out _,
+                options => options.SessionVerId = 42,
+                stateStore);
+            await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+            var clOrdId = Assert.Single(client.SubmittedOrders).ClOrdID;
+            var recovered = new SessionSnapshot
+            {
+                SessionId = 1,
+                SessionVerId = 42,
+                LastInboundSeqNum = 8,
+                CapturedAt = DateTimeOffset.UtcNow,
+                OutstandingOrders = new Dictionary<string, ulong>
+                {
+                    [clOrdId.ToString()] = instrument.SecurityId,
+                },
+            };
+            await stateStore.SaveAsync(recovered);
+            worker.ConfigureRecoveryState(recovered, effectiveSessionVerId: 42);
+            var request = new MassActionRequest
+            {
+                ClOrdID = new ClOrdID(500),
+                ActionType = MassActionType.CancelOrders,
+                Scope = MassActionScope.AllOrdersForATradingSession,
+            };
+
+            await worker.HandleEventAsync(
+                client,
+                new OrderAccepted
+                {
+                    ClOrdID = clOrdId,
+                    OrderId = 100,
+                    SecurityId = instrument.SecurityId,
+                    Side = Side.Buy,
+                    OrderStatus = OrderStatus.New,
+                    SeqNum = 10,
+                    SendingTime = DateTimeOffset.UtcNow,
+                },
+                CancellationToken.None);
+            var afterTen = await new MarketMakerSessionStateStore(directory).ReplayAsync();
+            Assert.NotNull(afterTen);
+            Assert.Equal(8ul, afterTen.LastInboundSeqNum);
+            Assert.DoesNotContain(clOrdId.ToString(), afterTen.OutstandingOrders.Keys);
+
+            await worker.HandleEventAsync(
+                client,
+                MassActionEvent(request, MassActionResponse.Accepted, seqNum: 9),
+                CancellationToken.None);
+            var afterNine = await new MarketMakerSessionStateStore(directory).ReplayAsync();
+            Assert.NotNull(afterNine);
+            Assert.Equal(10ul, afterNine.LastInboundSeqNum);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -1021,20 +1170,26 @@ public class MarketMakerWorkerTests : IDisposable
         {
             var stateStore = new MarketMakerSessionStateStore(directory);
             var (worker, _, client, instrument) =
-                CreateWorker(out _, sessionStateStore: stateStore);
+                CreateWorker(
+                    out _,
+                    options => options.SessionVerId = 10,
+                    stateStore);
             await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
             var clOrdId = Assert.Single(client.SubmittedOrders).ClOrdID;
-            await stateStore.SaveAsync(new SessionSnapshot
+            var recovered = new SessionSnapshot
             {
                 SessionId = 1,
                 SessionVerId = 10,
                 LastOutboundSeqNum = 1,
+                LastInboundSeqNum = 76,
                 CapturedAt = DateTimeOffset.UtcNow,
                 OutstandingOrders = new Dictionary<string, ulong>
                 {
                     [clOrdId.ToString()] = instrument.SecurityId,
                 },
-            });
+            };
+            await stateStore.SaveAsync(recovered);
+            worker.ConfigureRecoveryState(recovered, effectiveSessionVerId: 10);
 
             await worker.HandleEventAsync(client, new OrderTrade
             {

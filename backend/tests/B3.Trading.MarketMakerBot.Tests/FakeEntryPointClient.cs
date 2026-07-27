@@ -28,6 +28,7 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
     public Func<NewOrderRequest, CancellationToken, Task>? SubmitHandler { get; set; }
     public Func<CancelOrderRequest, CancellationToken, Task>? CancelHandler { get; set; }
     public Func<MassActionRequest, CancellationToken, Task<MassActionReport>>? MassActionHandler { get; set; }
+    public Func<CancellationToken, Task>? ConnectHandler { get; set; }
     private readonly Channel<EntryPointEvent> _events = Channel.CreateUnbounded<EntryPointEvent>();
 
     public async Task<ClOrdID> SubmitAsync(NewOrderRequest request, CancellationToken ct)
@@ -76,7 +77,8 @@ internal sealed class FakeEntryPointClient : IEntryPointClient
         throw new NotSupportedException();
     public Task CancelQuoteAsync(string quoteId, CancellationToken ct) =>
         throw new NotSupportedException();
-    public Task ConnectAsync(CancellationToken ct) => throw new NotSupportedException();
+    public Task ConnectAsync(CancellationToken ct) =>
+        ConnectHandler?.Invoke(ct) ?? throw new NotSupportedException();
     public Task TerminateAsync(TerminationCode code, CancellationToken ct) => throw new NotSupportedException();
     public Task FlushAsync(CancellationToken ct) => throw new NotSupportedException();
     public Task ReconnectAsync(uint sessionVerId, CancellationToken ct) => throw new NotSupportedException();
