@@ -32,13 +32,12 @@ namespace B3.Trading.Conformance.Spec_HTTP_MarketData;
 ///       deterministic invariant is "after the cross, live.price equals
 ///       the cross price AND live.updatedUtc advanced past the moment
 ///       we started submitting", regardless of pre-warmed state.</item>
-/// <item>Cross price is chosen distinct from the configured static
-///       fallback (30.00) so a coincidental fallback->live transition
-///       at the wrong price would still fail the assertion.</item>
-/// <item>Quantity 100 / price 31.00 respects matching's lot/tick
-///       constraints (lot=100, tick=0.01 in instruments-eqt.json) and
-///       sits well inside the default ±10% collar around the static
-///       fallback (range [27.00, 33.00]).</item>
+/// <item>Cross price is derived from the effective reference captured by
+///       this test. That keeps the order inside the default ±10% collar
+///       even when an earlier conformance test has already moved the live
+///       cache away from the static fallback.</item>
+/// <item>Quantity 100 and a price rounded to 0.01 respect matching's
+///       lot/tick constraints in instruments-eqt.json.</item>
 /// <item>30s timeout covers the multi-hop async path (FIXP submit →
 ///       matching execute → UMDF UDP → marketdata WS → trading-host
 ///       cache update). 250ms poll keeps the failure window tight.</item>
@@ -49,7 +48,6 @@ namespace B3.Trading.Conformance.Spec_HTTP_MarketData;
 public class ReferencePriceLiveSpecTests
 {
     private const string Symbol = "ITUB4";
-    private const decimal CrossPrice = 31.00m;
     private const long CrossQuantity = 100;
     private static readonly TimeSpan PollTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
@@ -86,6 +84,7 @@ public class ReferencePriceLiveSpecTests
         // we couldn't prove "live displaced fallback", we'd only prove
         // "live filled a hole". The real overlay seeds it explicitly.
         Assert.NotNull(baseline.FallbackPrice);
+        var crossPrice = SelectCrossPrice(baseline);
 
         // Mark the moment we start submitting; the live cache update
         // for the trade we're about to print MUST arrive after this.
@@ -99,7 +98,7 @@ public class ReferencePriceLiveSpecTests
             // matching bridge is configured with selfTradePrevention=none
             // (docker/real/exchange-simulator.bridge.json), so opposite
             // sides at the same price/qty will execute against each other.
-            await CrossTradeAndAssertFilledAsync(http, userAuth);
+            await CrossTradeAndAssertFilledAsync(http, userAuth, crossPrice);
 
             // Poll the diagnostics endpoint until the live cache reports the
             // cross price OR we exhaust the budget. On timeout, retry the
@@ -111,13 +110,13 @@ public class ReferencePriceLiveSpecTests
                 var current = await GetReferencePriceAsync(http, adminAuth, Symbol);
                 lastSeen = current;
                 if (current.Live is { } live &&
-                    live.Price == CrossPrice &&
+                    live.Price == crossPrice &&
                     live.UpdatedUtc > submitStartUtc)
                 {
                     // Bonus invariant: with the live cache hit, the effective
                     // resolution must reflect Live (not Fallback / Missing).
                     Assert.Equal("Live", current.EffectiveSource);
-                    Assert.Equal(CrossPrice, current.EffectivePrice);
+                    Assert.Equal(crossPrice, current.EffectivePrice);
                     return;
                 }
                 await Task.Delay(PollInterval);
@@ -125,7 +124,7 @@ public class ReferencePriceLiveSpecTests
         }
 
         Assert.Fail(
-            $"Timed out after {MaxCrossAttempts} attempt(s) waiting for {Symbol} live ref-price=={CrossPrice} updated after {firstSubmitStartUtc:o}. " +
+            $"Timed out after {MaxCrossAttempts} attempt(s) waiting for {Symbol} live ref-price=={crossPrice} updated after {firstSubmitStartUtc:o}. " +
             $"Baseline: {Format(baseline)}. Last seen: {Format(lastSeen)}.");
     }
 
@@ -166,17 +165,18 @@ public class ReferencePriceLiveSpecTests
 
     private static async Task CrossTradeAndAssertFilledAsync(
         HttpClient http,
-        AuthenticationHeaderValue auth)
+        AuthenticationHeaderValue auth,
+        decimal crossPrice)
     {
         await CancelOpenOrdersForSymbolAsync(http, auth);
 
-        var buyClOrdId = await SubmitOrderAndAssertAcceptedAsync(http, auth, side: "Buy");
+        var buyClOrdId = await SubmitOrderAndAssertAcceptedAsync(http, auth, side: "Buy", crossPrice);
         await WaitForOrderAsync(http, auth, buyClOrdId, order =>
                 order.Status == "Working" && order.CumulativeQuantity == 0,
             TradeTimeout,
             "buy order to reach Working before the cross");
 
-        var sellClOrdId = await SubmitOrderAndAssertAcceptedAsync(http, auth, side: "Sell");
+        var sellClOrdId = await SubmitOrderAndAssertAcceptedAsync(http, auth, side: "Sell", crossPrice);
 
         var filledBuy = await WaitForOrderAsync(http, auth, buyClOrdId, order =>
                 order.Status == "Filled" && order.CumulativeQuantity == CrossQuantity,
@@ -225,7 +225,7 @@ public class ReferencePriceLiveSpecTests
     }
 
     private static async Task<ulong> SubmitOrderAndAssertAcceptedAsync(
-        HttpClient http, AuthenticationHeaderValue auth, string side)
+        HttpClient http, AuthenticationHeaderValue auth, string side, decimal crossPrice)
     {
         // SymbolDirectory in the real overlay maps ITUB4 → 900000000003
         // (matching the instruments file the matching-platform loads),
@@ -239,7 +239,7 @@ public class ReferencePriceLiveSpecTests
                 side,
                 type = "Limit",
                 quantity = CrossQuantity,
-                price = CrossPrice,
+                price = crossPrice,
             }),
         };
 
@@ -380,6 +380,13 @@ public class ReferencePriceLiveSpecTests
             Live: live,
             FallbackPrice: entry.GetProperty("fallbackPrice").ValueKind == JsonValueKind.Null
                 ? null : entry.GetProperty("fallbackPrice").GetDecimal());
+    }
+
+    private static decimal SelectCrossPrice(ReferencePriceDiagnostic baseline)
+    {
+        var anchor = baseline.EffectivePrice ?? baseline.FallbackPrice!.Value;
+        var price = decimal.Round(anchor * 1.01m, 2, MidpointRounding.AwayFromZero);
+        return price == anchor ? anchor + 0.01m : price;
     }
 
     private static string Format(ReferencePriceDiagnostic? d) => d is null
