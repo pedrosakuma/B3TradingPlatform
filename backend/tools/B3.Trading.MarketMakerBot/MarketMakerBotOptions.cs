@@ -24,8 +24,9 @@ public sealed class MarketMakerBotOptions
     /// <summary>EnteringFirm code from matching's <c>firms[].enteringFirmCode</c>.</summary>
     [Required] public uint EnteringFirm { get; set; }
 
-    /// <summary>Configured floor for the FIXP <c>SessionVerId</c>; the SDK's
-    /// <c>FileSessionStateStore</c> bumps from this on warm restart.</summary>
+    /// <summary>Configured floor for the FIXP <c>SessionVerId</c>. Warm
+    /// restart first attempts to reattach the persisted version; a rejected
+    /// reattach advances monotonically to at least this value.</summary>
     public uint SessionVerId { get; set; } = 1;
 
     /// <summary>Verbatim JSON credential payload — matching's FixpSession
@@ -107,7 +108,8 @@ public sealed class MarketMakerBotOptions
     /// Opts into terminal startup mass-cancel hygiene. Keep disabled unless
     /// matching-platform includes B3MatchingPlatform#569, where the solicited
     /// ACCEPTED report is emitted only after dispatcher execution and all
-    /// cancellation ERs.
+    /// cancellation ERs. Recovered session state fails startup while disabled
+    /// because replacement quoting cannot safely proceed without that barrier.
     /// </summary>
     public bool StartupCleanupEnabled { get; set; }
 
