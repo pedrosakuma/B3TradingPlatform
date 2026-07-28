@@ -1,7 +1,9 @@
+using B3.Trading.Application;
 using B3.Trading.Application.Audit;
 using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure;
 using B3.Trading.Infrastructure.Persistence;
@@ -264,6 +266,67 @@ public sealed class OutboundReconciliationServiceTests
         Assert.False(fixture.PendingCancels.TryGetByCancel(102, out _));
         Assert.Empty(fixture.Replacements.Snapshot());
         Assert.False(fixture.Drain.IsDraining);
+    }
+
+    [Fact]
+    public async Task VenueAbsentCancel_AllowsGenuineNewCancelForSameOrder_AfterResolution()
+    {
+        // Reproduces the real-stack CI failure in
+        // SuspendedTimeoutBoundarySpecTests: a first cancel attempt is
+        // fired while the venue transport is severed (never applied),
+        // gets resolved VenueAbsent ("never reached the venue"), and the
+        // ORIGINAL order is still genuinely live at the venue. A second,
+        // real cancel for that same original order must not be silently
+        // swallowed as a "duplicate" of the just-resolved mutation.
+        var fixture = Fixture.Create(kind: OutboundMutationKind.Cancel);
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '4');
+
+        fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "operator",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+
+        // The just-resolved cancel mutation must no longer be tracked as
+        // "active" for the original order — otherwise a fresh cancel
+        // attempt is indistinguishable from a retry of the stale one.
+        Assert.False(fixture.Ledger.TryGetActiveForOriginal("F1", 99, out _));
+        Assert.False(fixture.PendingCancels.TryGetByCancel(101, out _));
+
+        var book = new WorkingOrderBook();
+        var owner = new EndClientId("CLIENT-SECRET");
+        Assert.True(book.TryAdd(new Order(
+            99, owner, "PETR4", 123, OrderSide.Buy, OrderType.Limit, 10, 30m,
+            firmId: "F1")));
+        var gateway = new RecordingGateway();
+        var cancelService = new OrderCancelService(
+            new ClOrdIdPrefixRegistry(),
+            fixture.Ownership,
+            book,
+            gateway,
+            new EventDispatcher(new NullEventStore()),
+            NullLogger<OrderCancelService>.Instance,
+            pendingCancels: fixture.PendingCancels,
+            outboundLedger: fixture.Ledger);
+
+        var result = await cancelService.CancelAsync(
+            owner,
+            99,
+            CancellationToken.None,
+            firmId: "F1");
+
+        Assert.Equal(OrderCancelResultKind.Accepted, result.Kind);
+        // Must be a BRAND NEW cancel ClOrdId, dispatched to the gateway —
+        // not the stale 101 reused from the resolved mutation.
+        Assert.NotEqual(101UL, result.CancelClOrdId);
+        Assert.Single(gateway.Calls);
+        Assert.StartsWith("cancel:", gateway.Calls[0]);
     }
 
     [Fact]
@@ -1740,6 +1803,29 @@ public sealed class OutboundReconciliationServiceTests
             Task.FromResult(RiskDecision.Approve);
 
         public void ReleaseReservation(ulong clOrdId) => ReleaseCount++;
+    }
+
+    private sealed class RecordingGateway : IExchangeGateway
+    {
+        public List<string> Calls { get; } = new();
+
+        public Task SubmitAsync(Order order, CancellationToken cancellationToken)
+        {
+            Calls.Add("submit");
+            return Task.CompletedTask;
+        }
+
+        public Task CancelAsync(Order order, ulong newClOrdId, CancellationToken cancellationToken)
+        {
+            Calls.Add($"cancel:{newClOrdId}");
+            return Task.CompletedTask;
+        }
+
+        public Task CancelReplaceAsync(
+            Order original, ulong newClOrdId, long newQuantity, decimal? newPrice,
+            TimeInForce? requestedTimeInForce, decimal? requestedStopPrice, DateTimeOffset? requestedGoodTillDate,
+            CancellationToken cancellationToken)
+            => Task.CompletedTask;
     }
 
     private sealed class RecordingDrain : Lifecycle.IDrainController
