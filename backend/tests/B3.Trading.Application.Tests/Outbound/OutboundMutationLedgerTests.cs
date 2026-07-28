@@ -126,6 +126,65 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void RecoveredWriteWithoutFrame_IsQuarantinedButLiveTransitionStillRejects()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.Apply(fixture.Write));
+
+        fixture.Ledger.ApplyRecovered(fixture.Write);
+        fixture.Ledger.ApplyRecovered(fixture.Write);
+
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+        var attempt = Assert.Single(mutation.Attempts);
+        Assert.Null(attempt.FramePrepared);
+        Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(fixture.Write.GatewayReceiptVersion, attempt.GatewayReceiptVersion);
+        Assert.Equal(
+            OutboundAmbiguityReason.MissingFramePreparedEvidence,
+            attempt.AmbiguityReason);
+        Assert.All(
+            fixture.Ledger.SnapshotCorrelations(),
+            correlation => Assert.False(correlation.Terminal));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.ApplyRecovered(fixture.Write with
+            {
+                GatewayReceiptVersion = fixture.Write.GatewayReceiptVersion + 1,
+            }));
+
+        var restored = RestoreLedger(fixture);
+        var restoredMutation = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.Ambiguous, restoredMutation.State);
+        Assert.True(restoredMutation.RequiresReconciliation);
+        Assert.Equal(
+            OutboundAmbiguityReason.MissingFramePreparedEvidence,
+            Assert.Single(restoredMutation.Attempts).AmbiguityReason);
+    }
+
+    [Fact]
+    public void RecoveredWriteWithoutFrame_RejectsConflictWithProvenUnsentEvidence()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Unsent);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.ApplyRecovered(fixture.Write));
+
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
+        Assert.Null(Assert.Single(mutation.Attempts).TransportWriteCompletedAtUtc);
+    }
+
+    [Fact]
     public void Recovery_IntentOnlyIsProvenUnsent_FrameAndWriteAreAmbiguous()
     {
         var intentOnly = Fixture.Create();
@@ -3401,6 +3460,75 @@ public sealed class OutboundMutationLedgerTests
             Assert.Equal(
                 2UL,
                 clOrdIds.Generate(new EndClientId(Sensitive().EndClientId)));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task PersistenceRecovery_WriteWithoutFrame_RequiresReconciliation()
+    {
+        var fixture = Fixture.Create();
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "outbound-missing-frame-restart",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var options = new PersistenceOptions
+        {
+            DataDirectory = root,
+            FirmId = "test",
+            ChannelCapacity = 16,
+            GroupCommitMaxRecords = 1,
+            GroupCommitWindow = TimeSpan.Zero,
+            SegmentMaxBytes = 4096,
+            IndexEveryNRecords = 1,
+            IndexEveryNBytes = 128,
+            FsyncOnFlush = false,
+            LegacyWalStartupMode = LegacyWalStartupMode.ControlledCleanShutdown,
+        };
+        try
+        {
+            await using (var store = new FileEventStore(
+                options, NullLogger<FileEventStore>.Instance))
+            {
+                store.Append(fixture.Approved);
+                store.Append(fixture.Intent);
+                var writeSeq = store.Append(fixture.Write);
+                await store.FlushThroughAsync(writeSeq);
+            }
+
+            var ledger = new OutboundMutationLedger(fixture.Protector);
+            var clOrdIds = new ClOrdIdPrefixRegistry();
+            var snapshotter = NewSnapshotter(
+                ledger,
+                clOrdIds,
+                new PendingReplacementRegistry(),
+                new PendingCancelRegistry());
+            var replayer = NewReplayer(ledger, clOrdIds);
+            await using var reopened = new FileEventStore(
+                options, NullLogger<FileEventStore>.Instance);
+            var recovery = new PersistenceRecovery(
+                reopened,
+                snapshotter,
+                replayer,
+                new SnapshotStore(root, "test"),
+                NullLogger<PersistenceRecovery>.Instance);
+
+            await recovery.RunAsync();
+
+            var mutation = Assert.Single(ledger.SnapshotMutations());
+            Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+            Assert.True(mutation.RequiresReconciliation);
+            Assert.Equal(1, ledger.ReadinessBlockingCount);
+            var attempt = Assert.Single(mutation.Attempts);
+            Assert.Null(attempt.FramePrepared);
+            Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+            Assert.Equal(
+                OutboundAmbiguityReason.MissingFramePreparedEvidence,
+                attempt.AmbiguityReason);
         }
         finally
         {

@@ -1411,7 +1411,7 @@ public sealed class EventReplayer
                 _outboundLedger?.Apply(frame);
                 break;
             case OutboundTransportWriteCompletedEvent write:
-                _outboundLedger?.Apply(write);
+                _outboundLedger?.ApplyRecovered(write);
                 break;
             case OutboundProvenUnsentEvent unsent:
                 _outboundLedger?.Apply(unsent);

@@ -192,6 +192,7 @@ public enum OutboundAmbiguityReason
     IncompleteVenueEvidence,
     GatewayOutcomeUnknown,
     SessionVersionMismatchEvidence,
+    MissingFramePreparedEvidence,
 }
 
 public enum RecoveredOutboundAttemptDisposition
