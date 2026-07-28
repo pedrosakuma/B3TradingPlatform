@@ -484,10 +484,26 @@ public sealed class OutboundReconciliationService
 
     private void TryResumeAfterResolution(OutboundOperatorDecision decision)
     {
-        if (decision != OutboundOperatorDecision.LeaveAmbiguous &&
-            _ledger.ReadinessBlockingCount == 0)
+        if (decision == OutboundOperatorDecision.LeaveAmbiguous)
+            return;
+
+        if (_ledger.ReadinessBlockingCount == 0)
         {
             _drain?.TryEndOutboundReconciliationDrain();
+        }
+
+        // Cold-start restart can additionally raise a
+        // "cold_start_unresolved_lifecycle_intents" drain reason based on
+        // pending cancel/replace registries, independent of the ledger's
+        // own readiness-blocking count. Once every one of those sources is
+        // actually empty, that reason is stale and must be cleared too —
+        // otherwise a resolved ambiguous cancel/replace leaves the process
+        // stuck draining forever after a cold start.
+        if (_ledger.ReadinessBlockingCount == 0 &&
+            (_pendingCancels?.Snapshot().Count ?? 0) == 0 &&
+            _replacements.Snapshot().Count == 0)
+        {
+            _drain?.TryEndColdStartLifecycleIntentsDrain();
         }
     }
 

@@ -233,6 +233,40 @@ public sealed class OutboundReconciliationServiceTests
     }
 
     [Fact]
+    public void VenueAbsentCancel_EndsColdStartLifecycleIntentsDrain_WhenRegistriesDrainToEmpty()
+    {
+        var fixture = Fixture.Create(
+            kind: OutboundMutationKind.Cancel,
+            retried: true);
+        // Simulates the post-cold-start-restart state: the drain is held
+        // open by the lifecycle guard, not the outbound reconciliation
+        // reasons, because the process just came back from a crash with
+        // outstanding pending cancels.
+        fixture.Drain.BeginDrain("cold_start_unresolved_lifecycle_intents");
+        var evidenceReference = fixture.RegisterEvidence(
+            OutboundOperatorEvidenceType.OfficialExtract,
+            '4');
+
+        fixture.Service.Resolve(
+            fixture.MutationId,
+            "F1",
+            "operator",
+            new(
+                OutboundOperatorDecision.VenueAbsent,
+                OutboundOperatorEvidenceType.OfficialExtract,
+                evidenceReference,
+                "official_extract_attested"));
+
+        // The one pending cancel this fixture seeded is now released, and
+        // there are no pending replacements either, so the stale lifecycle
+        // drain reason must be cleared even though it isn't one of the
+        // "outbound_*" reconciliation reasons.
+        Assert.False(fixture.PendingCancels.TryGetByCancel(102, out _));
+        Assert.Empty(fixture.Replacements.Snapshot());
+        Assert.False(fixture.Drain.IsDraining);
+    }
+
+    [Fact]
     public void VenueAbsentCancelReplay_ReleasesOriginalWalProjectionAfterRetry()
     {
         var fixture = Fixture.Create(
@@ -1728,6 +1762,16 @@ public sealed class OutboundReconciliationServiceTests
             {
                 return false;
             }
+
+            _reason = null;
+            IsDraining = false;
+            return true;
+        }
+
+        public bool TryEndColdStartLifecycleIntentsDrain()
+        {
+            if (_reason is not "cold_start_unresolved_lifecycle_intents")
+                return false;
 
             _reason = null;
             IsDraining = false;

@@ -53,27 +53,42 @@ public sealed class DrainState : IDrainController
             var removed =
                 _reasons.Remove("outbound_new_order_reconciliation_required") |
                 _reasons.Remove("outbound_cancel_replace_reconciliation_required");
-            if (!removed)
-                return false;
-
-            if (_reasons.Count == 0)
-            {
-                _reason = null;
-                Interlocked.Exchange(ref _draining, 0);
-                return true;
-            }
-
-            _reason = _reasons.FirstOrDefault(
-                reason => !IsOutboundReconciliationReason(reason))
-                ?? _reasons.First();
-            return false;
+            return TryEndDrainUnsafe(removed);
         }
+    }
+
+    public bool TryEndColdStartLifecycleIntentsDrain()
+    {
+        lock (_gate)
+        {
+            var removed = _reasons.Remove("cold_start_unresolved_lifecycle_intents");
+            return TryEndDrainUnsafe(removed);
+        }
+    }
+
+    private bool TryEndDrainUnsafe(bool removed)
+    {
+        if (!removed)
+            return false;
+
+        if (_reasons.Count == 0)
+        {
+            _reason = null;
+            Interlocked.Exchange(ref _draining, 0);
+            return true;
+        }
+
+        _reason = _reasons.FirstOrDefault(
+            reason => !IsOutboundReconciliationReason(reason))
+            ?? _reasons.First();
+        return false;
     }
 
     private static bool IsOutboundReconciliationReason(string reason) =>
         reason is
             "outbound_new_order_reconciliation_required" or
-            "outbound_cancel_replace_reconciliation_required";
+            "outbound_cancel_replace_reconciliation_required" or
+            "cold_start_unresolved_lifecycle_intents";
 }
 
 /// <summary>

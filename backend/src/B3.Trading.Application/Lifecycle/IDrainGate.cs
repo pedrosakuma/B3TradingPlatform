@@ -21,4 +21,6 @@ public interface IDrainController : IDrainGate
     void BeginDrain(string reason);
 
     bool TryEndOutboundReconciliationDrain() => false;
+
+    bool TryEndColdStartLifecycleIntentsDrain() => false;
 }
