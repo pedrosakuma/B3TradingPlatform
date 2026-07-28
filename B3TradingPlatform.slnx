@@ -16,6 +16,7 @@
     <Project Path="backend/tests/B3.Trading.EntryPointListener.Tests/B3.Trading.EntryPointListener.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Reconciliation.Tests/B3.Trading.Reconciliation.Tests.csproj" />
     <Project Path="backend/tests/B3.Trading.Architecture.Tests/B3.Trading.Architecture.Tests.csproj" />
+    <Project Path="backend/tests/B3.Trading.SampleBot.Tests/B3.Trading.SampleBot.Tests.csproj" />
   </Folder>
   <Folder Name="/backend/bench/">
     <Project Path="backend/bench/B3.Trading.Benchmarks/B3.Trading.Benchmarks.csproj" />
@@ -26,5 +27,6 @@
     <Project Path="backend/tools/B3.Trading.MarketMakerBot/B3.Trading.MarketMakerBot.csproj" />
     <Project Path="backend/tools/B3.Trading.Reconciliation/B3.Trading.Reconciliation.csproj" />
     <Project Path="backend/tools/B3.Trading.IdentityMaintenance/B3.Trading.IdentityMaintenance.csproj" />
+    <Project Path="backend/tools/B3.Trading.SampleBot/B3.Trading.SampleBot.csproj" />
   </Folder>
 </Solution>
