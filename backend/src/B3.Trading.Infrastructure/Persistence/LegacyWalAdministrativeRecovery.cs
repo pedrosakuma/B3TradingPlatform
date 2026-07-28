@@ -101,6 +101,12 @@ public sealed class LegacyWalAdministrativeRecovery
 
         var proposed = BuildProposedLegacyMarker(physicalSegments);
         var latestSnapshot = ReadLatestSnapshotCandidate();
+        if (proposed.LastDurableSeq > 0 && latestSnapshot is null)
+        {
+            throw new LegacyWalAdministrativeRecoveryRefusedException(
+                "Legacy WAL recovery requires a latest snapshot whose sequence exactly matches the recoverable WAL prefix. No snapshot was found, so the markerless tail remains ambiguous and must be investigated manually.");
+        }
+
         if (latestSnapshot is { Snapshot: { } snapshot })
         {
             if (snapshot.FormatVersion != 0
@@ -111,10 +117,10 @@ public sealed class LegacyWalAdministrativeRecovery
                     $"Latest snapshot '{latestSnapshot.Path}' already carries versioned WAL lineage fields; refusing offline legacy-marker recovery.");
             }
 
-            if (snapshot.Seq > proposed.LastDurableSeq)
+            if (snapshot.Seq != proposed.LastDurableSeq)
             {
                 throw new LegacyWalAdministrativeRecoveryRefusedException(
-                    $"Latest snapshot '{latestSnapshot.Path}' seq={snapshot.Seq} is ahead of the recoverable legacy WAL prefix seq={proposed.LastDurableSeq}; reconcile or delete the uncovered snapshot first.");
+                    $"Latest snapshot '{latestSnapshot.Path}' seq={snapshot.Seq} does not exactly match the recoverable legacy WAL prefix seq={proposed.LastDurableSeq}; records past the snapshot remain ambiguous and require manual investigation or an explicitly attested boundary.");
             }
         }
 

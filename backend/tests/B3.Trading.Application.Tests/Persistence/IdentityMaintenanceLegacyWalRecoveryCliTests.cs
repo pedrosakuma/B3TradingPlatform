@@ -104,7 +104,40 @@ public sealed class IdentityMaintenanceLegacyWalRecoveryCliTests : IDisposable
             stderr);
 
         Assert.Equal(1, exitCode);
-        Assert.Contains("ahead of the recoverable legacy WAL prefix", stderr.ToString());
+        Assert.Contains("does not exactly match the recoverable legacy WAL prefix", stderr.ToString());
+        Assert.False(File.Exists(Path.Combine(WalRoot(options), FileEventStore.MarkerFileName)));
+    }
+
+    [Fact]
+    public async Task RecoverLegacyWal_LatestSnapshotBehindRecoverablePrefix_RefusesWithoutWritingMarker()
+    {
+        var options = Options(nameof(RecoverLegacyWal_LatestSnapshotBehindRecoverablePrefix_RefusesWithoutWritingMarker));
+        var day = Path.Combine(WalRoot(options), "2026-01-01");
+        Directory.CreateDirectory(day);
+        await WriteLegacySegment(options, day, ordinal: 0, seq: 1, NewOrder(0));
+        await WriteLegacySegment(options, day, ordinal: 1, seq: 2, NewOrder(1));
+        new SnapshotStore(options.DataDirectory, options.FirmId).Write(new PlatformSnapshot
+        {
+            Seq = 1,
+            CreatedAtUtc = new DateTimeOffset(2026, 1, 1, 12, 5, 0, TimeSpan.Zero),
+        });
+
+        var stderr = new StringWriter();
+        var exitCode = await IdentityMaintenanceCli.RunAsync(
+            [
+                "recover-legacy-wal",
+                "--data-directory", options.DataDirectory,
+                "--firm-id", options.FirmId,
+                "--operator", "ops-user",
+                "--change-ticket", "INC-670",
+                "--reason", "incident-670 controlled marker publication",
+                "--i-understand-this-promotes-a-legacy-wal-without-proving-the-tail-was-durable",
+            ],
+            new StringWriter(),
+            stderr);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("does not exactly match the recoverable legacy WAL prefix", stderr.ToString());
         Assert.False(File.Exists(Path.Combine(WalRoot(options), FileEventStore.MarkerFileName)));
     }
 
