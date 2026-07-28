@@ -6,7 +6,9 @@
 > (Q4.15 / #315). This file is the **perf-hardening v0** runbook — read
 > it when you are paged for a metric alert; read the failover runbook
 > when the host is down, hanging, partitioned, or its on-disk state
-> looks corrupt.
+> looks corrupt. The legacy-WAL fail-closed startup recovery added in #670
+> is documented there too; use `recover-legacy-wal`, not a temporary
+> `LegacyWalStartupMode=ControlledCleanShutdown` config flip.
 
 Top-level operational runbook for the B3 trading-host. Per-subsystem
 guides live alongside this file (e.g.

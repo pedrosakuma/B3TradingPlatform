@@ -93,7 +93,10 @@ highest CRC-valid frame automatically. The default
 `ControlledCleanShutdown` only for the one-time upgrade after draining ingress,
 successfully flushing the old process and stopping it without further
 admission; the new process fsyncs that quiesced prefix and publishes its first
-generation marker. Generation-bound segment metadata is staged and directory-
+generation marker. For the bounded operator path after an unclean shutdown, use
+`B3.Trading.IdentityMaintenance recover-legacy-wal` with its explicit
+confirmation flag instead of leaving `LegacyWalStartupMode` enabled in the host
+configuration. Generation-bound segment metadata is staged and directory-
 fsynced before marker publication, then promoted afterward; a crash at any
 boundary resumes from legacy metadata before the marker or from validated
 staging metadata after it.

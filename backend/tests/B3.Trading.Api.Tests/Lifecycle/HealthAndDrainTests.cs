@@ -124,6 +124,49 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         var persistence = doc.RootElement.GetProperty("persistence");
         Assert.False(persistence.GetProperty("healthy").GetBoolean());
         Assert.Equal(nameof(IOException), persistence.GetProperty("terminalFault").GetString());
+        Assert.Equal("disk full", persistence.GetProperty("terminalFaultMessage").GetString());
+        Assert.Equal(
+            "wal_io_fault",
+            persistence.GetProperty("terminalFaultDetails").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task LegacyWalMigrationRequired_IsSurfacedWithRecoveryGuidance()
+    {
+        using var factory = TestAppFactory.WithOverrides(
+            new Dictionary<string, string?>
+            {
+                ["Trading:Persistence:Enabled"] = "true",
+                ["Trading:Persistence:DataDirectory"] = Path.Combine(
+                    Directory.GetCurrentDirectory(),
+                    "TestResults",
+                    "HealthAndDrainTests",
+                    Guid.NewGuid().ToString("N")),
+                ["Trading:Persistence:FirmId"] = "FIRM01",
+            },
+            services =>
+            {
+                services.RemoveAll<IEventStoreHealth>();
+                services.AddSingleton<IEventStoreHealth>(
+                    new FaultedEventStoreHealth(new WalLegacyMigrationRequiredException(
+                        "Non-empty legacy WAL has no commit marker.")));
+            });
+        using var client = factory.CreateClient();
+
+        var health = await client.GetAsync("/health");
+        health.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await health.Content.ReadAsStringAsync());
+        var persistence = doc.RootElement.GetProperty("persistence");
+        var details = persistence.GetProperty("terminalFaultDetails");
+        Assert.Equal(
+            "legacy_wal_migration_required",
+            details.GetProperty("code").GetString());
+        Assert.Contains(
+            "recover-legacy-wal",
+            details.GetProperty("recommendedAction").GetString());
+        Assert.Contains(
+            "--firm-id FIRM01",
+            details.GetProperty("recommendedAction").GetString());
     }
 
     [Fact]
