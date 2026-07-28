@@ -2,6 +2,7 @@ using B3.Trading.Application.Persistence;
 using B3.Trading.Application;
 using B3.Trading.Application.Outbound;
 using B3.Trading.Host.Hosted;
+using B3.Trading.Host.Lifecycle;
 using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -46,6 +47,7 @@ public static class TradingPersistenceServiceCollectionExtensions
         {
             var o = sp.GetRequiredService<IOptions<PersistenceOptions>>().Value;
             var fence = sp.GetRequiredService<ActiveHostFence>();
+            var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             if (!fence.TryAcquire())
             {
                 return new FaultedEventStore(
@@ -60,6 +62,16 @@ public static class TradingPersistenceServiceCollectionExtensions
             catch (Exception ex)
             {
                 fence.RecordStorageFailure(ex);
+                var diagnostic = PersistenceFaultDiagnostics.Describe(ex, o);
+                loggerFactory
+                    .CreateLogger("B3.Trading.PersistenceStartup")
+                    .LogCritical(
+                        ex,
+                        diagnostic is null
+                            ? "Persistence startup failed; readiness remains closed."
+                            : "Persistence startup failed with {FaultCode}; readiness remains closed. Recommended action: {RecommendedAction}",
+                        diagnostic?.Code,
+                        diagnostic?.RecommendedAction);
                 return new FaultedEventStore(ex);
             }
         });
