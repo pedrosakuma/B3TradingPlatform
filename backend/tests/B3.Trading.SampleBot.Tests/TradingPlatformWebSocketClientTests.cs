@@ -20,6 +20,16 @@ public sealed class TradingPlatformWebSocketClientTests
     }
 
     [Fact]
+    public void BuildAuthenticatedUri_AppendsRealEscapedToken()
+    {
+        var uri = ClientWebSocketConnectionFactory.BuildAuthenticatedUri(
+            new Uri("wss://trading.local/ws?existing=1"),
+            "abc def/ghi==");
+
+        Assert.Equal("existing=1&access_token=abc%20def%2Fghi%3D%3D", uri.GetComponents(UriComponents.Query, UriFormat.UriEscaped));
+    }
+
+    [Fact]
     public async Task RunAsync_ReconnectsAndResubscribesAfterDisconnect()
     {
         using var cts = new CancellationTokenSource();

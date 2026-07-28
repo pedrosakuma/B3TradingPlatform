@@ -27,12 +27,26 @@ internal interface ISampleBotWebSocketConnectionFactory
 
 internal sealed class ClientWebSocketConnectionFactory : ISampleBotWebSocketConnectionFactory
 {
+    internal static readonly string AccessTokenQueryParameter = "access_token";
+
     public async Task<ISampleBotWebSocketConnection> ConnectAsync(Uri uri, string bearerToken, CancellationToken cancellationToken)
     {
         var socket = new ClientWebSocket();
-        socket.Options.SetRequestHeader("Authorization", $"Bearer {bearerToken}");
-        await socket.ConnectAsync(uri, cancellationToken);
+        await socket.ConnectAsync(BuildAuthenticatedUri(uri, bearerToken), cancellationToken);
         return new ClientWebSocketConnection(socket);
+    }
+
+    internal static Uri BuildAuthenticatedUri(Uri uri, string bearerToken)
+    {
+        ArgumentNullException.ThrowIfNull(uri);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bearerToken);
+
+        var builder = new UriBuilder(uri);
+        var tokenParam = $"{AccessTokenQueryParameter}={Uri.EscapeDataString(bearerToken)}";
+        builder.Query = string.IsNullOrEmpty(builder.Query)
+            ? tokenParam
+            : $"{builder.Query.TrimStart('?')}&{tokenParam}";
+        return builder.Uri;
     }
 }
 
