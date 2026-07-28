@@ -263,6 +263,51 @@ public sealed class SessionRollOrderCleanupTests
     }
 
     [Fact]
+    public async Task Cleanup_RefusesToResolveActiveCancelVenueAbsent_WhenTargetIsNotConfirmedLive()
+    {
+        var states = new Dictionary<ulong, OrderState>();
+        var resolved = new List<string>();
+        using var http = CreateHttp((request, clOrdId) =>
+        {
+            if (request.Method == HttpMethod.Get)
+                return GetResponse(request, states);
+            if (request.RequestUri!.AbsolutePath.EndsWith("/evidence", StringComparison.Ordinal))
+                return Response(HttpStatusCode.OK);
+            if (request.RequestUri.AbsolutePath.EndsWith("/resolve", StringComparison.Ordinal))
+            {
+                resolved.Add(request.RequestUri.AbsolutePath);
+                return Response(HttpStatusCode.OK);
+            }
+
+            states[clOrdId] = states[clOrdId] with { Status = "Cancelled" };
+            return Response(HttpStatusCode.NoContent);
+        });
+
+        var aggregate = await Assert.ThrowsAsync<AggregateException>(() =>
+            SessionRollSpecSupport.RunWithOrderCleanupAsync(
+                http,
+                UserAuth,
+                AdminAuth,
+                (_, _) => Task.FromResult(false),
+                (_, _) => Task.CompletedTask,
+                cleanup =>
+                {
+                    states[181] = new(
+                        "Working",
+                        IsStale: false,
+                        ActiveCancelRequiresReconciliation: true);
+                    cleanup.TrackOrder(181, "PETR4", "Buy", 30m, 100);
+                    return Task.CompletedTask;
+                }));
+
+        Assert.Contains(
+            "cannot be truthfully resolved VenueAbsent",
+            aggregate.ToString(),
+            StringComparison.Ordinal);
+        Assert.Empty(resolved);
+    }
+
+    [Fact]
     public async Task AuthoritativeVenueAbsent_SkipsDeleteForPendingNew()
     {
         var states = new Dictionary<ulong, OrderState>();
