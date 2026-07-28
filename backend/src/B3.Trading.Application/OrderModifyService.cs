@@ -493,6 +493,11 @@ public sealed class OrderModifyService
             return OrderModifyResult.RiskRejected(reason, code);
         }
 
+        var isPeggedRepeg = req.AlgoOriginIdentity is
+        {
+            ParentAlgoId: var originParentAlgoId,
+            ActionKind: AlgoOutboundActionKind.Repeg,
+        } && originParentAlgoId == orig.ParentAlgoId;
         var intent = new OrderReplacementIntent(
             OriginalClOrdId: req.OriginalClOrdId,
             NewClOrdId: newClOrdId,
@@ -508,7 +513,8 @@ public sealed class OrderModifyService
             AlgoSliceSeq: orig.AlgoSliceSeq,
             RequestedTimeInForce: req.NewTimeInForce,
             RequestedStopPrice: req.NewStopPrice,
-            RequestedGoodTillDate: req.NewGoodTillDate);
+            RequestedGoodTillDate: req.NewGoodTillDate,
+            IsPeggedRepeg: isPeggedRepeg);
         var recordedAt = _clock.GetUtcNow();
         var restIdempotency = req.IdempotencyContext is { Binding: { } pendingBinding }
             ? pendingBinding with
@@ -536,6 +542,7 @@ public sealed class OrderModifyService
                     NewPrice = effectivePrice,
                     ParentAlgoId = orig.ParentAlgoId,
                     AlgoSliceSeq = orig.AlgoSliceSeq,
+                    IsPeggedRepeg = isPeggedRepeg,
                     RequestedTimeInForce = req.NewTimeInForce?.ToString(),
                     RequestedStopPrice = req.NewStopPrice,
                     RequestedGoodTillDate = req.NewGoodTillDate,

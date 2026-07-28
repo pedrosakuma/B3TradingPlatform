@@ -50,6 +50,7 @@ public sealed class ExecutionReportProcessor
     private readonly Scheduling.GtdExpirationScheduler? _gtdScheduler;
     private readonly Scheduling.IocFokWatchdog? _iocWatchdog;
     private readonly FillProjection? _fillProjection;
+    private readonly Outbound.OutboundMutationLedger? _outboundLedger;
 
     public ExecutionReportProcessor(
         OrderOwnershipMap ownership,
@@ -73,7 +74,8 @@ public sealed class ExecutionReportProcessor
         FillProjection? fillProjection = null,
         Scheduling.IocFokWatchdog? iocWatchdog = null,
         PendingCancelRegistry? pendingCancels = null,
-        IUserBotOrderMappingRegistry? botMappings = null)
+        IUserBotOrderMappingRegistry? botMappings = null,
+        Outbound.OutboundMutationLedger? outboundLedger = null)
     {
         _ownership = ownership;
         _orders = orders;
@@ -97,6 +99,7 @@ public sealed class ExecutionReportProcessor
         _iocWatchdog = iocWatchdog;
         _pendingCancels = pendingCancels;
         _botMappings = botMappings;
+        _outboundLedger = outboundLedger;
     }
 
     /// <summary>
@@ -366,6 +369,50 @@ public sealed class ExecutionReportProcessor
                             "Late fill after terminal status for {ClOrdId}: status={Status}, delta={Delta}, lastPx={LastPx}.",
                             lookupId, order.Status, delta, lastPx);
                     }
+                    if (order.Status == OrderStatus.Filled
+                        && _replacements is not null
+                        && order.ParentAlgoId is { } fillParentAlgoId
+                        && _replacements.TryGetByOriginal(
+                            lookupId,
+                            out var pendingFillIntent)
+                        && pendingFillIntent is not null
+                        && IsPeggedRepegIntent(
+                            pendingFillIntent,
+                            fillParentAlgoId)
+                        && _replacements.TryConsumeByOriginal(
+                            lookupId,
+                            out var filledOrigIntent,
+                            out var ambiguousHeld)
+                        && filledOrigIntent is not null)
+                    {
+                        // #548. A terminal Fill on the original settles the
+                        // cancel-replace before the algo reactor consumes its
+                        // ChildExecutionObservedSignal. Retire the intent on
+                        // the ER thread now so a Replaced ER arriving in that
+                        // queueing window cannot consume it and hydrate an
+                        // orphan replacement. ResolveRepegOnFillAsync keeps
+                        // the same cleanup as an idempotent fallback for
+                        // legacy/test compositions without this processor.
+                        try
+                        {
+                            _replaceMargin?.AbortReplace(filledOrigIntent.NewClOrdId);
+                        }
+                        catch (Exception abortEx)
+                        {
+                            _logger.LogWarning(
+                                abortEx,
+                                "Terminal fill on original {OrigClOrdId} consumed replacement {NewClOrdId}, but AbortReplace failed (ambiguousHeld={Ambiguous}).",
+                                lookupId,
+                                filledOrigIntent.NewClOrdId,
+                                ambiguousHeld);
+                        }
+                        _logger.LogInformation(
+                            "event=order.replace.dropped_on_orig_fill newClOrdId={NewClOrdId} origClOrdId={OrigClOrdId} owner={Owner} symbol={Symbol}; releasing held replacement reservation before algo resolution.",
+                            filledOrigIntent.NewClOrdId,
+                            filledOrigIntent.OriginalClOrdId,
+                            filledOrigIntent.Owner.Value,
+                            filledOrigIntent.Symbol);
+                    }
                     if (delta != lastQty)
                     {
                         // Cumulative advanced by an amount that disagrees with the
@@ -517,6 +564,7 @@ public sealed class ExecutionReportProcessor
                                     lookupId);
                                 keeper.Apply(feeEvt);
                             }
+
                         }
                     }
                     // Q2.4 (#271). Realized P&L. Compute the delta from
@@ -893,6 +941,29 @@ public sealed class ExecutionReportProcessor
 
     private static KeyValuePair<string, object?> KindTag(ExecKind kind) =>
         new("kind", kind.ToString());
+
+    private bool IsPeggedRepegIntent(
+        OrderReplacementIntent intent,
+        ulong parentAlgoId)
+    {
+        if (intent.ParentAlgoId != parentAlgoId)
+            return false;
+        if (intent.IsPeggedRepeg)
+            return true;
+
+        // Upgrade compatibility: WAL/snapshot intents written before #548
+        // lack IsPeggedRepeg, but their approved outbound mutation retains
+        // the durable algo action identity.
+        return _outboundLedger?.TryGetByClOrdId(
+                intent.NewClOrdId,
+                out var mutation) == true
+            && mutation?.AlgoOriginIdentity is
+            {
+                ParentAlgoId: var mutationParentAlgoId,
+                ActionKind: Outbound.AlgoOutboundActionKind.Repeg,
+            }
+            && mutationParentAlgoId == parentAlgoId;
+    }
 
     private void ApplyReplaceRejected(ulong newClOrdId, OrderReplacementIntent intent, string? rejectReason, Persistence.ExecutionFanOut? fanOut)
     {
