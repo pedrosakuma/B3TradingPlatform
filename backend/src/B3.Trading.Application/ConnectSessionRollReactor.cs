@@ -145,6 +145,7 @@ public sealed class PendingNewReapingConnectRollReactor : IConnectSessionRollRea
     private readonly WorkingOrderBook _orders;
     private readonly EventDispatcher _dispatcher;
     private readonly OrderStalenessService? _staleness;
+    private readonly Outbound.OutboundMutationLedger? _outboundLedger;
     private readonly TimeProvider _clock;
     private readonly ILogger<PendingNewReapingConnectRollReactor> _logger;
 
@@ -153,13 +154,15 @@ public sealed class PendingNewReapingConnectRollReactor : IConnectSessionRollRea
         EventDispatcher dispatcher,
         ILogger<PendingNewReapingConnectRollReactor> logger,
         OrderStalenessService? staleness = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        Outbound.OutboundMutationLedger? outboundLedger = null)
     {
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _staleness = staleness;
         _clock = clock ?? TimeProvider.System;
+        _outboundLedger = outboundLedger;
     }
 
     public void OnSessionRolled(string firmId, uint fromVerId, uint toVerId)
@@ -173,6 +176,16 @@ public sealed class PendingNewReapingConnectRollReactor : IConnectSessionRollRea
 
         // Phase 2: flag surviving Working / PartiallyFilled stale. NOT nested
         // inside RunExclusive (see class remarks).
+        StaleWorkingOrders(firmId, fromVerId, toVerId);
+
+        // Phase 3 is independent of Phase 2 (disjoint concerns — orders vs.
+        // outbound mutations) and must run even when staleness is
+        // unavailable, so it is not gated by Phase 2's early return.
+        ReclassifyStuckOutboundMutations(firmId, fromVerId, toVerId);
+    }
+
+    private void StaleWorkingOrders(string firmId, uint fromVerId, uint toVerId)
+    {
         if (_staleness is null)
         {
             // Real trading mode always wires the staleness service; a null
@@ -218,6 +231,49 @@ public sealed class PendingNewReapingConnectRollReactor : IConnectSessionRollRea
             MetricsRegistry.OrdersAutoStaledByVenueDesync.Add(marked,
                 new KeyValuePair<string, object?>("firm", firmId),
                 new KeyValuePair<string, object?>("reason", "session_rolled"));
+        }
+    }
+
+    private void ReclassifyStuckOutboundMutations(string firmId, uint fromVerId, uint toVerId)
+    {
+        // Phase 3 (#749): any outbound mutation whose last attempt committed
+        // a frame on the now-superseded session (SessionVerId < toVerId) is
+        // stuck — no execution report can ever arrive for it and no other
+        // reactor revisits it. Reclassify it Ambiguous (the same transition
+        // dead-epoch cold-start recovery uses) so it surfaces to
+        // operator/reconciliation tooling and stops being an invisible
+        // permanent block on future cancels/replaces for the same original
+        // order. This does not release the active-mutation dedup guard:
+        // retries stay blocked until the ambiguity is resolved with real
+        // venue evidence, by design.
+        if (_outboundLedger is null)
+        {
+            _logger.LogWarning(
+                "event=recovery.session-rolled firm={Firm} from={From} to={To} outboundReclassify=skipped reason=no_outbound_ledger",
+                firmId, fromVerId, toVerId);
+            return;
+        }
+
+        int reclassified;
+        try
+        {
+            reclassified = _outboundLedger.ClassifySessionRolledAttempts(firmId, toVerId, _clock.GetUtcNow());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "event=recovery.session-rolled.outbound-reclassify-failed firm={Firm} from={From} to={To} "
+                + "action=operator_should_inspect_outbound_mutations "
+                + "(stuck attempts from the superseded session may remain invisible to reconciliation tooling).",
+                firmId, fromVerId, toVerId);
+            return;
+        }
+
+        if (reclassified > 0)
+        {
+            _logger.LogWarning(
+                "event=recovery.session-rolled firm={Firm} from={From} to={To} outboundReclassifiedAmbiguous={Reclassified}",
+                firmId, fromVerId, toVerId, reclassified);
         }
     }
 }

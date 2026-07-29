@@ -217,6 +217,103 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void SessionRolled_ReclassifiesStuckCancelWriteAsAmbiguous_AndBlocksFurtherReclassifyOnAlreadyResolved()
+    {
+        var fixture = Fixture.Create();
+        var cancel = fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = 999,
+        };
+        fixture.Ledger.Apply(cancel);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame); // SessionVerId = 2 (pre-roll session)
+        fixture.Ledger.Apply(fixture.Write); // stuck at TransportWriteCompleted, no ER will ever arrive
+
+        var mutationBeforeRoll = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.TransportWriteCompleted, mutationBeforeRoll.State);
+        Assert.False(mutationBeforeRoll.RequiresReconciliation);
+        Assert.True(fixture.Ledger.TryGetActiveForOriginal("F1", 999, out _));
+
+        var reclassified = fixture.Ledger.ClassifySessionRolledAttempts(
+            "F1", currentSessionVerId: 3, T0.AddMinutes(1));
+
+        Assert.Equal(1, reclassified);
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledTransportWriteCompleted,
+            mutation.Attempts.Single().AmbiguityReason);
+
+        // Ambiguity is a defense-in-depth signal, not an automatic dedup
+        // release: the active-mutation guard for the original order must
+        // stay intact until an operator resolves it with venue evidence.
+        Assert.True(fixture.Ledger.TryGetActiveForOriginal("F1", 999, out var active));
+        Assert.Equal(mutation.MutationId, active!.MutationId);
+
+        // Re-running for a later roll on an already-reclassified mutation is
+        // a no-op (idempotent), not a conflicting-transition throw.
+        Assert.Equal(
+            0,
+            fixture.Ledger.ClassifySessionRolledAttempts("F1", currentSessionVerId: 4, T0.AddMinutes(2)));
+    }
+
+    [Fact]
+    public void SessionRolled_ReclassifiesFramePreparedOnlyAttemptAsAmbiguous()
+    {
+        var fixture = Fixture.Create(clOrdId: 501);
+        var cancel = fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = 998,
+        };
+        fixture.Ledger.Apply(cancel);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame); // frame prepared, write never completed
+
+        var reclassified = fixture.Ledger.ClassifySessionRolledAttempts(
+            "F1", currentSessionVerId: 3, T0.AddMinutes(1));
+
+        Assert.Equal(1, reclassified);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledFramePrepared,
+            fixture.Ledger.SnapshotMutations().Single().Attempts.Single().AmbiguityReason);
+    }
+
+    [Fact]
+    public void SessionRolled_IgnoresAttemptsFromCurrentOrLaterSession_AndOtherFirms()
+    {
+        var currentSession = Fixture.Create(); // Frame.SessionVerId == 2
+        currentSession.Ledger.Apply(currentSession.Approved);
+        currentSession.Ledger.Apply(currentSession.Intent);
+        currentSession.Ledger.Apply(currentSession.Frame);
+        currentSession.Ledger.Apply(currentSession.Write);
+
+        // toVerId == 2 means the attempt's own session is the current one,
+        // not a superseded one: it must not be touched.
+        Assert.Equal(
+            0,
+            currentSession.Ledger.ClassifySessionRolledAttempts("F1", currentSessionVerId: 2, T0.AddMinutes(1)));
+        Assert.Equal(
+            OutboundMutationState.TransportWriteCompleted,
+            currentSession.Ledger.SnapshotMutations().Single().State);
+
+        var otherFirm = Fixture.Create(clOrdId: 502);
+        otherFirm.Ledger.Apply(otherFirm.Approved with { FirmId = "F2" });
+        otherFirm.Ledger.Apply(otherFirm.Intent);
+        otherFirm.Ledger.Apply(otherFirm.Frame with { FirmId = "F2" });
+        otherFirm.Ledger.Apply(otherFirm.Write);
+
+        Assert.Equal(
+            0,
+            otherFirm.Ledger.ClassifySessionRolledAttempts("F1", currentSessionVerId: 5, T0.AddMinutes(1)));
+        Assert.Equal(
+            OutboundMutationState.TransportWriteCompleted,
+            otherFirm.Ledger.SnapshotMutations().Single().State);
+    }
+
+    [Fact]
     public async Task ColdStartCoordinator_CommitsIntentOnlyProvenUnsent_AndDoesNotResendFramePrepared()
     {
         var intentOnly = Fixture.Create();

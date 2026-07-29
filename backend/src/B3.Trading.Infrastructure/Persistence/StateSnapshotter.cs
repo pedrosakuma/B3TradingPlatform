@@ -1479,18 +1479,34 @@ public sealed class EventReplayer
                 break;
             case OutboundOperatorResolvedEvent resolved:
                 _outboundLedger?.Apply(resolved);
-                if (resolved.ReleaseCapacity
-                    && _outboundLedger?.TryGet(resolved.MutationId, out var resolvedMutation) == true
-                    && resolvedMutation is not null)
+                if (_outboundLedger?.TryGet(
+                        resolved.MutationId,
+                        out var resolvedMutation) == true &&
+                    resolvedMutation is not null)
                 {
-                    if (resolvedMutation.Kind == OutboundMutationKind.New)
+                    if (resolved.ReleaseCapacity &&
+                        resolvedMutation.Kind == OutboundMutationKind.New)
                     {
                         _marginProvider?.ReleaseReservation(resolvedMutation.PrimaryClOrdId);
                     }
-                    else if (resolvedMutation.Kind == OutboundMutationKind.Replace)
+                    else if (resolved.ReleaseCapacity &&
+                             resolvedMutation.Kind == OutboundMutationKind.Replace)
                     {
                         _replacements?.ReleaseForVenueAbsent(resolvedMutation.PrimaryClOrdId);
                         _replaceMargin?.AbortReplace(resolvedMutation.PrimaryClOrdId);
+                    }
+                    else if (resolved.Decision == OutboundOperatorDecision.VenueAbsent &&
+                             resolvedMutation.Kind == OutboundMutationKind.Cancel)
+                    {
+                        foreach (var cancelClOrdId in resolvedMutation.Attempts
+                                     .Select(attempt => attempt.ClOrdId)
+                                     .Append(resolvedMutation.PrimaryClOrdId)
+                                     .Distinct())
+                        {
+                            _pendingCancels?.TryConsumeByCancel(cancelClOrdId, out _);
+                            _ownership.RemoveCancelLink(cancelClOrdId);
+                            _userBotMappings?.ReapCancel(cancelClOrdId);
+                        }
                     }
                 }
                 break;

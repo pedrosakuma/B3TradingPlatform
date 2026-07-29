@@ -4,6 +4,7 @@ using B3.Trading.Application.Audit;
 using B3.Trading.Application.Observability;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
+using B3.Trading.Application.UserBots;
 
 namespace B3.Trading.Application.Outbound;
 
@@ -81,6 +82,10 @@ public sealed class OutboundReconciliationService
     private readonly IReplaceMarginCoordinator _replaceMargin;
     private readonly PendingReplacementRegistry _replacements;
     private readonly TimeProvider _clock;
+    private readonly PendingCancelRegistry? _pendingCancels;
+    private readonly OrderOwnershipMap? _ownership;
+    private readonly IUserBotOrderMappingRegistry? _botMappings;
+    private readonly Lifecycle.IDrainController? _drain;
 
     public OutboundReconciliationService(
         OutboundMutationLedger ledger,
@@ -89,7 +94,11 @@ public sealed class OutboundReconciliationService
         IMarginProvider margin,
         IReplaceMarginCoordinator replaceMargin,
         PendingReplacementRegistry replacements,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        PendingCancelRegistry? pendingCancels = null,
+        OrderOwnershipMap? ownership = null,
+        IUserBotOrderMappingRegistry? botMappings = null,
+        Lifecycle.IDrainController? drain = null)
     {
         _ledger = ledger;
         _dispatcher = dispatcher;
@@ -98,6 +107,10 @@ public sealed class OutboundReconciliationService
         _replaceMargin = replaceMargin;
         _replacements = replacements;
         _clock = clock ?? TimeProvider.System;
+        _pendingCancels = pendingCancels;
+        _ownership = ownership;
+        _botMappings = botMappings;
+        _drain = drain;
     }
 
     public OutboundOperatorResolutionResult Resolve(
@@ -171,6 +184,7 @@ public sealed class OutboundReconciliationService
             mutation.FirmId,
             releaseCapacity: false,
             cancellationToken);
+        TryResumeAfterResolution(request.Decision);
         var committedMutation = GetScopedMutation(mutationId, callerFirmId);
         var status = request.Decision == OutboundOperatorDecision.LeaveAmbiguous
             ? OutboundOperatorResolutionStatus.Annotated
@@ -317,6 +331,7 @@ public sealed class OutboundReconciliationService
             mutation.FirmId,
             releaseCapacity: true,
             cancellationToken);
+        TryResumeAfterResolution(proposal.Decision);
         var committedMutation = GetScopedMutation(mutationId, callerFirmId);
         return new OutboundOperatorResolutionResult(
             mutationId,
@@ -405,6 +420,8 @@ public sealed class OutboundReconciliationService
                     _ledger.Apply(resolved);
                     if (releaseCapacity)
                         ReleaseCapacity(resolved.MutationId);
+                    if (resolved.Decision == OutboundOperatorDecision.VenueAbsent)
+                        ReleaseVenueAbsentProjection(resolved.MutationId);
                 },
                 cancellationToken);
             if (!outcome.Applied)
@@ -442,6 +459,51 @@ public sealed class OutboundReconciliationService
                 _replacements.ReleaseForVenueAbsent(mutation.PrimaryClOrdId);
                 _replaceMargin.AbortReplace(mutation.PrimaryClOrdId);
                 break;
+        }
+    }
+
+    private void ReleaseVenueAbsentProjection(OutboundMutationId mutationId)
+    {
+        if (!_ledger.TryGet(mutationId, out var mutation) ||
+            mutation is null ||
+            mutation.Kind != OutboundMutationKind.Cancel)
+        {
+            return;
+        }
+
+        foreach (var cancelClOrdId in mutation.Attempts
+                     .Select(attempt => attempt.ClOrdId)
+                     .Append(mutation.PrimaryClOrdId)
+                     .Distinct())
+        {
+            _pendingCancels?.TryConsumeByCancel(cancelClOrdId, out _);
+            _ownership?.RemoveCancelLink(cancelClOrdId);
+            _botMappings?.ReapCancel(cancelClOrdId);
+        }
+    }
+
+    private void TryResumeAfterResolution(OutboundOperatorDecision decision)
+    {
+        if (decision == OutboundOperatorDecision.LeaveAmbiguous)
+            return;
+
+        if (_ledger.ReadinessBlockingCount == 0)
+        {
+            _drain?.TryEndOutboundReconciliationDrain();
+        }
+
+        // Cold-start restart can additionally raise a
+        // "cold_start_unresolved_lifecycle_intents" drain reason based on
+        // pending cancel/replace registries, independent of the ledger's
+        // own readiness-blocking count. Once every one of those sources is
+        // actually empty, that reason is stale and must be cleared too —
+        // otherwise a resolved ambiguous cancel/replace leaves the process
+        // stuck draining forever after a cold start.
+        if (_ledger.ReadinessBlockingCount == 0 &&
+            (_pendingCancels?.Snapshot().Count ?? 0) == 0 &&
+            _replacements.Snapshot().Count == 0)
+        {
+            _drain?.TryEndColdStartLifecycleIntentsDrain();
         }
     }
 

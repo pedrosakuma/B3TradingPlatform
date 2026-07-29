@@ -99,6 +99,48 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
     }
 
     [Fact]
+    public void OnlyOutboundReconciliationDrain_CanResume()
+    {
+        var drain = new DrainState();
+        drain.BeginDrain("outbound_cancel_replace_reconciliation_required");
+
+        Assert.True(drain.TryEndOutboundReconciliationDrain());
+        Assert.False(drain.IsDraining);
+
+        drain.BeginDrain("host_stopping");
+        Assert.False(drain.TryEndOutboundReconciliationDrain());
+        Assert.True(drain.IsDraining);
+
+        var overlapping = new DrainState();
+        overlapping.BeginDrain("outbound_new_order_reconciliation_required");
+        overlapping.BeginDrain("wal_execution_report_rejected");
+        Assert.False(overlapping.TryEndOutboundReconciliationDrain());
+        Assert.True(overlapping.IsDraining);
+        Assert.Equal("wal_execution_report_rejected", overlapping.Reason);
+    }
+
+    [Fact]
+    public void OnlyColdStartLifecycleIntentsDrain_CanResume()
+    {
+        var drain = new DrainState();
+        drain.BeginDrain("cold_start_unresolved_lifecycle_intents");
+
+        Assert.True(drain.TryEndColdStartLifecycleIntentsDrain());
+        Assert.False(drain.IsDraining);
+
+        drain.BeginDrain("host_stopping");
+        Assert.False(drain.TryEndColdStartLifecycleIntentsDrain());
+        Assert.True(drain.IsDraining);
+
+        var overlapping = new DrainState();
+        overlapping.BeginDrain("cold_start_unresolved_lifecycle_intents");
+        overlapping.BeginDrain("wal_execution_report_rejected");
+        Assert.False(overlapping.TryEndColdStartLifecycleIntentsDrain());
+        Assert.True(overlapping.IsDraining);
+        Assert.Equal("wal_execution_report_rejected", overlapping.Reason);
+    }
+
+    [Fact]
     public async Task WalFault_Causes_Ready503_While_LiveRemainsOk()
     {
         using var factory = TestAppFactory.WithOverrides(
