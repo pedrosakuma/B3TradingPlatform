@@ -329,11 +329,14 @@ public sealed class OutboundMutationLedger
 
     /// <summary>
     /// Applies transport-write-completion evidence. Returns <c>true</c> when
-    /// the attempt reaches <see cref="OutboundMutationState.TransportWriteCompleted"/>
-    /// as expected. Returns <c>false</c> when the evidence was accepted but
-    /// diverted the mutation to <see cref="OutboundMutationState.Ambiguous"/>
-    /// instead (races described below) — callers MUST check this and treat
-    /// it like <c>MarkAmbiguous</c>/reconciliation-required, not like a clean
+    /// the write is known complete, either because the attempt reaches
+    /// <see cref="OutboundMutationState.TransportWriteCompleted"/> or because
+    /// stronger venue evidence already moved it to
+    /// <see cref="OutboundMutationState.VenueAcknowledged"/>. Returns
+    /// <c>false</c> when the evidence was accepted but diverted the mutation
+    /// to <see cref="OutboundMutationState.Ambiguous"/> instead (races
+    /// described below) — callers MUST check this and treat it like
+    /// <c>MarkAmbiguous</c>/reconciliation-required, not like a clean
     /// dispatch, even though no exception was thrown.
     /// </summary>
     public bool Apply(OutboundTransportWriteCompletedEvent evt)
@@ -355,7 +358,8 @@ public sealed class OutboundMutationLedger
             {
                 if (existing == evt.CompletedAtUtc
                     && attempt.GatewayReceiptVersion == evt.GatewayReceiptVersion)
-                    return mutation.State == OutboundMutationState.TransportWriteCompleted;
+                    return mutation.State is OutboundMutationState.TransportWriteCompleted
+                        or OutboundMutationState.VenueAcknowledged;
                 throw TransitionError("Conflicting transport-write evidence.");
             }
             if (allowMissingFramePrepared
@@ -412,6 +416,27 @@ public sealed class OutboundMutationLedger
                     OutboundMutationState.Ambiguous, evt.TimestampUtc,
                     requiresReconciliation: true);
                 return false;
+            }
+            // The venue can acknowledge a frame before SubmitWithReceiptAsync
+            // returns to the coordinator. That acknowledgement is stronger
+            // evidence that the transport write landed, so retain the terminal
+            // state and resolution while filling in the late receipt evidence.
+            if (mutation.State == OutboundMutationState.VenueAcknowledged
+                && attempt.FramePrepared is not null
+                && index == mutation.Attempts.Count - 1)
+            {
+                var acknowledgedAttempt = attempt with
+                {
+                    TransportWriteCompletedAtUtc = evt.CompletedAtUtc,
+                    GatewayReceiptVersion = evt.GatewayReceiptVersion,
+                };
+                _mutations[evt.MutationId] = ReplaceAttempt(
+                    mutation,
+                    index,
+                    acknowledgedAttempt,
+                    mutation.State,
+                    mutation.StateChangedAtUtc);
+                return true;
             }
             if (mutation.State != OutboundMutationState.FramePrepared
                 || attempt.FramePrepared is null
