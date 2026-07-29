@@ -29,7 +29,7 @@ builder.Services.AddHttpClient<ISampleBotAuthProvider, SampleBotAuthProvider>((s
 
 builder.Services.AddSingleton<AuthenticatedSessionCache>();
 
-builder.Services.AddHttpClient<TradingPlatformRestClient>((services, client) =>
+builder.Services.AddHttpClient<ITradingPlatformRestClient, TradingPlatformRestClient>((services, client) =>
 {
     var options = services.GetRequiredService<IOptions<SampleBotOptions>>().Value;
     client.BaseAddress = new Uri(options.BaseUrl, UriKind.Absolute);
@@ -37,6 +37,7 @@ builder.Services.AddHttpClient<TradingPlatformRestClient>((services, client) =>
 
 builder.Services.AddSingleton<ISampleBotWebSocketConnectionFactory, ClientWebSocketConnectionFactory>();
 builder.Services.AddSingleton<TradingPlatformWebSocketClient>();
+builder.Services.AddSingleton<ISampleBotMarketDataClient, MarketDataPlatformClient>();
 builder.Services.AddHostedService<SampleBotWorker>();
 
 await builder.Build().RunAsync();

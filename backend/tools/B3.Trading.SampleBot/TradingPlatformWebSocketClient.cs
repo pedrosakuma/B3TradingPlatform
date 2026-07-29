@@ -69,7 +69,10 @@ internal sealed class TradingPlatformWebSocketClient
         _logger = logger;
     }
 
-    public async Task RunAsync(IPrivateFeedObserver observer, CancellationToken cancellationToken)
+    public async Task RunAsync(
+        IPrivateFeedObserver observer,
+        IReadOnlyList<string> channels,
+        CancellationToken cancellationToken)
     {
         var isReconnect = false;
         var websocketUri = BuildWebSocketUri(_options.BaseUrl);
@@ -82,7 +85,7 @@ internal sealed class TradingPlatformWebSocketClient
                 var session = await _sessionCache.GetAsync(cancellationToken);
                 await using var socket = await _connectionFactory.ConnectAsync(websocketUri, session.Token, cancellationToken);
                 await observer.OnConnectedAsync(isReconnect, cancellationToken);
-                await socket.SendTextAsync(PrivateFeedProtocol.BuildSubscribeCommand(), cancellationToken);
+                await socket.SendTextAsync(PrivateFeedProtocol.BuildSubscribeCommand(channels), cancellationToken);
                 _logger.LogInformation("Connected to {WebSocketUri} and subscribed to private channels.", websocketUri);
 
                 while (!cancellationToken.IsCancellationRequested)

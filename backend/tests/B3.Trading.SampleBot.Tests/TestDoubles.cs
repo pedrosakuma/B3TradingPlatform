@@ -139,3 +139,111 @@ internal sealed class ManualTimeProvider : TimeProvider
 
     public void Advance(TimeSpan by) => _utcNow = _utcNow.Add(by);
 }
+
+internal sealed class FakeTradingPlatformRestClient : ITradingPlatformRestClient
+{
+    public IReadOnlyList<SubAccountDto> SubAccounts { get; set; } = Array.Empty<SubAccountDto>();
+
+    public IReadOnlyList<TradingOrder> Orders { get; set; } = Array.Empty<TradingOrder>();
+
+    public Func<SubmitOrderCommand, string, CancellationToken, Task<RestCallResult<OrderMutationResponse>>> SubmitHandler { get; set; } =
+        (command, _, _) => Task.FromResult(new RestCallResult<OrderMutationResponse>(
+            HttpStatusCode.Accepted,
+            new OrderMutationResponse("submit-1", "101", "RecordedPendingApproval", false, null, null, null, null, null),
+            null,
+            null));
+
+    public Func<string, string, CancellationToken, Task<RestCallResult<OrderMutationResponse>>> CancelHandler { get; set; } =
+        (clOrdId, _, _) => Task.FromResult(new RestCallResult<OrderMutationResponse>(
+            HttpStatusCode.Accepted,
+            new OrderMutationResponse("cancel-1", clOrdId, "RecordedPendingApproval", false, null, null, null, null, null),
+            null,
+            null));
+
+    public List<SubmitOrderCommand> SubmitCalls { get; } = new();
+
+    public List<string> CancelCalls { get; } = new();
+
+    public TaskCompletionSource<SubmitOrderCommand> SubmitObserved { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource<string> CancelObserved { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task<IReadOnlyList<SubAccountDto>> GetSubAccountsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(SubAccounts);
+
+    public Task<IReadOnlyList<TradingOrder>> GetOrdersAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(Orders);
+
+    public async Task<RestCallResult<OrderMutationResponse>> SubmitLimitOrderAsync(
+        SubmitOrderCommand command,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        SubmitCalls.Add(command);
+        SubmitObserved.TrySetResult(command);
+        var result = await SubmitHandler(command, idempotencyKey, cancellationToken);
+        if (result.Payload?.ClOrdId is { Length: > 0 } clOrdId
+            && !string.Equals(result.Payload.Status, "Rejected", StringComparison.OrdinalIgnoreCase)
+            && !Orders.Any(order => string.Equals(order.ClOrdId, clOrdId, StringComparison.Ordinal)))
+        {
+            Orders =
+            [
+                .. Orders,
+                new TradingOrder(
+                    clOrdId,
+                    command.Symbol,
+                    command.SecurityId,
+                    command.Side,
+                    "Limit",
+                    command.Quantity,
+                    command.Quantity,
+                    0,
+                    command.Price,
+                    "Working",
+                    SubAccountId: command.SubAccountId),
+            ];
+        }
+
+        return result;
+    }
+
+    public async Task<RestCallResult<OrderMutationResponse>> CancelOrderAsync(
+        string clOrdId,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        CancelCalls.Add(clOrdId);
+        CancelObserved.TrySetResult(clOrdId);
+        return await CancelHandler(clOrdId, idempotencyKey, cancellationToken);
+    }
+}
+
+internal sealed class ControlledDelay
+{
+    private readonly Queue<TaskCompletionSource<bool>> _waiters = new();
+
+    public List<TimeSpan> Requests { get; } = new();
+
+    public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        Requests.Add(delay);
+        var waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (cancellationToken.CanBeCanceled)
+        {
+            cancellationToken.Register(() => waiter.TrySetCanceled(cancellationToken));
+        }
+
+        _waiters.Enqueue(waiter);
+        return waiter.Task;
+    }
+
+    public void ReleaseNext()
+    {
+        if (_waiters.Count == 0)
+            throw new InvalidOperationException("No pending controlled delay.");
+
+        _waiters.Dequeue().TrySetResult(true);
+    }
+}

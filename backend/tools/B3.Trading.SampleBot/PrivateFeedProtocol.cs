@@ -6,8 +6,8 @@ internal static class PrivateFeedProtocol
 {
     public static readonly string[] PrivateChannels = ["orders.me", "executions.me", "positions.me"];
 
-    public static string BuildSubscribeCommand() => JsonSerializer.Serialize(
-        new { type = "subscribe", channels = PrivateChannels },
+    public static string BuildSubscribeCommand(IEnumerable<string> channels) => JsonSerializer.Serialize(
+        new { type = "subscribe", channels = channels.ToArray() },
         SampleBotJson.Options);
 
     public static PrivateFeedFrame Parse(string json)
@@ -39,6 +39,22 @@ internal static class PrivateFeedProtocol
             ("snapshot", "positions.me") => new PositionsSnapshotFrame(seq, data.Deserialize<TradingPosition[]>(SampleBotJson.Options) ?? Array.Empty<TradingPosition>()),
             ("delta", "positions.me") => new PositionDeltaFrame(seq, data.Deserialize<TradingPosition>(SampleBotJson.Options)
                 ?? throw new InvalidOperationException("positions.me delta payload was empty.")),
+            var (_, phaseChannel) when phaseChannel is not null && phaseChannel.StartsWith("phases.", StringComparison.Ordinal) =>
+                ParsePhaseFrame(type, phaseChannel, seq, data),
+            _ => throw new InvalidOperationException($"Unsupported websocket frame type='{type}' channel='{channel}'."),
+        };
+    }
+
+    private static PrivateFeedFrame ParsePhaseFrame(string? type, string channel, long seq, JsonElement data)
+    {
+        var payload = data.Deserialize<PhaseSnapshot>(SampleBotJson.Options)
+            ?? throw new InvalidOperationException($"{channel} payload was empty.");
+        var symbol = channel["phases.".Length..];
+
+        return type switch
+        {
+            "snapshot" => new PhaseSnapshotFrame(seq, symbol, payload),
+            "delta" => new PhaseDeltaFrame(seq, symbol, payload),
             _ => throw new InvalidOperationException($"Unsupported websocket frame type='{type}' channel='{channel}'."),
         };
     }
@@ -51,4 +67,8 @@ internal sealed record ExecutionsSnapshotFrame(long Seq, IReadOnlyList<TradingEx
 internal sealed record ExecutionDeltaFrame(long Seq, TradingExecution Execution) : PrivateFeedFrame;
 internal sealed record PositionsSnapshotFrame(long Seq, IReadOnlyList<TradingPosition> Positions) : PrivateFeedFrame;
 internal sealed record PositionDeltaFrame(long Seq, TradingPosition Position) : PrivateFeedFrame;
+internal sealed record PhaseSnapshotFrame(long Seq, string Symbol, PhaseSnapshot Phase) : PrivateFeedFrame;
+internal sealed record PhaseDeltaFrame(long Seq, string Symbol, PhaseSnapshot Phase) : PrivateFeedFrame;
 internal sealed record ProtocolErrorFrame(string Code, string Message) : PrivateFeedFrame;
+
+internal sealed record PhaseSnapshot(string Phase, DateTimeOffset? At);

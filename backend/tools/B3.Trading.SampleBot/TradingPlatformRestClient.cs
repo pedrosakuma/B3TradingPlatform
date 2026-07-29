@@ -4,7 +4,24 @@ using System.Text.Json;
 
 namespace B3.Trading.SampleBot;
 
-internal sealed class TradingPlatformRestClient
+internal interface ITradingPlatformRestClient
+{
+    Task<IReadOnlyList<SubAccountDto>> GetSubAccountsAsync(CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<TradingOrder>> GetOrdersAsync(CancellationToken cancellationToken);
+
+    Task<RestCallResult<OrderMutationResponse>> SubmitLimitOrderAsync(
+        SubmitOrderCommand command,
+        string idempotencyKey,
+        CancellationToken cancellationToken);
+
+    Task<RestCallResult<OrderMutationResponse>> CancelOrderAsync(
+        string clOrdId,
+        string idempotencyKey,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class TradingPlatformRestClient : ITradingPlatformRestClient
 {
     private readonly HttpClient _httpClient;
     private readonly AuthenticatedSessionCache _sessionCache;

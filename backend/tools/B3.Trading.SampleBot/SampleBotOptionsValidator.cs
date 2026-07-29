@@ -28,6 +28,7 @@ public sealed class SampleBotOptionsValidator : IValidateOptions<SampleBotOption
             failures.Add("SampleBot:SubAccountId must not contain leading or trailing whitespace.");
 
         ValidateAuth(options.Auth, failures);
+        ValidateMarketData(options.MarketData, options.DemoOrder, failures);
         ValidateDemoOrder(options.DemoOrder, failures);
 
         return failures.Count == 0
@@ -59,6 +60,30 @@ public sealed class SampleBotOptionsValidator : IValidateOptions<SampleBotOption
         }
     }
 
+    private static void ValidateMarketData(
+        SampleBotMarketDataOptions marketData,
+        DemoOrderOptions demoOrder,
+        List<string> failures)
+    {
+        if (string.IsNullOrWhiteSpace(marketData.WsUrl))
+        {
+            if (demoOrder.Enabled)
+                failures.Add("SampleBot:MarketData:WsUrl is required when the sample strategy is enabled.");
+        }
+        else if (!TryGetWebSocketUri(marketData.WsUrl, out _))
+        {
+            failures.Add("SampleBot:MarketData:WsUrl must be an absolute ws:// or wss:// URI.");
+        }
+        else if (Uri.TryCreate(marketData.WsUrl, UriKind.Absolute, out var marketDataUri)
+            && string.Equals(marketDataUri.Host, "matching-platform", StringComparison.OrdinalIgnoreCase))
+        {
+            failures.Add("SampleBot:MarketData:WsUrl must target B3MarketDataPlatform, never matching-platform directly.");
+        }
+
+        if (marketData.MaxAge <= TimeSpan.Zero)
+            failures.Add("SampleBot:MarketData:MaxAge must be positive.");
+    }
+
     private static void ValidateDemoOrder(DemoOrderOptions demoOrder, List<string> failures)
     {
         if (!demoOrder.Enabled)
@@ -73,13 +98,28 @@ public sealed class SampleBotOptionsValidator : IValidateOptions<SampleBotOption
         }
         if (demoOrder.Quantity <= 0)
             failures.Add("SampleBot:DemoOrder:Quantity must be positive.");
-        if (demoOrder.Price <= 0)
-            failures.Add("SampleBot:DemoOrder:Price must be positive.");
-        if (demoOrder.CancelDelay < TimeSpan.Zero)
-            failures.Add("SampleBot:DemoOrder:CancelDelay must be zero or positive.");
+        if (demoOrder.TickSize <= 0)
+            failures.Add("SampleBot:DemoOrder:TickSize must be positive.");
+        if (demoOrder.PriceOffsetTicks <= 0)
+            failures.Add("SampleBot:DemoOrder:PriceOffsetTicks must be positive.");
+        if (demoOrder.MaxNotional <= 0)
+            failures.Add("SampleBot:DemoOrder:MaxNotional must be positive.");
+        if (demoOrder.OrderTimeout <= TimeSpan.Zero)
+            failures.Add("SampleBot:DemoOrder:OrderTimeout must be positive.");
+        if (demoOrder.CancellationAttemptTimeout <= TimeSpan.Zero)
+            failures.Add("SampleBot:DemoOrder:CancellationAttemptTimeout must be positive.");
         if (demoOrder.PostWorkflowWait < TimeSpan.Zero)
             failures.Add("SampleBot:DemoOrder:PostWorkflowWait must be zero or positive.");
         if (string.IsNullOrWhiteSpace(demoOrder.IdempotencyKeyPrefix))
             failures.Add("SampleBot:DemoOrder:IdempotencyKeyPrefix must be nonblank.");
+    }
+
+    private static bool TryGetWebSocketUri(string value, out Uri? uri)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out uri))
+            return false;
+
+        return string.Equals(uri.Scheme, Uri.UriSchemeWs, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(uri.Scheme, Uri.UriSchemeWss, StringComparison.OrdinalIgnoreCase);
     }
 }
