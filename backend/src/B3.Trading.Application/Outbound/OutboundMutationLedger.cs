@@ -327,13 +327,22 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public void Apply(OutboundTransportWriteCompletedEvent evt)
+    /// <summary>
+    /// Applies transport-write-completion evidence. Returns <c>true</c> when
+    /// the attempt reaches <see cref="OutboundMutationState.TransportWriteCompleted"/>
+    /// as expected. Returns <c>false</c> when the evidence was accepted but
+    /// diverted the mutation to <see cref="OutboundMutationState.Ambiguous"/>
+    /// instead (races described below) — callers MUST check this and treat
+    /// it like <c>MarkAmbiguous</c>/reconciliation-required, not like a clean
+    /// dispatch, even though no exception was thrown.
+    /// </summary>
+    public bool Apply(OutboundTransportWriteCompletedEvent evt)
         => ApplyTransportWriteCompleted(evt, allowMissingFramePrepared: false);
 
-    public void ApplyRecovered(OutboundTransportWriteCompletedEvent evt)
+    public bool ApplyRecovered(OutboundTransportWriteCompletedEvent evt)
         => ApplyTransportWriteCompleted(evt, allowMissingFramePrepared: true);
 
-    private void ApplyTransportWriteCompleted(
+    private bool ApplyTransportWriteCompleted(
         OutboundTransportWriteCompletedEvent evt,
         bool allowMissingFramePrepared)
     {
@@ -346,7 +355,7 @@ public sealed class OutboundMutationLedger
             {
                 if (existing == evt.CompletedAtUtc
                     && attempt.GatewayReceiptVersion == evt.GatewayReceiptVersion)
-                    return;
+                    return mutation.State == OutboundMutationState.TransportWriteCompleted;
                 throw TransitionError("Conflicting transport-write evidence.");
             }
             if (allowMissingFramePrepared
@@ -367,7 +376,42 @@ public sealed class OutboundMutationLedger
                     OutboundMutationState.Ambiguous,
                     evt.TimestampUtc,
                     requiresReconciliation: true);
-                return;
+                return false;
+            }
+            // Late-arriving genuine transport-write evidence can race
+            // ClassifySessionRolledAttempts: that reclassifier speculatively
+            // marks a still-in-flight FramePrepared attempt Ambiguous
+            // (SessionRolledFramePrepared) as soon as its session rolls,
+            // without waiting for (or being able to observe) the owning
+            // coordinator's own in-progress gateway write, which may
+            // legitimately complete moments later on the pre-roll transport
+            // handle it already held. Unlike the throw below — a genuine
+            // ordering violation — this is real evidence resolving exactly
+            // the open question the speculative reclassification left
+            // unanswered ("did the write land"), so it is accepted and
+            // upgrades the ambiguity reason to SessionRolledTransportWriteCompleted
+            // (mirroring PlanSessionRolledAttempts' own choice of reason for
+            // attempts it finds already in that state) rather than being
+            // rejected as an ordering violation. The mutation stays
+            // Ambiguous/RequiresReconciliation either way: a completed write
+            // after a session roll still lacks proof the venue processed it
+            // on that session, so reconciliation remains required.
+            if (mutation.State == OutboundMutationState.Ambiguous
+                && attempt.AmbiguityReason == OutboundAmbiguityReason.SessionRolledFramePrepared
+                && attempt.FramePrepared is not null
+                && index == mutation.Attempts.Count - 1)
+            {
+                var lateAttempt = attempt with
+                {
+                    TransportWriteCompletedAtUtc = evt.CompletedAtUtc,
+                    GatewayReceiptVersion = evt.GatewayReceiptVersion,
+                    AmbiguityReason = OutboundAmbiguityReason.SessionRolledTransportWriteCompleted,
+                };
+                _mutations[evt.MutationId] = ReplaceAttempt(
+                    mutation, index, lateAttempt,
+                    OutboundMutationState.Ambiguous, evt.TimestampUtc,
+                    requiresReconciliation: true);
+                return false;
             }
             if (mutation.State != OutboundMutationState.FramePrepared
                 || attempt.FramePrepared is null
@@ -381,6 +425,7 @@ public sealed class OutboundMutationLedger
             _mutations[evt.MutationId] = ReplaceAttempt(
                 mutation, index, updatedAttempt,
                 OutboundMutationState.TransportWriteCompleted, evt.TimestampUtc);
+            return true;
         }
     }
 

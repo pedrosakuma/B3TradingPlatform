@@ -534,10 +534,25 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                 GatewayReceiptVersion = receipt.Version,
                 TimestampUtc = completedAt,
             };
+            var landedAsCompleted = true;
             _dispatcher.DispatchCommitted(
                 completed,
-                () => _ledger.Apply(completed),
+                () => landedAsCompleted = _ledger.Apply(completed),
                 CancellationToken.None);
+            if (!landedAsCompleted)
+            {
+                // Raced ClassifySessionRolledAttempts: the ledger accepted
+                // this evidence but the mutation is Ambiguous
+                // (SessionRolledTransportWriteCompleted), not
+                // TransportWriteCompleted — a benign, already-reconcilable
+                // outcome (identical to what Phase 3 alone would have
+                // produced without a race), not an unknown gateway outcome,
+                // so no drain and no margin re-marking here.
+                _logger.LogWarning(
+                    "Cancel/replace outbound coordinator: transport write completed after the attempt's session had already rolled and been reclassified ambiguous; mutation {MutationId} is Ambiguous/RequiresReconciliation.",
+                    mutation.MutationId);
+                return new(CancelReplaceDispatchOutcome.ReconciliationRequired, attemptClOrdId);
+            }
             return new(CancelReplaceDispatchOutcome.TransportWriteCompleted, attemptClOrdId);
         }
         catch (ExchangeGatewayAttemptException ex)
