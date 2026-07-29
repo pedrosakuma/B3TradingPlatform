@@ -523,7 +523,15 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public void Apply(OutboundOperatorResolutionProposedEvent evt)
+    public void Apply(OutboundOperatorResolutionProposedEvent evt) =>
+        ApplyOperatorResolutionProposed(evt, allowRecoveredPreclassification: false);
+
+    public void ApplyRecovered(OutboundOperatorResolutionProposedEvent evt) =>
+        ApplyOperatorResolutionProposed(evt, allowRecoveredPreclassification: true);
+
+    private void ApplyOperatorResolutionProposed(
+        OutboundOperatorResolutionProposedEvent evt,
+        bool allowRecoveredPreclassification)
     {
         ArgumentNullException.ThrowIfNull(evt);
         if (evt.ProposalId.Value == Guid.Empty
@@ -550,7 +558,9 @@ public sealed class OutboundMutationLedger
                     return;
                 throw TransitionError("Conflicting operator resolution proposal.");
             }
-            if (!CanOperatorResolve(mutation))
+            if (!CanOperatorResolve(mutation)
+                && !(allowRecoveredPreclassification
+                    && CanReplayAfterEphemeralClassification(mutation)))
                 throw TransitionError("Operator resolution is not valid in the current state.");
             if (mutation.ResolutionProposals.Any(proposal => proposal.ApprovedAtUtc is null))
                 throw TransitionError("A maker/checker proposal is already pending.");
@@ -590,7 +600,15 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public void Apply(OutboundOperatorResolvedEvent evt)
+    public void Apply(OutboundOperatorResolvedEvent evt) =>
+        ApplyOperatorResolved(evt, allowRecoveredPreclassification: false);
+
+    public void ApplyRecovered(OutboundOperatorResolvedEvent evt) =>
+        ApplyOperatorResolved(evt, allowRecoveredPreclassification: true);
+
+    private void ApplyOperatorResolved(
+        OutboundOperatorResolvedEvent evt,
+        bool allowRecoveredPreclassification)
     {
         ArgumentNullException.ThrowIfNull(evt);
         ValidateOperatorEvidencePair(evt.Decision, evt.EvidenceType, evt.ReleaseCapacity);
@@ -636,7 +654,9 @@ public sealed class OutboundMutationLedger
                 && mutation.State is OutboundMutationState.OperatorResolved
                     or OutboundMutationState.VenueAcknowledged)
                 throw TransitionError("Outbound mutation already has a terminal operator resolution.");
-            if (!CanOperatorResolve(mutation))
+            if (!CanOperatorResolve(mutation)
+                && !(allowRecoveredPreclassification
+                    && CanReplayAfterEphemeralClassification(mutation)))
                 throw TransitionError("Operator resolution is not valid in the current state.");
             ulong? venueOrderId = null;
             if (evt.Decision == OutboundOperatorDecision.VenueAcknowledged &&
@@ -3219,6 +3239,17 @@ public sealed class OutboundMutationLedger
             or OutboundMutationState.LegacyUnknown
             or OutboundMutationState.LegacyUnknownCancel
             or OutboundMutationState.LegacyUnknownReplace;
+
+    private static bool CanReplayAfterEphemeralClassification(
+        OutboundMutationSnapshot mutation) =>
+        mutation.State is OutboundMutationState.FramePrepared
+            or OutboundMutationState.TransportWriteCompleted
+        && mutation.Attempts.LastOrDefault() is
+        {
+            FramePrepared: not null,
+            ProvenUnsentEvidence: null,
+            AmbiguityReason: null,
+        };
 
     private static bool HasRegisteredAuthoritativeEvidence(
         OutboundMutationSnapshot mutation,
