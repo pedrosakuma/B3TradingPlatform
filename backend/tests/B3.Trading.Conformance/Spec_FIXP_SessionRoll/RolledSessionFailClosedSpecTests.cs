@@ -118,11 +118,10 @@ public sealed class RolledSessionFailClosedSpecTests
                     mutation => Assert.Contains(
                         blocking,
                         candidate => candidate.MutationId == mutation.MutationId));
-                await ResolveScenarioMutationsUntilReadyAsync(
+                await ResolveRecoveryMutationsUntilReadyAsync(
                     http,
                     maker,
-                    checker,
-                    baseline);
+                    checker);
                 using var reopened = await SubmitOrderAsync(
                     http,
                     user,
@@ -132,11 +131,10 @@ public sealed class RolledSessionFailClosedSpecTests
             },
             beforeOrderCleanup: async () =>
             {
-                await ResolveScenarioMutationsUntilReadyAsync(
+                await ResolveRecoveryMutationsUntilReadyAsync(
                     http,
                     maker,
-                    checker,
-                    baseline);
+                    checker);
             });
     }
 
@@ -320,11 +318,10 @@ public sealed class RolledSessionFailClosedSpecTests
         approvalResponse.EnsureSuccessStatusCode();
     }
 
-    private static async Task ResolveScenarioMutationsUntilReadyAsync(
+    private static async Task ResolveRecoveryMutationsUntilReadyAsync(
         HttpClient http,
         AuthenticationHeaderValue maker,
-        AuthenticationHeaderValue checker,
-        IReadOnlySet<string> baseline)
+        AuthenticationHeaderValue checker)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
         HttpStatusCode? last = null;
@@ -334,9 +331,7 @@ public sealed class RolledSessionFailClosedSpecTests
             try
             {
                 remaining = (await GetMutationsAsync(http, maker))
-                    .Where(mutation =>
-                        !baseline.Contains(mutation.MutationId) &&
-                        mutation.RequiresReconciliation)
+                    .Where(mutation => mutation.RequiresReconciliation)
                     .ToArray();
                 foreach (var mutation in remaining)
                 {
