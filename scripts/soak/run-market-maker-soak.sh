@@ -2614,7 +2614,7 @@ open_orders_bounded="$(jq -r '
 printf '%s\n' "$open_order_bounds_report" >"${artifacts_dir}/open-order-bounds.json"
 accounting_period_count="$(jq -s '[.[].accountingPeriodStartedAtUtc] | unique | length' "$samples_jsonl")"
 counter_monotonic_report="$(jq -s '
-  reduce (.[] | select(.metric | endswith("_total"))) as $row (
+  reduce (.[] | select((.metric | endswith("_total")) and .metric != "bot_pnl_total")) as $row (
     {last: {}, violations: []};
     ($row.metric + "|" + ($row.labels | tojson)) as $key |
     (if (.last | has($key)) and $row.value < .last[$key] then
@@ -2796,7 +2796,7 @@ record_check "accounting-period-stable" \
     "one non-empty accountingPeriodStartedAtUtc across every sample" \
     "stable=$accounting_stable distinct=$accounting_period_count value=$accounting_period_started_at_utc"
 record_check "tracked-counters-monotonic" "$counter_monotonic" \
-    "every tracked *_total series is monotonically non-decreasing" \
+    "every tracked counter series is monotonically non-decreasing" \
     "violations=$(jq -c '.violations' <<<"$counter_monotonic_report")"
 
 configured_spread="$(metric_value "bot_strategy_configured_half_spread_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}")"
