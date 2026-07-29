@@ -1222,7 +1222,7 @@ if [[ -n "$suite_manifest" ]]; then
         log "ERROR: acceptance suite source/image binding failed: $(jq -c . <<<"$suite_source_binding_report")"
         exit 1
     fi
-    if $suite_manifest_exists; then
+    if $suite_manifest_exists && (( accepted_run_count > 0 )); then
         if ! jq -e \
             --argjson compatibility "$compatibility_json" '
               .schemaVersion == "2" and
@@ -1238,6 +1238,18 @@ if [[ -n "$suite_manifest" ]]; then
             exit 3
         fi
     else
+        # A manifest can exist with zero accepted runs when a prior attempt
+        # for this suite created it but failed/crashed before any profile
+        # was accepted (e.g. the run's build produced fresh runtime image
+        # IDs, or the run itself failed mid-flight). Nothing is pinned by an
+        # accepted run yet, so it is safe to regenerate the compatibility/
+        # runtimeImages binding for a fresh attempt instead of treating a
+        # differing image ID as a fatal "suite compatibility mismatch" —
+        # that used to reject every retry after a failed first build even
+        # though the suite had zero accepted evidence to protect.
+        if $suite_manifest_exists; then
+            log "WARN: suite manifest exists with zero accepted runs; regenerating compatibility/runtimeImages binding for this attempt"
+        fi
         jq -n \
             --arg suiteId "$suite_id" \
             --arg builtFromGitSha "$git_sha" \
