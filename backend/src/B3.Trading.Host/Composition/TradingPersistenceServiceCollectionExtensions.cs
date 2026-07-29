@@ -169,7 +169,8 @@ public static class TradingPersistenceServiceCollectionExtensions
             sp.GetRequiredService<EventDispatcher>(),
             sp.GetRequiredService<ILogger<PendingNewReapingConnectRollReactor>>(),
             sp.GetService<OrderStalenessService>(),
-            sp.GetService<TimeProvider>()));
+            sp.GetService<TimeProvider>(),
+            sp.GetService<OutboundMutationLedger>()));
 
         return services;
     }

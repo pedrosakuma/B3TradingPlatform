@@ -1457,6 +1457,127 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    /// <summary>
+    /// Cold-start's <see cref="ClassifyRecoveredAttempts"/> only reclassifies
+    /// attempts whose <see cref="OutboundProcessEpoch"/> died with a process
+    /// restart. Within a single long-running process, a CONFIRMED FIXP
+    /// session roll (#380/#512) discards the venue's per-session state just
+    /// as thoroughly, but leaves any attempt whose frame was prepared on the
+    /// superseded session stuck in FramePrepared/TransportWriteCompleted
+    /// forever: no execution report can ever arrive over a session that no
+    /// longer exists, and no other reactor revisits it. That silently blocks
+    /// every later genuine cancel/replace on the same original order via
+    /// <see cref="TryGetActiveForOriginal"/> (#749) without ever setting
+    /// <c>RequiresReconciliation</c>, so operator/reconciliation tooling has
+    /// no signal to act on either. Plan (dry-run) + Classify mirror the
+    /// dead-epoch pair exactly, keyed on the attempt's committed
+    /// <see cref="OutboundFramePreparedEvent.SessionVerId"/> instead of the
+    /// process epoch, scoped to the rolled firm.
+    /// </summary>
+    public IReadOnlyList<RecoveredOutboundAttemptClassification> PlanSessionRolledAttempts(
+        string firmId,
+        uint currentSessionVerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        lock (_gate)
+        {
+            var result = new List<RecoveredOutboundAttemptClassification>();
+            foreach (var mutation in _mutations.Values)
+            {
+                if (!string.Equals(mutation.FirmId, firmId, StringComparison.Ordinal)
+                    || mutation.Attempts.Count == 0
+                    || IsTerminal(mutation.State))
+                    continue;
+                var attempt = mutation.Attempts[^1];
+                if (attempt.FramePrepared is not { } framePrepared
+                    || framePrepared.SessionVerId >= currentSessionVerId
+                    || attempt.ProvenUnsentEvidence is not null
+                    || attempt.AmbiguityReason is not null)
+                {
+                    continue;
+                }
+                result.Add(new RecoveredOutboundAttemptClassification(
+                    mutation.MutationId,
+                    attempt.AttemptId,
+                    mutation.FirmId,
+                    RecoveredOutboundAttemptDisposition.Ambiguous,
+                    null,
+                    attempt.TransportWriteCompletedAtUtc is null
+                        ? OutboundAmbiguityReason.SessionRolledFramePrepared
+                        : OutboundAmbiguityReason.SessionRolledTransportWriteCompleted));
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Applies <see cref="PlanSessionRolledAttempts"/> for a firm that just
+    /// had a confirmed session roll, marking each still-stuck attempt
+    /// Ambiguous (the same <see cref="OutboundMutationState.Ambiguous"/>
+    /// transition <see cref="ClassifyRecoveredAttempts"/> uses, so
+    /// <c>RequiresReconciliation</c> flips true and the mutation surfaces to
+    /// operator/reconciliation tooling exactly like a dead-epoch attempt
+    /// would). This does not change <see cref="TryGetActiveForOriginal"/>'s
+    /// dedup guard — that stays intentionally blocking (no retry on
+    /// unresolved ambiguity is a deliberate invariant) until the ambiguity is
+    /// resolved with real venue evidence. Re-validates each classification
+    /// under a single lock (mirroring <see cref="ClassifyRecoveredAttempts"/>)
+    /// rather than trusting the Plan snapshot, because a genuine execution
+    /// report can concurrently resolve a mutation between Plan and Classify.
+    /// Not itself WAL-recorded: like cold-start reclassification, it is
+    /// safely re-derivable — a crash before this runs leaves the attempt in
+    /// its last WAL state, and the next cold start's
+    /// <see cref="ClassifyRecoveredAttempts"/> will reclassify it as
+    /// dead-epoch instead.
+    /// </summary>
+    public int ClassifySessionRolledAttempts(
+        string firmId,
+        uint currentSessionVerId,
+        DateTimeOffset atUtc)
+    {
+        var classifications = PlanSessionRolledAttempts(firmId, currentSessionVerId);
+        lock (_gate)
+        {
+            var changed = 0;
+            foreach (var classification in classifications)
+            {
+                // Re-validate against the current state under this single
+                // lock acquisition — mirrors ClassifyRecoveredAttempts
+                // (lines ~1378-1384). Plan (above) took its own lock and
+                // released it, so the mutation may have genuinely resolved
+                // (e.g. a real execution report finalised it to
+                // VenueAcknowledged) in between; without this re-check,
+                // MarkAmbiguous would blindly force a resolved mutation back
+                // to Ambiguous.
+                if (!_mutations.TryGetValue(classification.MutationId, out var mutation)
+                    || mutation.Attempts.Count == 0
+                    || IsTerminal(mutation.State))
+                {
+                    continue;
+                }
+                var attempt = mutation.Attempts[^1];
+                if (attempt.AttemptId != classification.AttemptId
+                    || attempt.FramePrepared is null
+                    || attempt.AmbiguityReason is not null)
+                {
+                    continue;
+                }
+                var reason = classification.AmbiguityReason
+                    ?? throw new InvalidOperationException(
+                        "Session-rolled ambiguous classification lacks a reason.");
+                _mutations[classification.MutationId] = ReplaceAttempt(
+                    mutation,
+                    mutation.Attempts.Count - 1,
+                    attempt with { AmbiguityReason = reason },
+                    OutboundMutationState.Ambiguous,
+                    atUtc,
+                    requiresReconciliation: true);
+                changed++;
+            }
+            return changed;
+        }
+    }
+
     public void MarkAmbiguous(
         OutboundMutationId mutationId,
         OutboundAttemptId attemptId,

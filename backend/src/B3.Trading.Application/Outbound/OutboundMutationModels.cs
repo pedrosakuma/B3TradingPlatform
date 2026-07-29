@@ -193,6 +193,8 @@ public enum OutboundAmbiguityReason
     GatewayOutcomeUnknown,
     SessionVersionMismatchEvidence,
     MissingFramePreparedEvidence,
+    SessionRolledFramePrepared,
+    SessionRolledTransportWriteCompleted,
 }
 
 public enum RecoveredOutboundAttemptDisposition
