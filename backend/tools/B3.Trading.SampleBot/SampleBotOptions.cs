@@ -18,6 +18,8 @@ public sealed class SampleBotOptions
     public SampleBotAuthOptions Auth { get; set; } = new();
 
     public DemoOrderOptions DemoOrder { get; set; } = new();
+
+    public SampleBotMarketDataOptions MarketData { get; set; } = new();
 }
 
 public sealed class SampleBotAuthOptions
@@ -46,23 +48,34 @@ public sealed class DemoOrderOptions
 
     public string Symbol { get; set; } = "PETR4";
 
-    public ulong SecurityId { get; set; }
-
     public string Side { get; set; } = "Buy";
 
     [Range(1, long.MaxValue)]
     public long Quantity { get; set; } = 100;
 
-    [Range(typeof(decimal), "0.01", "1000000")]
-    public decimal Price { get; set; } = 30m;
+    [Range(typeof(decimal), "0.0001", "1000000")]
+    public decimal TickSize { get; set; } = 0.01m;
 
-    public bool AutoCancel { get; set; } = true;
+    [Range(1, int.MaxValue)]
+    public int PriceOffsetTicks { get; set; } = 1;
 
-    public TimeSpan CancelDelay { get; set; } = TimeSpan.FromSeconds(2);
+    [Range(typeof(decimal), "0.01", "1000000000000")]
+    public decimal MaxNotional { get; set; } = 5000m;
 
-    public bool ExitAfterWorkflow { get; set; } = true;
+    public TimeSpan OrderTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    public TimeSpan CancellationAttemptTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    public bool RequireOpenPhase { get; set; } = true;
 
     public TimeSpan PostWorkflowWait { get; set; } = TimeSpan.FromSeconds(3);
 
     public string IdempotencyKeyPrefix { get; set; } = "samplebot";
+}
+
+public sealed class SampleBotMarketDataOptions
+{
+    public string? WsUrl { get; set; }
+
+    public TimeSpan MaxAge { get; set; } = TimeSpan.FromSeconds(5);
 }

@@ -8,8 +8,9 @@ Small authenticated .NET sample for the participant-facing `B3TradingPlatform` A
 - `POST /api/auth/exchange` (`ExternalExchange` mode)
 - direct use of an existing internal trading JWT (`InternalToken` mode)
 - authenticated `GET /ws` subscription to `orders.me`, `executions.me`, and `positions.me`
+- independent `B3MarketDataPlatform` WebSocket subscription for one symbol's public reference/trade feed
 - `GET /api/sub-accounts` validation for an optional configured sub-account
-- `POST /api/orders` and `DELETE /api/orders/{clOrdId}` with `Idempotency-Key`
+- one bounded market-data-driven `POST /api/orders` / `DELETE /api/orders/{clOrdId}` lifecycle with `Idempotency-Key`
 
 ## What it does **not** do
 
@@ -17,7 +18,7 @@ Small authenticated .NET sample for the participant-facing `B3TradingPlatform` A
 - no FIXP socket
 - no direct `matching-platform` connection
 - no new machine-to-machine credential contract
-- no market-data-driven strategy logic (`#723`)
+- no production-grade strategy guarantees
 
 ## Configuration
 
@@ -28,9 +29,11 @@ Example environment overrides:
 
 ```bash
 export SampleBot__BaseUrl='https://localhost:5001'
+export SampleBot__MarketData__WsUrl='ws://localhost:8080/ws'
 export SampleBot__Auth__Mode='LocalPassword'
 export SampleBot__Auth__Username='alice'
 export SampleBot__Auth__Password='wonderland'
+export SampleBot__DemoOrder__Enabled='true'
 ```
 
 ### Auth modes
@@ -48,7 +51,9 @@ Platform relationship:
 ## Demo order safety
 
 `SampleBot:DemoOrder:Enabled` defaults to `false` so simply running the sample will only authenticate, connect `/ws`, subscribe, and log private events.
-When enabled, it submits one limit order and can auto-cancel it after a short delay.
+When enabled, it also connects to `SampleBot:MarketData:WsUrl`, waits for a fresh public quote, computes a passive limit price by moving `PriceOffsetTicks * TickSize` away from the reference, submits at most one order, and cancels it after `OrderTimeout` if it is still working.
+
+The sample intentionally takes public prices from `B3MarketDataPlatform` instead of talking to `matching-platform` directly. In this repository, FIXP/SBE stays behind `IExchangeGateway`; external bots should use the participant API for order mutations and the public market-data platform for venue prices.
 
 ## Run
 

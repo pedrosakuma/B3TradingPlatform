@@ -20,6 +20,19 @@ public sealed class TradingPlatformWebSocketClientTests
     }
 
     [Fact]
+    public void PrivateFeedProtocol_ParsesPhaseSnapshot()
+    {
+        var frame = PrivateFeedProtocol.Parse(
+            """
+            {"type":"snapshot","channel":"phases.PETR4","seq":4,"data":{"phase":"Open","at":"2026-07-29T00:00:00Z"}}
+            """);
+
+        var snapshot = Assert.IsType<PhaseSnapshotFrame>(frame);
+        Assert.Equal("PETR4", snapshot.Symbol);
+        Assert.Equal("Open", snapshot.Phase.Phase);
+    }
+
+    [Fact]
     public void BuildAuthenticatedUri_AppendsRealEscapedToken()
     {
         var uri = ClientWebSocketConnectionFactory.BuildAuthenticatedUri(
@@ -58,15 +71,15 @@ public sealed class TradingPlatformWebSocketClientTests
             NullLogger<TradingPlatformWebSocketClient>.Instance);
         var observer = new RecordingObserver(() => cts.Cancel());
 
-        await client.RunAsync(observer, cts.Token);
+        await client.RunAsync(observer, PrivateFeedProtocol.PrivateChannels, cts.Token);
 
         Assert.Equal([false, true], observer.ConnectEvents);
         Assert.Equal(1, observer.DisconnectCount);
         Assert.Equal(2, factory.ConnectCalls.Count);
         Assert.Single(firstConnection.SentPayloads);
         Assert.Single(secondConnection.SentPayloads);
-        Assert.Equal(PrivateFeedProtocol.BuildSubscribeCommand(), firstConnection.SentPayloads[0]);
-        Assert.Equal(PrivateFeedProtocol.BuildSubscribeCommand(), secondConnection.SentPayloads[0]);
+        Assert.Equal(PrivateFeedProtocol.BuildSubscribeCommand(PrivateFeedProtocol.PrivateChannels), firstConnection.SentPayloads[0]);
+        Assert.Equal(PrivateFeedProtocol.BuildSubscribeCommand(PrivateFeedProtocol.PrivateChannels), secondConnection.SentPayloads[0]);
     }
 
     [Fact]
