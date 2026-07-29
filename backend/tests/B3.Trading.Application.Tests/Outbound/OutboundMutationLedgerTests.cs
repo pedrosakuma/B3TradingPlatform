@@ -332,6 +332,41 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void LateTransportWriteCompleted_AfterVenueAcknowledgement_IsRecordedWithoutReplacingTerminalState()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            fixture.Ledger.ApplyVenueAcknowledgement(
+                Acknowledgement(fixture, "F1", sessionId: 11, sessionVerId: 2) with
+                {
+                    TimestampUtc = T0.AddMilliseconds(3500),
+                }).Status);
+        var acknowledged = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, acknowledged.State);
+        var resolution = Assert.IsType<OutboundResolutionSnapshot>(acknowledged.Resolution);
+        var acknowledgedAt = acknowledged.StateChangedAtUtc;
+
+        Assert.True(fixture.Ledger.Apply(fixture.Write));
+
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, mutation.State);
+        Assert.Equal(acknowledgedAt, mutation.StateChangedAtUtc);
+        Assert.Equal(resolution, mutation.Resolution);
+        Assert.False(mutation.RequiresReconciliation);
+        var attempt = Assert.Single(mutation.Attempts);
+        Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(fixture.Write.GatewayReceiptVersion, attempt.GatewayReceiptVersion);
+
+        Assert.True(fixture.Ledger.Apply(fixture.Write));
+        Assert.True(fixture.Ledger.ApplyRecovered(fixture.Write));
+    }
+
+    [Fact]
     public void SessionRolled_IgnoresAttemptsFromCurrentOrLaterSession_AndOtherFirms()
     {
         var currentSession = Fixture.Create(); // Frame.SessionVerId == 2
