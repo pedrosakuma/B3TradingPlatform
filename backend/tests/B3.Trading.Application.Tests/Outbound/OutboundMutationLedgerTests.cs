@@ -1717,6 +1717,107 @@ public sealed class OutboundMutationLedgerTests
         Assert.NotNull(mutation.Resolution);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReplayedOperatorResolution_AfterEphemeralClassification_AcceptsLastDurableState(
+        bool transportWriteCompleted)
+    {
+        var writer = Fixture.Create();
+        writer.Ledger.Apply(writer.Approved);
+        writer.Ledger.Apply(writer.Intent);
+        writer.Ledger.Apply(writer.Frame);
+        if (transportWriteCompleted)
+            writer.Ledger.Apply(writer.Write);
+        writer.Ledger.ClassifySessionRolledAttempts(
+            "F1", currentSessionVerId: 3, T0.AddMinutes(1));
+        var resolved = new OutboundOperatorResolvedEvent
+        {
+            MutationId = writer.MutationId,
+            Decision = OutboundOperatorDecision.VenueAbsent,
+            EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+            EvidenceDigest = new string('d', 64),
+            EvidenceReference = $"official-extract:{new string('d', 64)}",
+            ReasonCode = "official_extract_attested",
+            OperatorRef = "operator-17",
+            ReleaseCapacity = true,
+            ResolvedAtUtc = T0.AddMinutes(2),
+            TimestampUtc = T0.AddMinutes(2),
+        };
+        writer.Ledger.Apply(resolved);
+
+        var replayed = new OutboundMutationLedger(writer.Protector);
+        var replayer = NewReplayer(replayed, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Frame);
+        if (transportWriteCompleted)
+            replayer.Apply(writer.Write);
+
+        Assert.Throws<InvalidOperationException>(() => replayed.Apply(resolved));
+        replayer.Apply(resolved);
+
+        var mutation = Assert.Single(replayed.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation.State);
+        Assert.False(mutation.RequiresReconciliation);
+        Assert.Equal(
+            OutboundOperatorDecision.VenueAbsent,
+            Assert.Single(mutation.OperatorEvidence).Decision);
+        Assert.NotNull(mutation.Resolution);
+    }
+
+    [Fact]
+    public void ReplayedOperatorProposal_AfterEphemeralClassification_AllowsMakerCheckerResolution()
+    {
+        var writer = Fixture.Create();
+        var proposalId = new OutboundResolutionProposalId(Guid.Parse(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        var proposed = new OutboundOperatorResolutionProposedEvent
+        {
+            MutationId = writer.MutationId,
+            ProposalId = proposalId,
+            Decision = OutboundOperatorDecision.VenueAbsent,
+            EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+            EvidenceReference = $"official-extract:{new string('e', 64)}",
+            EvidenceDigest = new string('e', 64),
+            ReasonCode = "official_extract_attested",
+            MakerRef = "maker-17",
+            ProposedAtUtc = T0.AddMinutes(2),
+            TimestampUtc = T0.AddMinutes(2),
+        };
+        var resolved = new OutboundOperatorResolvedEvent
+        {
+            MutationId = writer.MutationId,
+            Decision = proposed.Decision,
+            EvidenceType = proposed.EvidenceType,
+            EvidenceReference = proposed.EvidenceReference,
+            EvidenceDigest = proposed.EvidenceDigest,
+            ReasonCode = proposed.ReasonCode,
+            OperatorRef = "checker-18",
+            MakerRef = proposed.MakerRef,
+            CheckerRef = "checker-18",
+            ProposalId = proposalId,
+            ReleaseCapacity = true,
+            ResolvedAtUtc = T0.AddMinutes(3),
+            TimestampUtc = T0.AddMinutes(3),
+        };
+        var replayed = new OutboundMutationLedger(writer.Protector);
+        var replayer = NewReplayer(replayed, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Frame);
+
+        Assert.Throws<InvalidOperationException>(() => replayed.Apply(proposed));
+        replayer.Apply(proposed);
+        replayer.Apply(resolved);
+
+        var mutation = Assert.Single(replayed.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation.State);
+        var proposal = Assert.Single(mutation.ResolutionProposals);
+        Assert.Equal("checker-18", proposal.CheckerRef);
+        Assert.Equal(resolved.ResolvedAtUtc, proposal.ApprovedAtUtc);
+    }
+
     [Fact]
     public void BusinessReject_RequiresExactFrameCorrelation_AndLateErResolvesAmbiguity()
     {

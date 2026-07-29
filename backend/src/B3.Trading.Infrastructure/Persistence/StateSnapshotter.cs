@@ -1472,13 +1472,13 @@ public sealed class EventReplayer
                 _outboundLedger?.Apply(authoritativeEvidence);
                 break;
             case OutboundOperatorResolutionProposedEvent proposed:
-                _outboundLedger?.Apply(proposed);
+                _outboundLedger?.ApplyRecovered(proposed);
                 break;
             case OutboundReconciliationRequiredEvent reconciliationRequired:
                 _outboundLedger?.Apply(reconciliationRequired);
                 break;
             case OutboundOperatorResolvedEvent resolved:
-                _outboundLedger?.Apply(resolved);
+                _outboundLedger?.ApplyRecovered(resolved);
                 if (_outboundLedger?.TryGet(
                         resolved.MutationId,
                         out var resolvedMutation) == true &&
