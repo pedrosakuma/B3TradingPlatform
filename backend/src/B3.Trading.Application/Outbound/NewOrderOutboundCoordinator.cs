@@ -424,10 +424,23 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
                 GatewayReceiptVersion = receipt.Version,
                 TimestampUtc = completedAt,
             };
+            var landedAsCompleted = true;
             _dispatcher.DispatchCommitted(
                 completed,
-                () => _ledger.Apply(completed),
+                () => landedAsCompleted = _ledger.Apply(completed),
                 CancellationToken.None);
+            if (!landedAsCompleted)
+            {
+                // Raced ClassifySessionRolledAttempts: the ledger accepted
+                // this evidence but the mutation is Ambiguous
+                // (SessionRolledTransportWriteCompleted), not
+                // TransportWriteCompleted — a benign, already-reconcilable
+                // outcome, not an unknown gateway outcome, so no drain here.
+                _logger.LogWarning(
+                    "New-order outbound coordinator: transport write completed after the attempt's session had already rolled and been reclassified ambiguous; mutation {MutationId} is Ambiguous/RequiresReconciliation.",
+                    mutation.MutationId);
+                return new(NewOrderDispatchOutcome.ReconciliationRequired);
+            }
             _gtd?.OnOrderTracked(order);
             _iocFok?.Register(order);
             return new(NewOrderDispatchOutcome.TransportWriteCompleted);

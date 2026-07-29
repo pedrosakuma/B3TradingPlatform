@@ -282,6 +282,56 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void LateTransportWriteCompleted_AfterSessionRolledFramePreparedReclassification_IsAcceptedNotRejected()
+    {
+        // Regression test for the #719 soak-evidence race: a coordinator can
+        // still be genuinely in flight on the venue transport (write not yet
+        // completed) at the exact moment its session rolls. Phase 3
+        // (ClassifySessionRolledAttempts) speculatively reclassifies that
+        // still-FramePrepared attempt Ambiguous without knowing the write is
+        // about to legitimately complete. When the coordinator's own
+        // OutboundTransportWriteCompletedEvent arrives moments later, Apply
+        // must accept it as real evidence instead of throwing
+        // "Transport-write completion is out of order." (which previously
+        // escaped uncaught up through the ledger, into the coordinator's
+        // catch-all, and forced a fail-closed drain of all future order
+        // flow — reproduced live under the #719 baseline soak run).
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame); // frame prepared on SessionVerId = 2
+
+        Assert.Equal(
+            1,
+            fixture.Ledger.ClassifySessionRolledAttempts(
+                "F1", currentSessionVerId: 3, T0.AddMinutes(1)));
+        var reclassified = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, reclassified.State);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledFramePrepared,
+            reclassified.Attempts.Single().AmbiguityReason);
+
+        // The coordinator's own in-flight write completes right after —
+        // this must not throw.
+        var landedAsCompleted = fixture.Ledger.Apply(fixture.Write);
+
+        Assert.False(landedAsCompleted);
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        var attempt = mutation.Attempts.Single();
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledTransportWriteCompleted,
+            attempt.AmbiguityReason);
+        Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(fixture.Write.GatewayReceiptVersion, attempt.GatewayReceiptVersion);
+
+        // Idempotent replay of the same completion evidence must not throw
+        // either, and must report the same (non-clean) outcome.
+        Assert.False(fixture.Ledger.Apply(fixture.Write));
+    }
+
+    [Fact]
     public void SessionRolled_IgnoresAttemptsFromCurrentOrLaterSession_AndOtherFirms()
     {
         var currentSession = Fixture.Create(); // Frame.SessionVerId == 2
