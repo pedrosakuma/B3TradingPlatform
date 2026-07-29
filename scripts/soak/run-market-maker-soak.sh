@@ -1320,12 +1320,19 @@ refresh_session_token_if_due() {
     set_session_token "$token_variable" "$expiry_variable" "$user" "$password"
 }
 
-authed_json_request() {
-    local method="$1" url="$2" token_variable="$3" expiry_variable="$4" user="$5" password="$6" body_variable="$7"
-    local token
+authed_json_request_into() {
+    local response_variable="$1" method="$2" url="$3" token_variable="$4" expiry_variable="$5" user="$6" password="$7" body_variable="$8"
+    local token helper_response
     refresh_session_token_if_due "$token_variable" "$expiry_variable" "$user" "$password" || return 1
     token="${!token_variable}"
-    soak_curl_json_request "$method" "$url" token "$body_variable"
+    helper_response="$(soak_curl_json_request "$method" "$url" token "$body_variable")" || return 1
+    printf -v "$response_variable" '%s' "$helper_response"
+}
+
+authed_json_request() {
+    local response
+    authed_json_request_into response "$@" || return 1
+    printf '%s' "$response"
 }
 
 set_session_token trading_token trading_token_expires_at "$trading_user" "$trading_password"
@@ -1335,8 +1342,11 @@ set_session_token admin_token admin_token_expires_at "$admin_user" "$trading_pas
 deposit() {
     local token_variable="$1" expiry_variable="$2" user="$3" password="$4" amount="$5" request_body
     awk -v amount="$amount" 'BEGIN { exit !(amount > 0) }' || return 0
+    local response
     request_body="$(jq -cn --argjson amount "$amount" '{amount:$amount}')"
-    authed_json_request         POST "${base_url}/api/balance/deposit"         "$token_variable" "$expiry_variable" "$user" "$password" request_body >/dev/null
+    authed_json_request_into response \
+        POST "${base_url}/api/balance/deposit" \
+        "$token_variable" "$expiry_variable" "$user" "$password" request_body || return 1
 }
 
 deposit trading_token trading_token_expires_at "$trading_user" "$trading_password" "$deposit_amount"
@@ -1350,11 +1360,11 @@ read_live_refresh_price() {
     local refresh_symbol="$1" empty_request_body="" response live_row updated_nanoseconds
     local started=$SECONDS
     while ((SECONDS - started < max_reference_age_seconds)); do
-        response="$(authed_json_request \
+        authed_json_request_into response \
             GET \
             "${base_url}/api/admin/marketdata/reference-prices?symbols=${refresh_symbol}" \
             admin_token admin_token_expires_at "$admin_user" "$trading_password" \
-            empty_request_body)" || return 1
+            empty_request_body || return 1
         live_row="$(jq -ce \
             --arg symbol "$refresh_symbol" '
               .symbols[] |
@@ -1446,7 +1456,9 @@ wait_order_filled() {
     local started orders status cum empty_request_body=""
     started=$SECONDS
     while (( SECONDS - started < fill_timeout_seconds )); do
-        orders="$(authed_json_request             GET "${base_url}/api/orders"             "$token_variable" "$expiry_variable" "$user" "$password" empty_request_body)" || return 1
+        authed_json_request_into orders \
+            GET "${base_url}/api/orders" \
+            "$token_variable" "$expiry_variable" "$user" "$password" empty_request_body || return 1
         status="$(jq -r --arg id "$clordid"             '.[] | select((.clOrdId|tostring)==$id) | .status'             <<<"$orders" | tail -n1)" || return 1
         cum="$(jq -r --arg id "$clordid"             '.[] | select((.clOrdId|tostring)==$id) | .cumulativeQuantity'             <<<"$orders" | tail -n1)" || return 1
         if [[ "$status" == "Filled" && "$cum" == "$expected_quantity" ]]; then
@@ -1472,7 +1484,9 @@ submit_order() {
     fi
     request_body="$(jq -cn         --arg symbol "$symbol"         --arg side "$side"         --argjson quantity "$quantity"         --argjson price "$price"         '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" ||
         return 1
-    response="$(authed_json_request         POST "${base_url}/api/orders"         "$token_variable" "$expiry_variable" "$user" "$password" request_body)" || return 1
+    authed_json_request_into response \
+        POST "${base_url}/api/orders" \
+        "$token_variable" "$expiry_variable" "$user" "$password" request_body || return 1
     [[ "$(jq -r '.status // ""' <<<"$response")" != "Rejected" ]] || {
         log "ERROR: $side order was rejected: $response"
         return 1
@@ -1520,7 +1534,9 @@ submit_recovery_cross() {
     fi
     request_body="$(jq -cn         --arg symbol "$cross_symbol"         --argjson quantity "$cross_quantity"         --argjson price "$cross_price"         '{symbol:$symbol,side:"Sell",type:"Limit",quantity:$quantity,price:$price}')" ||
         return 1
-    sell_response="$(authed_json_request         POST "${base_url}/api/orders"         "$sell_token_variable" "$sell_expiry_variable" "$seller" "$sell_password" request_body)" || return 1
+    authed_json_request_into sell_response \
+        POST "${base_url}/api/orders" \
+        "$sell_token_variable" "$sell_expiry_variable" "$seller" "$sell_password" request_body || return 1
     [[ "$(jq -r '.status // ""' <<<"$sell_response")" != "Rejected" ]] || {
         log "ERROR: recovery-cross sell for $cross_symbol was rejected: $sell_response"
         return 1
@@ -1529,7 +1545,9 @@ submit_recovery_cross() {
 
     request_body="$(jq -cn         --arg symbol "$cross_symbol"         --argjson quantity "$cross_quantity"         --argjson price "$cross_price"         '{symbol:$symbol,side:"Buy",type:"Limit",quantity:$quantity,price:$price}')" ||
         return 1
-    buy_response="$(authed_json_request         POST "${base_url}/api/orders"         "$buy_token_variable" "$buy_expiry_variable" "$buyer" "$buy_password" request_body)" || return 1
+    authed_json_request_into buy_response \
+        POST "${base_url}/api/orders" \
+        "$buy_token_variable" "$buy_expiry_variable" "$buyer" "$buy_password" request_body || return 1
     [[ "$(jq -r '.status // ""' <<<"$buy_response")" != "Rejected" ]] || {
         log "ERROR: recovery-cross buy for $cross_symbol was rejected: $buy_response"
         return 1
