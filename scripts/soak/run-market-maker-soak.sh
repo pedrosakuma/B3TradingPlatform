@@ -1434,9 +1434,11 @@ resolve_primary_order_price() {
         -v required="$required_price" \
         -v side="$side" '
           BEGIN {
-            adjusted = side == "Buy"
-              ? (configured > required ? configured : required)
-              : (configured < required ? configured : required)
+            if (side == "Buy") {
+              adjusted = configured > required ? configured : required
+            } else {
+              adjusted = configured < required ? configured : required
+            }
             printf "%.8f\n", adjusted
           }
         ')" || return 1
