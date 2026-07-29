@@ -17,11 +17,7 @@ public sealed class SampleBotWorkflowTests
 
         await PrimeReadyStateAsync(workflow, clock);
         var submitted = await restClient.SubmitObserved.Task;
-        await WaitUntilAsync(() => workflow.HasLiveOrder || runTask.IsCompleted);
-        if (runTask.IsCompleted)
-        {
-            _ = await runTask;
-        }
+        await workflow.WorkingOrderReady.WaitAsync(TimeSpan.FromSeconds(5));
         await ((IPrivateFeedObserver)workflow).OnFrameAsync(
             new OrderDeltaFrame(1, new TradingOrder("101", "PETR4", 4321, "Buy", "Limit", 100, 0, 100, 29.99m, "Filled")),
             CancellationToken.None);
@@ -53,13 +49,7 @@ public sealed class SampleBotWorkflowTests
 
         await PrimeReadyStateAsync(workflow, clock);
         await restClient.SubmitObserved.Task;
-        await WaitUntilAsync(() => restClient.Orders.Count > 0 || runTask.IsCompleted);
-        if (runTask.IsCompleted)
-        {
-            _ = await runTask;
-        }
-
-        await Task.Yield();
+        await workflow.WorkingOrderReady.WaitAsync(TimeSpan.FromSeconds(5));
         await workflow.TriggerOrderTimeoutAsync(CancellationToken.None);
         await restClient.CancelObserved.Task;
         await ((IPrivateFeedObserver)workflow).OnFrameAsync(
@@ -86,11 +76,7 @@ public sealed class SampleBotWorkflowTests
 
         await PrimeReadyStateAsync(workflow, clock);
         await restClient.SubmitObserved.Task;
-        await WaitUntilAsync(() => workflow.HasLiveOrder || runTask.IsCompleted);
-        if (runTask.IsCompleted)
-        {
-            _ = await runTask;
-        }
+        await workflow.WorkingOrderReady.WaitAsync(TimeSpan.FromSeconds(5));
 
         await workflow.TriggerOrderTimeoutAsync(CancellationToken.None);
         var result = await runTask;
@@ -168,13 +154,7 @@ public sealed class SampleBotWorkflowTests
 
         await PrimeReadyStateAsync(workflow, clock);
         await restClient.SubmitObserved.Task;
-        await WaitUntilAsync(() => restClient.Orders.Count > 0 || runTask.IsCompleted);
-        if (runTask.IsCompleted)
-        {
-            _ = await runTask;
-        }
-
-        await Task.Yield();
+        await workflow.WorkingOrderReady.WaitAsync(TimeSpan.FromSeconds(5));
         await ((ISampleBotMarketDataObserver)workflow).OnDisconnectedAsync(null, CancellationToken.None);
 
         var result = await runTask;
@@ -200,13 +180,7 @@ public sealed class SampleBotWorkflowTests
 
         await PrimeReadyStateAsync(workflow, clock);
         await restClient.SubmitObserved.Task;
-        await WaitUntilAsync(() => restClient.Orders.Count > 0 || runTask.IsCompleted);
-        if (runTask.IsCompleted)
-        {
-            _ = await runTask;
-        }
-
-        await Task.Yield();
+        await workflow.WorkingOrderReady.WaitAsync(TimeSpan.FromSeconds(5));
         await ((IPrivateFeedObserver)workflow).OnDisconnectedAsync(null, CancellationToken.None);
 
         var result = await runTask;
@@ -269,16 +243,4 @@ public sealed class SampleBotWorkflowTests
             CancellationToken.None);
     }
 
-    private static async Task WaitUntilAsync(Func<bool> predicate)
-    {
-        for (var attempt = 0; attempt < 1000; attempt++)
-        {
-            if (predicate())
-                return;
-
-            await Task.Yield();
-        }
-
-        throw new TimeoutException("Condition was not observed in time.");
-    }
 }

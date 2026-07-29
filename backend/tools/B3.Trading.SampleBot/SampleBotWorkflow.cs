@@ -20,6 +20,7 @@ internal sealed class SampleBotWorkflow : IPrivateFeedObserver, ISampleBotMarket
     private readonly object _gate = new();
     private readonly SemaphoreSlim _stateSignal = new(0, int.MaxValue);
     private readonly TaskCompletionSource<SampleBotWorkflowResult> _completion = CreateResultTcs();
+    private readonly TaskCompletionSource<bool> _workingOrderReady = CreateBoolTcs();
 
     private HashSet<string> _seenSnapshots = new(StringComparer.Ordinal);
     private TaskCompletionSource<bool> _initialSnapshots = CreateBoolTcs();
@@ -63,6 +64,8 @@ internal sealed class SampleBotWorkflow : IPrivateFeedObserver, ISampleBotMarket
             }
         }
     }
+
+    internal Task WorkingOrderReady => _workingOrderReady.Task;
 
     public async Task<SampleBotWorkflowResult> RunAsync(CancellationToken cancellationToken)
     {
@@ -149,6 +152,8 @@ internal sealed class SampleBotWorkflow : IPrivateFeedObserver, ISampleBotMarket
                 command.Quantity,
                 command.Price,
                 _latestQuote?.Source.ToString() ?? "unknown");
+
+            _workingOrderReady.TrySetResult(true);
 
             timeoutLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutTask = MonitorOrderTimeoutAsync(submitResult.Payload.ClOrdId, timeoutLifetime.Token);
