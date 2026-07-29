@@ -64,6 +64,7 @@ Operator controls:
   SOAK_PRE_OUTAGE_STABILIZATION_INTERVAL_SECONDS=<derived export+scrape cycle>
   SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS=<derived>
   SOAK_INVENTORY_BIAS_LOTS=12
+  SOAK_MARKETABLE_PRICE_EXTRA_TICKS=1
   SOAK_SUITE_MANIFEST=soak-artifacts/<suite-id>/suite-manifest.json
 EOF
 }
@@ -154,6 +155,7 @@ readonly symbol="${SOAK_SYMBOL:-PETR4}"
 readonly quantity="${SOAK_QUANTITY:-100}"
 readonly marketable_buy_price="${SOAK_MARKETABLE_BUY_PRICE:-32.80}"
 readonly marketable_sell_price="${SOAK_MARKETABLE_SELL_PRICE:-29.30}"
+readonly marketable_price_extra_ticks="${SOAK_MARKETABLE_PRICE_EXTRA_TICKS:-1}"
 readonly reference_cross_price="${SOAK_REFERENCE_CROSS_PRICE:-30.00}"
 readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-100000.00}"
 readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-$deposit_amount}"
@@ -184,6 +186,7 @@ require_uint SOAK_RECOVERY_CROSS_ATTEMPTS "$recovery_cross_attempts"
 require_uint SOAK_RECOVERY_CROSS_INTERVAL_SECONDS "$recovery_cross_interval_seconds"
 require_uint SOAK_INVENTORY_BIAS_LOTS "$inventory_bias_lots"
 require_uint SOAK_FILL_TIMEOUT_SECONDS "$fill_timeout_seconds"
+require_uint SOAK_MARKETABLE_PRICE_EXTRA_TICKS "$marketable_price_extra_ticks"
 require_uint SOAK_AUTH_REFRESH_MARGIN_SECONDS "$auth_refresh_margin_seconds"
 require_uint SOAK_STRICT_REFRESH_INTERVAL_SECONDS "$strict_refresh_interval_seconds"
 require_uint SOAK_STRICT_REFRESH_MARGIN_SECONDS "$strict_refresh_margin_seconds"
@@ -437,6 +440,12 @@ configured_instruments_json="$(jq --arg targetSymbol "$symbol" --argjson targetP
     quantity: ($config["MarketMaker__Instruments__" + ($index | tostring) + "__LotSize"] | tonumber),
     tickSize: ($config["MarketMaker__Instruments__" + ($index | tostring) + "__TickSize"] | tonumber),
     spreadTicks: ($config["MarketMaker__Instruments__" + ($index | tostring) + "__SpreadTicks"] | tonumber),
+    maxSkewTicks: (
+      if $config["MarketMaker__Instruments__" + ($index | tostring) + "__InventorySkew__Enabled"] == "true"
+      then ($config["MarketMaker__Instruments__" + ($index | tostring) + "__InventorySkew__MaxSkewTicks"] | tonumber)
+      else 0
+      end
+    ),
     referencePrice: (
       if $symbol == $targetSymbol then $targetPrice
       else ($config["MarketMaker__Instruments__" + ($index | tostring) + "__RefPrice"] | tonumber)
@@ -1384,6 +1393,61 @@ read_live_refresh_price() {
     return 1
 }
 
+resolve_primary_order_price() {
+    local side="$1" configured_price="$2" phase="$3"
+    local live_reference tick_size spread_ticks max_skew_ticks required_price resolved_price
+
+    if ! live_reference="$(read_live_refresh_price "$symbol" 2>/dev/null)"; then
+        printf '%s\n' "$configured_price"
+        return 0
+    fi
+
+    tick_size="$(jq -er \
+        --arg symbol "$symbol" \
+        '.[] | select(.symbol == $symbol) | .tickSize' \
+        <<<"$configured_instruments_json")" || return 1
+    spread_ticks="$(jq -er \
+        --arg symbol "$symbol" \
+        '.[] | select(.symbol == $symbol) | .spreadTicks' \
+        <<<"$configured_instruments_json")" || return 1
+    max_skew_ticks="$(jq -er \
+        --arg symbol "$symbol" \
+        '.[] | select(.symbol == $symbol) | .maxSkewTicks' \
+        <<<"$configured_instruments_json")" || return 1
+
+    required_price="$(awk \
+        -v live="$live_reference" \
+        -v tick="$tick_size" \
+        -v spread="$spread_ticks" \
+        -v skew="$max_skew_ticks" \
+        -v extra="$marketable_price_extra_ticks" \
+        -v side="$side" '
+          BEGIN {
+            offset = tick * (spread + skew + extra)
+            adjusted = side == "Buy" ? live + offset : live - offset
+            printf "%.8f\n", adjusted
+          }
+        ')" || return 1
+
+    resolved_price="$(awk \
+        -v configured="$configured_price" \
+        -v required="$required_price" \
+        -v side="$side" '
+          BEGIN {
+            adjusted = side == "Buy"
+              ? (configured > required ? configured : required)
+              : (configured < required ? configured : required)
+            printf "%.8f\n", adjusted
+          }
+        ')" || return 1
+
+    if [[ "$resolved_price" != "$configured_price" ]]; then
+        log "derived ${side,,} limit ${resolved_price} for ${phase} from liveReference=${live_reference}, spreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, extraTicks=${marketable_price_extra_ticks}, configured=${configured_price}"
+    fi
+
+    printf '%s\n' "$resolved_price"
+}
+
 resolve_live_refresh_price() {
     local refresh_symbol="$1" started=$SECONDS price tick_size wait_budget
     wait_budget="$max_reference_age_seconds"
@@ -2158,10 +2222,10 @@ run_window() {
         fi
         side="$next_side"
         if [[ "$side" == "Buy" ]]; then
-            price="$marketable_buy_price"
+            price="$(resolve_primary_order_price "$side" "$marketable_buy_price" "$phase")" || return 1
             next_side=Sell
         else
-            price="$marketable_sell_price"
+            price="$(resolve_primary_order_price "$side" "$marketable_sell_price" "$phase")" || return 1
             next_side=Buy
         fi
         submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" "$side" "$price" "$phase"
@@ -2183,9 +2247,11 @@ wait_metric_equals \
     "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
     2 60
 log "executing a two-fill bootstrap round trip so the P&L ledger emits snapshots"
-submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy "$marketable_buy_price" "accounting-bootstrap"
+submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy \
+    "$(resolve_primary_order_price Buy "$marketable_buy_price" "accounting-bootstrap")" "accounting-bootstrap"
 refresh_strict_symbols_if_due accounting-bootstrap-between-fills
-submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell "$marketable_sell_price" "accounting-bootstrap"
+submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell \
+    "$(resolve_primary_order_price Sell "$marketable_sell_price" "accounting-bootstrap")" "accounting-bootstrap"
 if [[ "$profile" == "pause-and-cancel" ]]; then
     sleep "$workload_interval_seconds"
 fi
@@ -2197,7 +2263,8 @@ inventory_short_pass=true
 if [[ "$profile" == "inventory-skew" ]]; then
     log "applying ${inventory_bias_lots}-lot sell bias so the bot becomes long and reaches skew saturation"
     for ((i = 0; i < inventory_bias_lots; i++)); do
-        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell "$marketable_sell_price" "inventory-bias"
+        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell \
+            "$(resolve_primary_order_price Sell "$marketable_sell_price" "inventory-bias")" "inventory-bias"
     done
     if ! wait_metric_equals \
         "bot_strategy_inventory_skew_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
@@ -2208,7 +2275,8 @@ if [[ "$profile" == "inventory-skew" ]]; then
 
     log "reversing through flat to ${inventory_bias_lots} lots short to prove skew direction"
     for ((i = 0; i < inventory_bias_lots * 2; i++)); do
-        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy "$marketable_buy_price" "inventory-reversal"
+        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy \
+            "$(resolve_primary_order_price Buy "$marketable_buy_price" "inventory-reversal")" "inventory-reversal"
     done
     if ! wait_metric_equals \
         "bot_strategy_inventory_skew_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \

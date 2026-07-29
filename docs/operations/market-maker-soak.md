@@ -124,8 +124,17 @@ The helper reuses the same real-stack sandbox seam as
 4. submit one-lot PETR4 marketable limits through `POST /api/orders`;
 5. wait for each order to fill against the bot before sending the next.
 
-Alternating `Buy @ 32.80` and `Sell @ 29.30` consumes the bot's own resting
-quotes. Each fill prints a real matching-engine trade into UMDF, moves the live
+The primary workload keeps two configured outer guardrails
+(`SOAK_MARKETABLE_BUY_PRICE`, `SOAK_MARKETABLE_SELL_PRICE`) but, when a fresh
+live reference is available, derives each actual order limit from that live
+reference plus one configured half-spread, the target symbol's worst-case
+inventory skew, and `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` of extra crossing
+margin. The buy path uses the greater of the configured buy floor and the
+derived live-reference price; the sell path uses the lower of the configured
+sell ceiling and the derived live-reference price. This keeps the workload
+marketable when live inventory skew moves the quote away from the initial
+reference without reintroducing the previous fixed `32.80` live-collar failure.
+Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
 This target-symbol workload remains independently recorded in `workload.csv`
@@ -267,8 +276,9 @@ Useful controls:
 | `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
-| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Marketable workload buy limit |
-| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Marketable workload sell limit |
+| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Configured buy floor; actual buy limit is `max(floor, liveReference + tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
+| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Configured sell ceiling; actual sell limit is `min(ceiling, liveReference - tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
+| `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Extra live-reference crossing margin beyond spread + worst-case skew |
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |
 | `SOAK_COUNTERPARTY_DEPOSIT_AMOUNT` | same as trading user (`100000.00`) | Counterparty sandbox deposit for alternating refresh ownership |
