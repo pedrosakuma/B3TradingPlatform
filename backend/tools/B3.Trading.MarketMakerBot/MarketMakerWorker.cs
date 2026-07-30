@@ -22,6 +22,8 @@ namespace B3.Trading.MarketMakerBot;
 /// </summary>
 internal sealed class MarketMakerWorker : BackgroundService
 {
+    private const int UnknownOrderIdRejectCode = 5;
+
     private readonly MarketMakerBotOptions _options;
     private readonly OrderTracker _tracker;
     private readonly MarketPriceTracker _priceTracker;
@@ -620,7 +622,8 @@ internal sealed class MarketMakerWorker : BackgroundService
                                 Matched: false,
                                 OrigClOrdId: 0UL,
                                 CancelReason: default(CancelReason),
-                                StuckSymbol: "?");
+                                StuckSymbol: "?",
+                                OriginalIsOpen: false);
                         }
 
                         // Clear the pending-cancel marker (NOT the order
@@ -636,45 +639,68 @@ internal sealed class MarketMakerWorker : BackgroundService
                             Matched: true,
                             OrigClOrdId: origClOrdId,
                             CancelReason: cancelReason,
-                            StuckSymbol: stuckSymbol);
+                            StuckSymbol: stuckSymbol,
+                            OriginalIsOpen: stuckKnown && stuck.IsOpen);
                     });
                     if (cancelReject.Matched)
                     {
+                        var hasDirtyPricingContext = TryTakeDirtyPricingContext(
+                            cancelReject.StuckSymbol,
+                            out var dirtyReason);
+                        var retryReason = hasDirtyPricingContext
+                            ? dirtyReason
+                            : cancelReject.CancelReason;
+                        var retryPricing = IsPricingContextReason(retryReason)
+                            && ShouldRetryPricingAfterCancelReject(
+                                r.RejectCode,
+                                cancelReject.OriginalIsOpen,
+                                hasDirtyPricingContext);
+                        if (r.RejectCode == UnknownOrderIdRejectCode
+                            && !cancelReject.OriginalIsOpen)
+                        {
+                            _log.LogInformation(
+                                "[mm] cancel raced terminal order clordid={ClOrdId} trigger={CancelReason} rejectCode={RejectCode} reason={Reason}; no stale-order retry required",
+                                cancelReject.OrigClOrdId, cancelReject.CancelReason,
+                                r.RejectCode, r.Reason);
+                            if (retryPricing)
+                                RetryPricingContextChanged(cancelReject.StuckSymbol, retryReason);
+                            break;
+                        }
+
                         // Attribute the reject to the trigger that raised
                         // the shared cancel request.
                         if (cancelReject.CancelReason == CancelReason.PriceDrift)
                         {
                             _metrics.RecordBookDrivenRequoteCancelRejected(cancelReject.StuckSymbol);
                             _log.LogWarning(
-                                "[mm] book-driven requote cancel rejected for clordid={ClOrdId} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
-                                cancelReject.OrigClOrdId, r.Reason);
+                                "[mm] book-driven requote cancel rejected for clordid={ClOrdId} rejectCode={RejectCode} reason={Reason} originalOpen={OriginalOpen}; leaving tracker state unchanged (see RFC #703)",
+                                cancelReject.OrigClOrdId, r.RejectCode, r.Reason,
+                                cancelReject.OriginalIsOpen);
                         }
                         else if (cancelReject.CancelReason == CancelReason.TtlRefresh)
                         {
                             _metrics.RecordTtlRefreshCancelRejected(cancelReject.StuckSymbol);
                             _log.LogWarning(
-                                "[mm] TTL refresh cancel rejected for clordid={ClOrdId} reason={Reason}; possible missed terminal event, leaving tracker state unchanged (see RFC #703)",
-                                cancelReject.OrigClOrdId, r.Reason);
+                                "[mm] TTL refresh cancel rejected for clordid={ClOrdId} rejectCode={RejectCode} reason={Reason} originalOpen={OriginalOpen}; possible missed terminal event, leaving tracker state unchanged (see RFC #703)",
+                                cancelReject.OrigClOrdId, r.RejectCode, r.Reason,
+                                cancelReject.OriginalIsOpen);
                         }
                         else if (cancelReject.CancelReason == CancelReason.FeedUnavailable)
                         {
                             _metrics.RecordFeedCancelRejected(cancelReject.StuckSymbol);
                             _log.LogWarning(
-                                "[mm-feed] feed-unavailable cancel rejected for clordid={ClOrdId} symbol={Symbol} reason={Reason}; retry remains guarded",
-                                cancelReject.OrigClOrdId, cancelReject.StuckSymbol, r.Reason);
+                                "[mm-feed] feed-unavailable cancel rejected for clordid={ClOrdId} symbol={Symbol} rejectCode={RejectCode} reason={Reason} originalOpen={OriginalOpen}; retry remains guarded",
+                                cancelReject.OrigClOrdId, cancelReject.StuckSymbol, r.RejectCode,
+                                r.Reason, cancelReject.OriginalIsOpen);
                         }
                         else
                         {
                             _log.LogWarning(
-                                "[mm] cancel rejected for clordid={ClOrdId} trigger={CancelReason} reason={Reason}; leaving tracker state unchanged (see RFC #703)",
-                                cancelReject.OrigClOrdId, cancelReject.CancelReason, r.Reason);
+                                "[mm] cancel rejected for clordid={ClOrdId} trigger={CancelReason} rejectCode={RejectCode} reason={Reason} originalOpen={OriginalOpen}; leaving tracker state unchanged (see RFC #703)",
+                                cancelReject.OrigClOrdId, cancelReject.CancelReason, r.RejectCode,
+                                r.Reason, cancelReject.OriginalIsOpen);
                         }
-                        var retryReason = TryTakeDirtyPricingContext(
-                            cancelReject.StuckSymbol,
-                            out var dirtyReason)
-                            ? dirtyReason
-                            : cancelReject.CancelReason;
-                        if (IsPricingContextReason(retryReason))
+                        if (retryPricing)
                             RetryPricingContextChanged(cancelReject.StuckSymbol, retryReason);
                         break;
                     }
@@ -769,6 +795,14 @@ internal sealed class MarketMakerWorker : BackgroundService
             throw new MarketMakerReconciliationRequiredException(reason, ex);
         }
     }
+
+    internal static bool ShouldRetryPricingAfterCancelReject(
+        int rejectCode,
+        bool originalIsOpen,
+        bool hasDirtyPricingContext) =>
+        hasDirtyPricingContext
+        || originalIsOpen
+        || rejectCode != UnknownOrderIdRejectCode;
 
     private async Task PersistContiguousInboundAsync(ulong seqNum)
     {
