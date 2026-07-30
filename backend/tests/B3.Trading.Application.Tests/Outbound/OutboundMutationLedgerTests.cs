@@ -4850,6 +4850,264 @@ public sealed class OutboundMutationLedgerTests
             origin.ParentAlgoId));
     }
 
+    // ----- HasNonTerminalMutationForEndClientRef (#671 / RFC #753 PR2) -----
+    //
+    // These construct minimal OutboundMutationSnapshot rows directly and
+    // load them via Restore (Approval left null so Restore's
+    // Approval-integrity/derived-reconciliation recompute — exercised
+    // elsewhere in this file — is skipped and the constructed State /
+    // RequiresReconciliation values are used verbatim). This keeps the
+    // guard-query tests focused on the query's own predicate rather than
+    // re-deriving the full approve/attempt/ack event chain.
+
+    private const string AliceRef = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    private const string BobRef = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+
+    private static OutboundMutationSnapshot NonTerminalGuardSnapshot(
+        string firmId,
+        string endClientRef,
+        ulong clOrdId,
+        OutboundMutationState state,
+        bool requiresReconciliation = false) => new()
+        {
+            MutationId = new OutboundMutationId(Guid.Parse(
+            $"{clOrdId:x8}-5555-6666-7777-888888888888")),
+            Kind = OutboundMutationKind.New,
+            FirmId = firmId,
+            EndClientRef = endClientRef,
+            Origin = OutboundMutationOrigin.Rest,
+            PrimaryClOrdId = clOrdId,
+            RecordedAtUtc = T0,
+            State = state,
+            StateChangedAtUtc = T0,
+            RequiresReconciliation = requiresReconciliation,
+            ExplicitlyRequiresReconciliation = requiresReconciliation,
+        };
+
+    private static OutboundMutationLedger GuardLedger(
+        params OutboundMutationSnapshot[] mutations)
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.Restore(
+            mutations,
+            Array.Empty<OutboundCorrelationTombstone>(),
+            Array.Empty<InboundVenueEvidenceSnapshot>());
+        return ledger;
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_NonTerminalState_Blocks()
+    {
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", AliceRef, 1, OutboundMutationState.ApprovedToSend));
+
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_TerminalReconciled_DoesNotBlock()
+    {
+        // Terminal (VenueAcknowledged) AND RequiresReconciliation=false:
+        // the venue outcome is authoritative, nothing blocks a reset.
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged,
+            requiresReconciliation: false));
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_TerminalRequiringReconciliation_StillBlocks()
+    {
+        // Terminal but RequiresReconciliation=true: the venue outcome is
+        // not yet authoritative (e.g. conflicting evidence pending
+        // operator resolution) — must still fail-close a reset.
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged,
+            requiresReconciliation: true));
+
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_FirmIsolation_OnlyMatchingFirmBlocks()
+    {
+        // Same end-client reference, two different firms: a non-terminal
+        // mutation at F2 must not block a query for F1.
+        var ledger = GuardLedger(
+            NonTerminalGuardSnapshot("F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged),
+            NonTerminalGuardSnapshot("F2", AliceRef, 2, OutboundMutationState.ApprovedToSend));
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F2", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_ClientIsolation_OnlyMatchingEndClientBlocks()
+    {
+        // Same firm, two different end-clients: bob's non-terminal
+        // mutation must not block a query for alice.
+        var ledger = GuardLedger(
+            NonTerminalGuardSnapshot("F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged),
+            NonTerminalGuardSnapshot("F1", BobRef, 2, OutboundMutationState.ApprovedToSend));
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", BobRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_NoMutations_DoesNotBlock()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_RejectsMissingFirmId()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef(" ", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_RejectsMalformedEndClientRef()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef("F1", "not-a-pseudonymized-ref"));
+    }
+
+    // ----- Candidate-set overload: stable-reference key rotation
+    // (#671 / RFC #753 PR2 review follow-up) -----
+    //
+    // A mutation's EndClientRef is fixed at the digest computed under
+    // whichever key was ActiveStableReferenceKey at the time it was
+    // recorded. If StableReferenceKeyId/Version is later repointed at a
+    // different (still-loaded) key, CreateStableEndClientRef starts
+    // returning a different digest for the same firm/end-client. The
+    // single-ref overload above would then silently miss that older,
+    // still-open mutation; these tests exercise the fix — checking
+    // against every candidate produced by
+    // CreateStableEndClientRefCandidates, which spans the whole key ring.
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_ActiveRefOnly_MissesMutationRecordedUnderRotatedOutKey()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        // Stable-reference key itself rotates from "old" to "new" (not
+        // just the encryption key) — the pathological case this guard
+        // must be robust to.
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        var newRef = afterRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+
+        Assert.NotEqual(oldRef, newRef);
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", newRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_DetectsMutationRecordedUnderHistoricalKey()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        var candidates = afterRotation.CreateStableEndClientRefCandidates(
+            "F1", "alice-end-client-id");
+
+        Assert.Contains(oldRef, candidates);
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", candidates));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_FirmIsolation()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        var candidates = afterRotation.CreateStableEndClientRefCandidates(
+            "F1", "alice-end-client-id");
+
+        // Same candidate digests, but a different firm — the mutation
+        // lives under "F1" and must not leak into an "F2" guard query.
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F2", candidates));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_ClientIsolation()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        // Same firm and key ring, but a different end-client's candidate
+        // set must not match alice's mutation.
+        var bobCandidates = afterRotation.CreateStableEndClientRefCandidates(
+            "F1", "bob-end-client-id");
+
+        Assert.DoesNotContain(oldRef, bobCandidates);
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", bobCandidates));
+    }
+
+    [Fact]
+    public void CreateStableEndClientRefCandidates_SingleKeyRing_ReturnsOneCandidateMatchingActiveRef()
+    {
+        var protector = Protector(("only", 1, Key(1)), active: ("only", 1));
+        var activeRef = protector.CreateStableEndClientRef("F1", "alice-end-client-id");
+
+        var candidates = protector.CreateStableEndClientRefCandidates("F1", "alice-end-client-id");
+
+        Assert.Equal(new[] { activeRef }, candidates);
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_RejectsEmptyCollection()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef("F1", Array.Empty<string>()));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_RejectsMalformedCandidate()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef("F1", new[] { AliceRef, "not-hex" }));
+    }
+
     private sealed class SimulatedCrashException : Exception;
 
     private sealed class Fixture
