@@ -1175,7 +1175,11 @@ compatibility_json="$(jq -n \
     {
       gitSha: $run[0].gitSha,
       settings: $run[0].settings,
-      workload: $run[0].workload,
+      workload: (
+        $run[0].workload
+        | .strictRefresh.configuredInstruments |= map(del(.maxSkewTicks))
+        | .recoveryCrosses |= map(del(.maxSkewTicks))
+      ),
       configuredSymbols: $run[0].configuredSymbols,
       commonRenderedConfiguration: {
         auth: $rendered[0].services.tradingHost.auth,
