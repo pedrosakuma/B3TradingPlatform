@@ -20,7 +20,7 @@
 #       -f docker/docker-compose.sample-bot.yml \
 #       -f docker/docker-compose.sample-bot-conformance.yml \
 #       up -d --build --wait trading-host market-maker-bot
-#   docker compose ... run --rm --build sample-bot
+#   docker compose ... run --rm --no-deps --build sample-bot
 #   docker compose ... run --rm --no-deps conformance
 #
 # Kept as a separate file (mirrors market-maker-conformance.yml) so

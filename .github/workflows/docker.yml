@@ -1002,7 +1002,7 @@ jobs:
               -f docker/docker-compose.market-maker-conformance.yml \
               -f docker/docker-compose.sample-bot.yml \
               -f docker/docker-compose.sample-bot-conformance.yml \
-              run --rm sample-bot
+              run --rm --no-deps sample-bot
 
       - name: Run conformance
         run: |

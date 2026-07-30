@@ -182,7 +182,7 @@ docker compose \
     -f docker/docker-compose.yml \
     -f docker/docker-compose.market-maker.yml \
     -f docker/docker-compose.sample-bot.yml \
-    run --rm --build sample-bot
+    run --rm --no-deps --build sample-bot
 ```
 
 `LocalPassword` auth is the required default; `ExternalExchange` and

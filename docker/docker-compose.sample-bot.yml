@@ -37,15 +37,18 @@
 #       -f docker/docker-compose.yml \
 #       -f docker/docker-compose.market-maker.yml \
 #       -f docker/docker-compose.sample-bot.yml \
-#       run --rm --build sample-bot
+#       run --rm --no-deps --build sample-bot
 #
 # `sample-bot` is a one-shot job (SampleBotWorker calls
 # IHostApplicationLifetime.StopApplication once the single-order
 # workflow completes), so `run --rm` blocks until it exits and streams
-# its logs inline — no separate `logs -f` needed. `--wait` on the first
-# command blocks until trading-host is healthy AND market-maker-bot has
-# started, so the sample-bot's market-data wait (TryBuildReadyOrder
-# loops until a live TradingReferencePrice/LastTradePrice arrives, see
+# its logs inline — no separate `logs -f` needed. `--no-deps` is
+# required: the stack is already running, and allowing `compose run`
+# to reconcile dependencies can recreate trading-host underneath the
+# connected market-maker session. `--wait` on the first command blocks
+# until trading-host is healthy AND market-maker-bot has started, so
+# the sample-bot's market-data wait (TryBuildReadyOrder loops until a
+# live TradingReferencePrice/LastTradePrice arrives, see
 # SampleBotWorkflow) resolves quickly instead of racing the bot's FIXP
 # negotiate + first quote. Tear down with:
 #

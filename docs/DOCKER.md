@@ -441,7 +441,7 @@ docker compose \
     -f docker/docker-compose.yml \
     -f docker/docker-compose.market-maker.yml \
     -f docker/docker-compose.sample-bot.yml \
-    run --rm --build sample-bot
+    run --rm --no-deps --build sample-bot
 ```
 
 The counterpart to the Demo and Market-maker overlays above, but for
@@ -549,7 +549,8 @@ this spec's assertions are scoped to the sample-bot's own end-client
 and don't depend on (or interfere with) the market-maker liquidity
 spec's crosses. The spec does **not** start the sample-bot container
 itself — CI (`sample-bot-conformance` job) runs
-`docker compose run --rm sample-bot` to completion first, then runs
+`docker compose run --rm --no-deps sample-bot` to completion first,
+without reconciling/recreating the already-running stack, then runs
 this verifier against `docker-compose.yml` + `docker-compose.real.yml`
 + `docker-compose.market-maker.yml` + `docker-compose.conformance.yml`
 + `docker-compose.market-maker-conformance.yml` +

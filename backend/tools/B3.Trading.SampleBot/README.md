@@ -90,7 +90,7 @@ docker compose \
     -f docker/docker-compose.yml \
     -f docker/docker-compose.market-maker.yml \
     -f docker/docker-compose.sample-bot.yml \
-    run --rm --build sample-bot
+    run --rm --no-deps --build sample-bot
 ```
 
 `run --rm` blocks until the one-shot container exits (`SampleBotWorker` stops the host itself once the workflow finishes) and streams its logs inline. The overlay stacks on the market-maker overlay so the sample bot sees a fresh, continuously-refreshed public reference price instead of racing a possibly-empty book on a freshly booted stack — see [`docs/DOCKER.md` § Sample-bot overlay](../../../docs/DOCKER.md#sample-bot-overlay-opt-in-authenticated-end-client-smoke-722) for the full walkthrough, the dedicated seeded credentials, and safety notes. Tear down with:
