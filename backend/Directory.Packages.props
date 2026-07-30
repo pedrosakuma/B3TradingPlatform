@@ -4,8 +4,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageVersion Include="B3.EntryPoint.Client" Version="0.17.0" />
-    <PackageVersion Include="B3.EntryPoint.Sbe" Version="0.16.0" />
+    <PackageVersion Include="B3.EntryPoint.Client" Version="0.17.1" />
+    <PackageVersion Include="B3.EntryPoint.Sbe" Version="0.17.1" />
     <PackageVersion Include="B3.MarketData.WebSocketClient" Version="0.9.1" />
     <PackageVersion Include="BCrypt.Net-Next" Version="4.2.0" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
@@ -27,7 +27,7 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.9" />
     <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.9" />
