@@ -1222,6 +1222,60 @@ public class MarketMakerWorkerTests : IDisposable
     }
 
     [Fact]
+    public async Task UnknownOrderIdCancelReject_AfterOriginalTerminal_DoesNotQueueInventoryRetry()
+    {
+        var logger = new CapturingLogger<MarketMakerWorker>();
+        var (worker, tracker, client, instrument, _) = CreateWorker(
+            TimeProvider.System,
+            EnableInventorySkew,
+            logger);
+        await worker.QuoteSideAsync(client, instrument, isBuy: true, CancellationToken.None);
+        var originalClOrdId = Assert.Single(client.SubmittedOrders).ClOrdID.Value;
+        const ulong cancelClOrdId = 999_003;
+        tracker.RegisterCancelAttempt(
+            cancelClOrdId,
+            originalClOrdId,
+            CancelReason.InventoryStrategy);
+        tracker.OnTerminal(originalClOrdId);
+
+        await worker.HandleEventAsync(client, new OrderRejected
+        {
+            ClOrdID = new ClOrdID(cancelClOrdId),
+            OrderId = 0,
+            RejectCode = 5,
+            Reason = null,
+            SeqNum = 1,
+            SendingTime = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        Assert.True(worker.SignalPricingContextChanged(
+            instrument.Symbol,
+            CancelReason.InventoryStrategy));
+        Assert.False(tracker.TryResolveCancelAttempt(cancelClOrdId, out _));
+        Assert.Contains(logger.Entries, entry =>
+            entry.Level == LogLevel.Information
+            && entry.Message.Contains("rejectCode=5", StringComparison.Ordinal)
+            && entry.Message.Contains("cancel raced terminal order", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(5, false, false, false)]
+    [InlineData(5, true, false, true)]
+    [InlineData(5, false, true, true)]
+    [InlineData(1, false, false, true)]
+    public void CancelReject_RetriesUnlessUnknownOrderConfirmsTerminalRace(
+        int rejectCode,
+        bool originalIsOpen,
+        bool hasDirtyPricingContext,
+        bool expected) =>
+        Assert.Equal(
+            expected,
+            MarketMakerWorker.ShouldRetryPricingAfterCancelReject(
+                rejectCode,
+                originalIsOpen,
+                hasDirtyPricingContext));
+
+    [Fact]
     public async Task CancelSubmitFailure_ReplaysInventoryContextOnceAndRegistersRetry()
     {
         var clock = new FakeClock(DateTimeOffset.UtcNow);
@@ -2843,6 +2897,8 @@ public class MarketMakerWorkerTests : IDisposable
             : "bot.orders.ttl_refresh_cancel_rejected";
         Assert.DoesNotContain(unexpectedMetric, measurements);
         Assert.Contains(logger.Entries, entry => entry.Level >= LogLevel.Warning);
+        Assert.Contains(logger.Entries, entry =>
+            entry.Message.Contains("rejectCode=1", StringComparison.Ordinal));
         if (cancelReason == CancelReason.TtlRefresh)
         {
             Assert.Contains(logger.Entries, entry =>
