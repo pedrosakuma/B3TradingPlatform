@@ -27,6 +27,9 @@ public class ReserveOnSubmitMarginProviderTests
     private static RiskContext Buy(string owner, decimal price, long qty, OrderType type = OrderType.Limit) =>
         new(new EndClientId(owner), "FIRM", "PETR4", OrderSide.Buy, type, qty, type == OrderType.Market ? null : price);
 
+    private static RiskContext Buy(string firmId, string owner, decimal price, long qty, OrderType type = OrderType.Limit) =>
+        new(new EndClientId(owner), firmId, "PETR4", OrderSide.Buy, type, qty, type == OrderType.Market ? null : price);
+
     [Fact]
     public async Task Approves_until_balance_depleted_then_rejects()
     {
@@ -478,5 +481,107 @@ public class ReserveOnSubmitMarginProviderTests
         // adjustment would be 500-500-500 = -500 → reserved = 0,
         // which is wrong (the order is live).
         Assert.Equal(500m, p.ReservedForTesting("alice"));
+    }
+
+    // ----- ReleaseAllReservationsForAccount (#671 / RFC #753 PR2) -----
+
+    [Fact]
+    public async Task ReleaseAllReservationsForAccount_OnlyReleasesTargetFirm()
+    {
+        // Firm isolation: the same owner name under two different firms
+        // must be tracked (and released) independently — releasing
+        // FIRM-A's reservations must not touch FIRM-B's.
+        var (p, _) = Build(initial: 1_000m, owner: "alice");
+        Assert.True((await p.TryReserveAsync(1, Buy("FIRM-A", "alice", 10m, 50), CancellationToken.None)).Approved); // 500 held @ FIRM-A
+        Assert.True((await p.TryReserveAsync(2, Buy("FIRM-B", "alice", 10m, 30), CancellationToken.None)).Approved); // 300 held @ FIRM-B
+
+        p.ReleaseAllReservationsForAccount("FIRM-A", new EndClientId("alice"));
+
+        Assert.Equal(0m, p.ReservedForTesting("FIRM-A", "alice"));
+        Assert.Equal(300m, p.ReservedForTesting("FIRM-B", "alice"));
+        Assert.Equal((1, 0), p.GetReservationCounts());
+    }
+
+    [Fact]
+    public async Task ReleaseAllReservationsForAccount_OnlyReleasesTargetEndClient()
+    {
+        // End-client isolation within the same firm: releasing alice's
+        // account must not touch bob's reservations at the same firm.
+        var (p, monitor) = Build(initial: 1_000m, owner: "alice");
+        monitor.CurrentValue.Margin.Initial["bob"] = 1_000m;
+        Assert.True((await p.TryReserveAsync(1, Buy("FIRM", "alice", 10m, 50), CancellationToken.None)).Approved); // 500 held
+        Assert.True((await p.TryReserveAsync(2, Buy("FIRM", "bob", 10m, 40), CancellationToken.None)).Approved); // 400 held
+
+        p.ReleaseAllReservationsForAccount("FIRM", new EndClientId("alice"));
+
+        Assert.Equal(0m, p.ReservedForTesting("FIRM", "alice"));
+        Assert.Equal(400m, p.ReservedForTesting("FIRM", "bob"));
+        Assert.Equal((1, 0), p.GetReservationCounts());
+    }
+
+    [Fact]
+    public async Task ReleaseAllReservationsForAccount_RemovesMultipleReservationsAndRestoresFullCapacity()
+    {
+        // Multiple working orders for the same account: all per-ClOrdID
+        // entries must be removed and the aggregate reserved figure must
+        // drop to zero, restoring the full base capacity.
+        var (p, _) = Build(initial: 1_000m, owner: "alice");
+        Assert.True((await p.TryReserveAsync(1, Buy("FIRM", "alice", 10m, 30), CancellationToken.None)).Approved); // 300 held
+        Assert.True((await p.TryReserveAsync(2, Buy("FIRM", "alice", 10m, 20), CancellationToken.None)).Approved); // 200 held
+        Assert.True((await p.TryReserveAsync(3, Buy("FIRM", "alice", 10m, 10), CancellationToken.None)).Approved); // 100 held
+        Assert.Equal(400m, p.AvailableForTesting("FIRM", "alice"));
+
+        p.ReleaseAllReservationsForAccount("FIRM", new EndClientId("alice"));
+
+        Assert.Equal(0m, p.ReservedForTesting("FIRM", "alice"));
+        Assert.Equal(1_000m, p.AvailableForTesting("FIRM", "alice"));
+        Assert.Equal((0, 0), p.GetReservationCounts());
+
+        // Full capacity is usable again — a new order for the whole
+        // base amount is approved.
+        Assert.True((await p.TryReserveAsync(4, Buy("FIRM", "alice", 10m, 100), CancellationToken.None)).Approved);
+    }
+
+    [Fact]
+    public async Task ReleaseAllReservationsForAccount_RemovesSuspendedReservationsToo()
+    {
+        // #153 interplay: a Suspended entry already released its cash
+        // from _reserved, but the ReservationEntry itself must still be
+        // removed by an account reset — otherwise a later admin
+        // Restored on a reset account would re-acquire a stale hold.
+        var (p, _) = Build(initial: 1_000m, owner: "alice");
+        Assert.True((await p.TryReserveAsync(1, Buy("FIRM", "alice", 10m, 50), CancellationToken.None)).Approved); // 500 held
+        p.OnExecution(1, ExecKind.Suspended, 0); // cash released, entry stays flagged suspended
+        Assert.Equal((0, 1), p.GetReservationCounts());
+        Assert.Equal(1_000m, p.AvailableForTesting("FIRM", "alice"));
+
+        p.ReleaseAllReservationsForAccount("FIRM", new EndClientId("alice"));
+
+        // The tracking entry is gone, so a later Restored on ClOrdID 1
+        // is a silent no-op instead of re-acquiring a hold.
+        Assert.Equal((0, 0), p.GetReservationCounts());
+        p.OnExecution(1, ExecKind.Restored, 0);
+        Assert.Equal(0m, p.ReservedForTesting("FIRM", "alice"));
+        Assert.Equal(1_000m, p.AvailableForTesting("FIRM", "alice"));
+    }
+
+    [Fact]
+    public async Task ReleaseAllReservationsForAccount_IsIdempotent()
+    {
+        // Calling release twice (e.g. a retried admin reset) — and
+        // calling it on an account that never reserved anything — must
+        // both be harmless no-ops.
+        var (p, _) = Build(initial: 1_000m, owner: "alice");
+        Assert.True((await p.TryReserveAsync(1, Buy("FIRM", "alice", 10m, 50), CancellationToken.None)).Approved);
+
+        p.ReleaseAllReservationsForAccount("FIRM", new EndClientId("alice"));
+        p.ReleaseAllReservationsForAccount("FIRM", new EndClientId("alice"));
+
+        Assert.Equal(0m, p.ReservedForTesting("FIRM", "alice"));
+        Assert.Equal(1_000m, p.AvailableForTesting("FIRM", "alice"));
+
+        // Never-reserved account: no-op, does not throw.
+        p.ReleaseAllReservationsForAccount("FIRM", new EndClientId("never-traded"));
+        Assert.Equal(0m, p.ReservedForTesting("FIRM", "never-traded"));
     }
 }

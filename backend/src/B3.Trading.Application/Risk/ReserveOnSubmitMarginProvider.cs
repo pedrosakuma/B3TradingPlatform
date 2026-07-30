@@ -212,6 +212,33 @@ public sealed class ReserveOnSubmitMarginProvider : IMarginProvider, IReplaceMar
     }
 
     /// <summary>
+    /// Admin account-reset support (#671 / RFC #753). Removes every
+    /// per-ClOrdID reservation entry tracked for (<paramref name="firmId"/>,
+    /// <paramref name="owner"/>) — including suspended ones, which hold no
+    /// cash in <c>_reserved</c> but must still stop tracking so a later
+    /// Restored ER can't re-acquire a hold against a reset account — and
+    /// clears the account's aggregate reserved notional. Runs under
+    /// <see cref="_gate"/> so it can't race a concurrent
+    /// <see cref="TryReserveAsync"/>/<see cref="OnExecution"/> for the same
+    /// account. Idempotent: an account with nothing reserved is a no-op.
+    /// </summary>
+    public void ReleaseAllReservationsForAccount(string firmId, EndClientId owner)
+    {
+        var account = MarginAccountKey.Create(firmId, owner.Value);
+        lock (_gate)
+        {
+            foreach (var clOrdId in _reservations
+                         .Where(kv => MarginAccountKeyComparer.Instance.Equals(kv.Value.Account, account))
+                         .Select(kv => kv.Key)
+                         .ToArray())
+            {
+                _reservations.TryRemove(clOrdId, out _);
+            }
+            _reserved.TryRemove(account, out _);
+        }
+    }
+
+    /// <summary>
     /// Rebuilds the complete reservation ledger after snapshot restore,
     /// WAL replay, and session-version reconciliation. Any temporary state
     /// produced while replaying replace events is discarded in favour of

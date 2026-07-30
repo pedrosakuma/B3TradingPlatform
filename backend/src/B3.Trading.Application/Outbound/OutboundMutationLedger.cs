@@ -1707,6 +1707,85 @@ public sealed class OutboundMutationLedger
                 .ToArray();
     }
 
+    /// <summary>
+    /// True when the end-client identified by <paramref name="endClientRef"/>
+    /// (the pseudonymized reference produced by
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRef"/> —
+    /// never a plaintext identity) currently has an outbound mutation that
+    /// is unsafe to build atop: any non-terminal state, OR a terminal state
+    /// still flagged <see cref="OutboundMutationSnapshot.RequiresReconciliation"/>.
+    /// A terminal-but-reconciliation-required mutation still blocks because
+    /// the venue outcome is not yet authoritative.
+    ///
+    /// <para>
+    /// Added for the admin account-reset fail-closed guard (RFC #753 /
+    /// #671); tracked alongside the outbound-mutation-ledger epic (#628)
+    /// rather than as a separate epic sub-task. Callers resolve the
+    /// <paramref name="endClientRef"/> via <see cref="IOutboundCommandProtector"/>
+    /// before calling — this method never sees plaintext end-client identity.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Stable-reference key rotation:</b> this single-reference overload
+    /// only checks the one digest supplied by the caller — typically
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRef"/>,
+    /// which reflects only the <i>currently active</i> stable-reference
+    /// key. If that key has ever been rotated, a mutation recorded under a
+    /// still-supported historical key would carry a different digest and
+    /// be silently invisible here. Callers that must be robust to
+    /// historical-key rotation should use the
+    /// <see cref="HasNonTerminalMutationForEndClientRef(string, IReadOnlyCollection{string})"/>
+    /// overload with
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRefCandidates"/>
+    /// instead.
+    /// </para>
+    /// </summary>
+    public bool HasNonTerminalMutationForEndClientRef(string firmId, string endClientRef)
+        => HasNonTerminalMutationForEndClientRef(firmId, [endClientRef]);
+
+    /// <summary>
+    /// Overload of <see cref="HasNonTerminalMutationForEndClientRef(string, string)"/>
+    /// that checks membership against a whole set of candidate pseudonymized
+    /// end-client references rather than a single digest. Intended for the
+    /// stable-reference key-rotation case: the caller (typically the
+    /// account-reset guard, #671 / RFC #753) computes one candidate per
+    /// still-supported key via
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRefCandidates"/>
+    /// so a mutation recorded under any historical key — not just the
+    /// currently active one — still blocks. This method stays crypto-agnostic:
+    /// it never derives, rotates, or persists keys itself, it only checks set
+    /// membership under the existing <see cref="_gate"/>.
+    /// </summary>
+    public bool HasNonTerminalMutationForEndClientRef(
+        string firmId,
+        IReadOnlyCollection<string> endClientRefCandidates)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentNullException.ThrowIfNull(endClientRefCandidates);
+        if (endClientRefCandidates.Count == 0)
+        {
+            throw new ArgumentException(
+                "At least one end-client reference candidate is required.",
+                nameof(endClientRefCandidates));
+        }
+        var candidates = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in endClientRefCandidates)
+        {
+            if (!IsLowerHex(candidate, 32))
+            {
+                throw new ArgumentException(
+                    "Each end-client reference candidate must be a 32-character lowercase hex digest.",
+                    nameof(endClientRefCandidates));
+            }
+            candidates.Add(candidate);
+        }
+        lock (_gate)
+            return _mutations.Values.Any(m =>
+                string.Equals(m.FirmId, firmId, StringComparison.Ordinal)
+                && candidates.Contains(m.EndClientRef)
+                && (!IsTerminal(m.State) || m.RequiresReconciliation));
+    }
+
     public int ReconcileLegacyPendingState(
         IEnumerable<ulong> pendingNewClOrdIds,
         IEnumerable<ulong> pendingCancelClOrdIds,

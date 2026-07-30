@@ -51,6 +51,25 @@ public interface IOutboundCommandProtector
 
     string CreateStableEndClientRef(string firmId, string endClientId);
 
+    /// <summary>
+    /// Computes the stable end-client reference for
+    /// (<paramref name="firmId"/>, <paramref name="endClientId"/>) under
+    /// every key currently loaded in the key ring, not just
+    /// <see cref="ActiveStableReferenceKey"/>. A key rotation that
+    /// repoints <c>StableReferenceKeyId</c>/<c>Version</c> at a new key
+    /// changes what <see cref="CreateStableEndClientRef"/> returns for the
+    /// same firm/end-client going forward; any mutation recorded under the
+    /// previous key still carries the old digest. Callers that must find
+    /// mutations regardless of which key was active when they were
+    /// recorded (e.g. the account-reset non-terminal-mutation guard,
+    /// #671 / RFC #753) should check membership against this whole set
+    /// instead of the single active digest. A key that has been fully
+    /// retired from <c>Keys</c> is, by definition, no longer supported —
+    /// this deliberately does not attempt to reconstruct or persist
+    /// references for keys the deployment no longer has.
+    /// </summary>
+    IReadOnlyCollection<string> CreateStableEndClientRefCandidates(string firmId, string endClientId);
+
     OutboundStableReferenceKey ActiveStableReferenceKey { get; }
 
     string CreateStableReference(
@@ -231,7 +250,23 @@ public sealed class AeadOutboundCommandProtector : IOutboundCommandProtector
     public string CreateStableEndClientRef(string firmId, string endClientId)
         => CreateStableReference(
             ActiveStableReferenceKey,
-            $"{firmId}\n{endClientId}");
+            CanonicalEndClientValue(firmId, endClientId));
+
+    public IReadOnlyCollection<string> CreateStableEndClientRefCandidates(string firmId, string endClientId)
+    {
+        var canonicalValue = CanonicalEndClientValue(firmId, endClientId);
+        var candidates = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var keyIdentity in _keys.Keys)
+        {
+            candidates.Add(CreateStableReference(
+                new OutboundStableReferenceKey(keyIdentity.Id, keyIdentity.Version),
+                canonicalValue));
+        }
+        return candidates;
+    }
+
+    private static string CanonicalEndClientValue(string firmId, string endClientId) =>
+        $"{firmId}\n{endClientId}";
 
     public OutboundStableReferenceKey ActiveStableReferenceKey =>
         new(_stableReference.Id, _stableReference.Version);
