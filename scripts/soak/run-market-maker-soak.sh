@@ -1398,12 +1398,12 @@ read_live_refresh_price_into() {
     return 1
 }
 
-resolve_primary_order_price() {
-    local side="$1" configured_price="$2" phase="$3"
+resolve_primary_order_price_into() {
+    local output_variable="$1" side="$2" configured_price="$3" phase="$4"
     local live_reference tick_size spread_ticks max_skew_ticks required_price resolved_price
 
     if ! read_live_refresh_price_into live_reference "$symbol" 2>/dev/null; then
-        printf '%s\n' "$configured_price"
+        printf -v "$output_variable" '%s' "$configured_price"
         return 0
     fi
 
@@ -1452,11 +1452,11 @@ resolve_primary_order_price() {
         log "derived ${side,,} limit ${resolved_price} for ${phase} from liveReference=${live_reference}, spreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, extraTicks=${marketable_price_extra_ticks}, configured=${configured_price}"
     fi
 
-    printf '%s\n' "$resolved_price"
+    printf -v "$output_variable" '%s' "$resolved_price"
 }
 
-resolve_live_refresh_price() {
-    local refresh_symbol="$1" started=$SECONDS price tick_size wait_budget
+resolve_live_refresh_price_into() {
+    local output_variable="$1" refresh_symbol="$2" started=$SECONDS price tick_size wait_budget
     wait_budget="$max_reference_age_seconds"
     if [[ "$refresh_symbol" == "$symbol" ]] &&
         $strict_primary_reference_pending; then
@@ -1493,7 +1493,7 @@ resolve_live_refresh_price() {
                       }
                     ')" || return 1
             fi
-            printf '%s\n' "$price"
+            printf -v "$output_variable" '%s' "$price"
             return 0
         fi
         sleep 0.25
@@ -1515,7 +1515,7 @@ resolve_live_refresh_price() {
                 printf "%.8f\n", adjusted
               }
             ')" || return 1
-        printf '%s\n' "$price"
+        printf -v "$output_variable" '%s' "$price"
         return 0
     fi
     log "ERROR: no fresh live reference is available for strict refresh symbol '$refresh_symbol'"
@@ -2104,7 +2104,7 @@ run_strict_refresh_cycle() {
     while IFS=$'\t' read -r refresh_symbol refresh_quantity configured_price; do
         if [[ "$price_mode" == "live" ]]; then
             primary_reference_pending="$strict_primary_reference_pending"
-            refresh_price="$(resolve_live_refresh_price "$refresh_symbol")" || return 1
+            resolve_live_refresh_price_into refresh_price "$refresh_symbol" || return 1
             if [[ "$refresh_symbol" == "$symbol" ]]; then
                 strict_primary_reference_pending=false
             fi
@@ -2228,10 +2228,10 @@ run_window() {
         fi
         side="$next_side"
         if [[ "$side" == "Buy" ]]; then
-            price="$(resolve_primary_order_price "$side" "$marketable_buy_price" "$phase")" || return 1
+            resolve_primary_order_price_into price "$side" "$marketable_buy_price" "$phase" || return 1
             next_side=Sell
         else
-            price="$(resolve_primary_order_price "$side" "$marketable_sell_price" "$phase")" || return 1
+            resolve_primary_order_price_into price "$side" "$marketable_sell_price" "$phase" || return 1
             next_side=Buy
         fi
         submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" "$side" "$price" "$phase"
@@ -2253,11 +2253,11 @@ wait_metric_equals \
     "bot_orders_open{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
     2 60
 log "executing a two-fill bootstrap round trip so the P&L ledger emits snapshots"
-submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy \
-    "$(resolve_primary_order_price Buy "$marketable_buy_price" "accounting-bootstrap")" "accounting-bootstrap"
+resolve_primary_order_price_into price Buy "$marketable_buy_price" "accounting-bootstrap"
+submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy "$price" "accounting-bootstrap"
 refresh_strict_symbols_if_due accounting-bootstrap-between-fills
-submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell \
-    "$(resolve_primary_order_price Sell "$marketable_sell_price" "accounting-bootstrap")" "accounting-bootstrap"
+resolve_primary_order_price_into price Sell "$marketable_sell_price" "accounting-bootstrap"
+submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell "$price" "accounting-bootstrap"
 if [[ "$profile" == "pause-and-cancel" ]]; then
     sleep "$workload_interval_seconds"
 fi
@@ -2269,8 +2269,8 @@ inventory_short_pass=true
 if [[ "$profile" == "inventory-skew" ]]; then
     log "applying ${inventory_bias_lots}-lot sell bias so the bot becomes long and reaches skew saturation"
     for ((i = 0; i < inventory_bias_lots; i++)); do
-        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell \
-            "$(resolve_primary_order_price Sell "$marketable_sell_price" "inventory-bias")" "inventory-bias"
+        resolve_primary_order_price_into price Sell "$marketable_sell_price" "inventory-bias"
+        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Sell "$price" "inventory-bias"
     done
     if ! wait_metric_equals \
         "bot_strategy_inventory_skew_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
@@ -2281,8 +2281,8 @@ if [[ "$profile" == "inventory-skew" ]]; then
 
     log "reversing through flat to ${inventory_bias_lots} lots short to prove skew direction"
     for ((i = 0; i < inventory_bias_lots * 2; i++)); do
-        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy \
-            "$(resolve_primary_order_price Buy "$marketable_buy_price" "inventory-reversal")" "inventory-reversal"
+        resolve_primary_order_price_into price Buy "$marketable_buy_price" "inventory-reversal"
+        submit_order trading_token trading_token_expires_at "$trading_user" "$trading_password" Buy "$price" "inventory-reversal"
     done
     if ! wait_metric_equals \
         "bot_strategy_inventory_skew_ticks{service_name=\"b3-market-maker-bot\",symbol=\"$symbol\"}" \
