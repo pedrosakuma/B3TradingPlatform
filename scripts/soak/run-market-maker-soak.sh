@@ -1369,8 +1369,8 @@ strict_primary_reference_pending=false
 strict_primary_reference_baseline=
 strict_primary_reference_direction=
 
-read_live_refresh_price() {
-    local refresh_symbol="$1" empty_request_body="" response live_row updated_nanoseconds
+read_live_refresh_price_into() {
+    local output_variable="$1" refresh_symbol="$2" empty_request_body="" response live_row updated_nanoseconds price
     local started=$SECONDS
     while ((SECONDS - started < max_reference_age_seconds)); do
         authed_json_request_into response \
@@ -1388,7 +1388,8 @@ read_live_refresh_price() {
         if [[ -n "$live_row" ]]; then
             updated_nanoseconds="$(date -u -d "$(jq -r '.updatedUtc' <<<"$live_row")" +%s%N)" ||
                 return 1
-            jq -er '.price' <<<"$live_row"
+            price="$(jq -er '.price' <<<"$live_row")" || return 1
+            printf -v "$output_variable" '%s' "$price"
             return
         fi
         sleep 0.25
@@ -1401,7 +1402,7 @@ resolve_primary_order_price() {
     local side="$1" configured_price="$2" phase="$3"
     local live_reference tick_size spread_ticks max_skew_ticks required_price resolved_price
 
-    if ! live_reference="$(read_live_refresh_price "$symbol" 2>/dev/null)"; then
+    if ! read_live_refresh_price_into live_reference "$symbol" 2>/dev/null; then
         printf '%s\n' "$configured_price"
         return 0
     fi
@@ -1462,7 +1463,7 @@ resolve_live_refresh_price() {
         wait_budget="$full_telemetry_cycle_seconds"
     fi
     while ((SECONDS - started < wait_budget)); do
-        price="$(read_live_refresh_price "$refresh_symbol")" || return 1
+        read_live_refresh_price_into price "$refresh_symbol" || return 1
         if [[ "$refresh_symbol" != "$symbol" ]] ||
             ! $strict_primary_reference_pending ||
             awk -v actual="$price" \
@@ -1500,7 +1501,7 @@ resolve_live_refresh_price() {
     if [[ "$refresh_symbol" == "$symbol" ]] &&
         $strict_primary_reference_pending; then
         log "WARN: $refresh_symbol primary $strict_primary_reference_direction fill did not advance the live reference; using an interior-tick maintenance price after the full drain window"
-        price="$(read_live_refresh_price "$refresh_symbol")" || return 1
+        read_live_refresh_price_into price "$refresh_symbol" || return 1
         tick_size="$(jq -er \
             --arg symbol "$refresh_symbol" \
             '.[] | select(.symbol == $symbol) | .tickSize' \
@@ -1550,7 +1551,7 @@ submit_order() {
     local token_variable="$1" expiry_variable="$2" user="$3" password="$4" side="$5" price="$6" phase="$7"
     local response clordid latency request_body reference_baseline
     if [[ "$profile" == "pause-and-cancel" ]]; then
-        reference_baseline="$(read_live_refresh_price "$symbol")" || return 1
+        read_live_refresh_price_into reference_baseline "$symbol" || return 1
     fi
     request_body="$(jq -cn         --arg symbol "$symbol"         --arg side "$side"         --argjson quantity "$quantity"         --argjson price "$price"         '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" ||
         return 1
