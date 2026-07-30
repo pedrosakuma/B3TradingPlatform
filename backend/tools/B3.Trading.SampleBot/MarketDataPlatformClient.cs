@@ -66,8 +66,11 @@ internal sealed class MarketDataPlatformClient : ISampleBotMarketDataClient
             try
             {
                 await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
-                await client.SubscribeAsync(symbol, SubscribeFlags.Info | SubscribeFlags.Trades, cancellationToken).ConfigureAwait(false);
                 await bridge.NotifyConnectedAsync(isReconnect, cancellationToken).ConfigureAwait(false);
+                await client.SubscribeAsync(
+                    symbol,
+                    SubscribeFlags.Info | SubscribeFlags.Trades | SubscribeFlags.Book,
+                    cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation(
                     "Connected to market-data endpoint {WsUrl} for symbol {Symbol}.",
                     _options.MarketData.WsUrl,
@@ -113,6 +116,9 @@ internal sealed class MarketDataPlatformClient : ISampleBotMarketDataClient
         {
             client.Trade += OnTrade;
             client.InfoSnapshot += OnInfoSnapshot;
+            client.BookSnapshot += OnBookSnapshot;
+            client.OrderAdded += OnOrderAdded;
+            client.OrderUpdated += OnOrderUpdated;
             client.ConnectionStateChanged += OnConnectionStateChanged;
             client.SubscribeError += OnSubscribeError;
             client.SymbolDelisted += OnSymbolDelisted;
@@ -122,6 +128,9 @@ internal sealed class MarketDataPlatformClient : ISampleBotMarketDataClient
         {
             client.Trade -= OnTrade;
             client.InfoSnapshot -= OnInfoSnapshot;
+            client.BookSnapshot -= OnBookSnapshot;
+            client.OrderAdded -= OnOrderAdded;
+            client.OrderUpdated -= OnOrderUpdated;
             client.ConnectionStateChanged -= OnConnectionStateChanged;
             client.SubscribeError -= OnSubscribeError;
             client.SymbolDelisted -= OnSymbolDelisted;
@@ -154,6 +163,52 @@ internal sealed class MarketDataPlatformClient : ISampleBotMarketDataClient
                 new DateTimeOffset(DateTime.SpecifyKind(ev.ReceivedUtc, DateTimeKind.Utc))), CancellationToken.None)
             .GetAwaiter()
             .GetResult();
+
+        private void OnOrderAdded(OrderAddedEvent ev) => OnBookOrder(
+            ev.Symbol,
+            ev.SecurityId,
+            ev.Price,
+            ev.ReceivedUtc);
+
+        private void OnBookSnapshot(BookSnapshotEvent ev)
+        {
+            var price = ev.Asks
+                .Where(order => order.Price > 0m)
+                .Select(order => order.Price)
+                .DefaultIfEmpty()
+                .Min();
+            if (price <= 0m)
+            {
+                price = ev.Bids
+                    .Where(order => order.Price > 0m)
+                    .Select(order => order.Price)
+                    .DefaultIfEmpty()
+                    .Max();
+            }
+
+            OnBookOrder(ev.Symbol, ev.SecurityId, price, ev.ReceivedUtc);
+        }
+
+        private void OnOrderUpdated(OrderUpdatedEvent ev) => OnBookOrder(
+            ev.Symbol,
+            ev.SecurityId,
+            ev.Price,
+            ev.ReceivedUtc);
+
+        private void OnBookOrder(string symbol, ulong securityId, decimal price, DateTime receivedUtc)
+        {
+            if (price <= 0m)
+                return;
+
+            _observer.OnQuoteAsync(new MarketDataQuote(
+                symbol,
+                securityId,
+                ReferencePriceSource.BookOrder,
+                price,
+                new DateTimeOffset(DateTime.SpecifyKind(receivedUtc, DateTimeKind.Utc))), CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        }
 
         private void OnInfoSnapshot(InfoSnapshotEvent ev)
         {
@@ -222,12 +277,16 @@ internal enum ReferencePriceSource
 {
     TradingReferencePrice,
     LastTradePrice,
+    BookOrder,
 }
 
 internal interface IMarketDataClient : IAsyncDisposable
 {
     event Action<TradeEvent>? Trade;
     event Action<InfoSnapshotEvent>? InfoSnapshot;
+    event Action<BookSnapshotEvent>? BookSnapshot;
+    event Action<OrderAddedEvent>? OrderAdded;
+    event Action<OrderUpdatedEvent>? OrderUpdated;
     event Action<SymbolDelistedEvent>? SymbolDelisted;
     event Action<ConnectionStateChangedEvent>? ConnectionStateChanged;
     event Action<SubscribeErrorEvent>? SubscribeError;
@@ -267,6 +326,24 @@ internal sealed class SdkMarketDataClient : IMarketDataClient
     {
         add => _inner.InfoSnapshot += value;
         remove => _inner.InfoSnapshot -= value;
+    }
+
+    public event Action<BookSnapshotEvent>? BookSnapshot
+    {
+        add => _inner.BookSnapshot += value;
+        remove => _inner.BookSnapshot -= value;
+    }
+
+    public event Action<OrderAddedEvent>? OrderAdded
+    {
+        add => _inner.OrderAdded += value;
+        remove => _inner.OrderAdded -= value;
+    }
+
+    public event Action<OrderUpdatedEvent>? OrderUpdated
+    {
+        add => _inner.OrderUpdated += value;
+        remove => _inner.OrderUpdated -= value;
     }
 
     public event Action<SymbolDelistedEvent>? SymbolDelisted
