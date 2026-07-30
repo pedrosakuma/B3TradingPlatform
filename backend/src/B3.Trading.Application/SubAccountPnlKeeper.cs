@@ -103,6 +103,66 @@ public sealed class SubAccountPnlKeeper
     }
 
     /// <summary>
+    /// #671/#753 (RFC PR 1, code-review addendum #2). Companion to
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> for the sub-account
+    /// keeper's MASTER bucket (<see cref="MasterBucketKey"/>) ONLY.
+    /// v1 admin position adjustment (<c>POST /api/admin/positions</c>)
+    /// is account-wide/master-only — this method deliberately has no
+    /// <c>subAccount</c> parameter and NEVER fabricates, alters, or
+    /// removes any NAMED sub-account bucket in <see cref="_bucketAvgCost"/>;
+    /// per-sub-account adjustment is out of scope until a future PR
+    /// (if ever) explicitly extends the RFC.
+    ///
+    /// <para>
+    /// Replaces the master bucket's avg-cost basis for
+    /// (<paramref name="firmId"/>, <paramref name="endClient"/>,
+    /// <paramref name="symbol"/>) with an ABSOLUTE
+    /// (<paramref name="netQuantity"/>, <paramref name="averageEntryPrice"/>)
+    /// pair outright, discarding whatever basis was tracked there. A
+    /// zero <paramref name="netQuantity"/> CLEARS the master bucket
+    /// entirely (no stale <c>(0, 0m)</c> entry left behind) — mirroring
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> exactly.
+    /// </para>
+    ///
+    /// <para>
+    /// Must be invoked in the SAME dispatcher-serialised apply as
+    /// <see cref="PositionKeeper.SetAbsolute"/> and
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> (see
+    /// <c>AdminEndpoints.HandlePositionAdjustment</c> and the
+    /// <c>PositionAdjustmentEvent</c> replay case in
+    /// <c>EventReplayer.Apply</c>) so all three keepers converge on the
+    /// identical post-adjustment state, live and on replay.
+    /// </para>
+    ///
+    /// <para>
+    /// Invariant re-checked here as defense-in-depth (mirrors
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> exactly): zero
+    /// <paramref name="netQuantity"/> requires zero
+    /// <paramref name="averageEntryPrice"/>; non-zero requires a
+    /// strictly positive average entry price.
+    /// </para>
+    /// </summary>
+    public void SetAbsoluteMasterBucketAvgCost(
+        string firmId, string endClient, string symbol, long netQuantity, decimal averageEntryPrice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endClient);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (netQuantity == 0 && averageEntryPrice != 0m)
+            throw new ArgumentException("averageEntryPrice must be 0 when netQuantity is 0", nameof(averageEntryPrice));
+        if (netQuantity != 0 && averageEntryPrice <= 0m)
+            throw new ArgumentException("averageEntryPrice must be > 0 when netQuantity is non-zero", nameof(averageEntryPrice));
+
+        var key = (firmId, endClient, MasterBucketKey, symbol);
+        if (netQuantity == 0)
+        {
+            _bucketAvgCost.TryRemove(key, out _);
+            return;
+        }
+        _bucketAvgCost[key] = new PnlKeeper.AvgCostState(netQuantity, averageEntryPrice);
+    }
+
+    /// <summary>
     /// PR #316 P2. Live-path entry point used by
     /// <c>ExecutionReportProcessor</c>: computes the realized delta
     /// for <paramref name="subAccount"/>'s bucket (master when null)

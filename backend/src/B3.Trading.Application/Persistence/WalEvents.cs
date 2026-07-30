@@ -58,6 +58,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderCancelPreSendFailedEvent), "order.cancel-pre-send-failed")]
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
 [JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
+[JsonDerivedType(typeof(PositionAdjustmentEvent), "position.adjustment")]
 [JsonDerivedType(typeof(FeeAccruedEvent), "fee.accrued")]
 [JsonDerivedType(typeof(RealizedPnlEvent), "pnl.realized")]
 [JsonDerivedType(typeof(SubAccountCreatedEvent), "sub-account.created")]
@@ -1160,6 +1161,64 @@ public sealed record CashLedgerEvent : WalEvent
     public required string Operation { get; init; }
     public required decimal Amount { get; init; }
     public required string Currency { get; init; }
+    public string? Reference { get; init; }
+    public string? OperatorId { get; init; }
+}
+
+/// <summary>
+/// #671/#753 (RFC: admin account reset + runtime position adjustment,
+/// PR 1). Operator-driven ABSOLUTE position overwrite for
+/// (<see cref="FirmId"/>, <see cref="EndClientId"/>, <see cref="Symbol"/>)
+/// issued via <c>POST /api/admin/positions</c>. Unlike
+/// <see cref="ExecutionReportReceivedEvent"/> fills — cumulative deltas
+/// folded by <see cref="B3.Trading.Application.PositionKeeper.ApplyFill"/> —
+/// this event carries the fully resolved post-adjustment state
+/// (<see cref="NetQuantity"/>, <see cref="AverageEntryPrice"/>), so replay
+/// via <see cref="B3.Trading.Application.PositionKeeper.SetAbsolute"/> is
+/// idempotent and never accumulates: re-applying the same event any
+/// number of times, or replaying it interleaved with unrelated events,
+/// always converges on the identical end state. This mirrors the RFC
+/// #753 decision to express the event as absolute state rather than a
+/// delta (the same rationale used by the sibling <c>AccountResetEvent</c>
+/// design planned for PR 3).
+///
+/// <para>
+/// <see cref="FirmId"/> is ALWAYS derived from the caller's JWT firm
+/// claim at the API boundary — never accepted from the request body —
+/// per the RFC's "admin operations are scoped to the administrator's
+/// JWT firm" product decision (see <c>AdminEndpoints.HandlePositionAdjustment</c>).
+/// <see cref="Reference"/> is operator free-form (ticket id, journal
+/// note), mirroring <see cref="CashLedgerEvent.Reference"/>.
+/// <see cref="OperatorId"/> is the JWT <c>sub</c> of the admin who
+/// issued the call, mirroring <see cref="CashLedgerEvent.OperatorId"/>.
+/// </para>
+///
+/// <para>
+/// Invariant enforced by the API handler AND (defense-in-depth) by
+/// <see cref="B3.Trading.Application.PositionKeeper.SetAbsolute"/>:
+/// <see cref="NetQuantity"/> zero requires <see cref="AverageEntryPrice"/>
+/// zero; non-zero requires a strictly positive average entry price.
+/// </para>
+///
+/// <para>
+/// Code-review addendum. Replay ALSO projects the same absolute state
+/// into <see cref="B3.Trading.Application.PnlKeeper"/> via
+/// <see cref="B3.Trading.Application.PnlKeeper.SetAbsoluteAvgCost"/> (see
+/// the <c>EventReplayer</c> replay case), in the same call as
+/// <see cref="B3.Trading.Application.PositionKeeper.SetAbsolute"/> — the
+/// two keepers' avg-cost basis must never drift out of lockstep, live
+/// or on cold/snapshot+tail recovery. A zero <see cref="NetQuantity"/>
+/// clears the tracked basis entirely rather than leaving a stale
+/// <c>(0, 0m)</c> entry.
+/// </para>
+/// </summary>
+public sealed record PositionAdjustmentEvent : WalEvent
+{
+    public required string EndClientId { get; init; }
+    public string FirmId { get; init; } = B3.Trading.Application.PositionKeeper.DefaultFirmId;
+    public required string Symbol { get; init; }
+    public required long NetQuantity { get; init; }
+    public required decimal AverageEntryPrice { get; init; }
     public string? Reference { get; init; }
     public string? OperatorId { get; init; }
 }
