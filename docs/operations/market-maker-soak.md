@@ -129,9 +129,9 @@ The primary workload keeps two configured outer guardrails
 live reference is available, derives each actual order limit from that live
 reference plus one configured half-spread, the target symbol's worst-case
 inventory skew, and `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` of extra crossing
-margin. The buy path uses the greater of the configured buy floor and the
-derived live-reference price; the sell path uses the lower of the configured
-sell ceiling and the derived live-reference price. This keeps the workload
+margin. The buy path uses the lower of the configured buy cap and the derived
+live-reference price; the sell path uses the greater of the configured sell
+floor and the derived live-reference price. This keeps the workload
 marketable when live inventory skew moves the quote away from the initial
 reference without reintroducing the previous fixed `32.80` live-collar failure.
 Each fill prints a real matching-engine trade into UMDF, moves the live
@@ -276,8 +276,8 @@ Useful controls:
 | `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
-| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Configured buy floor; actual buy limit is `max(floor, liveReference + tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
-| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Configured sell ceiling; actual sell limit is `min(ceiling, liveReference - tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
+| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Configured buy cap; actual buy limit is `min(cap, liveReference + tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
+| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Configured sell floor; actual sell limit is `max(floor, liveReference - tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
 | `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Extra live-reference crossing margin beyond spread + worst-case skew |
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |
