@@ -1522,8 +1522,8 @@ resolve_live_refresh_price() {
     return 1
 }
 
-wait_order_filled() {
-    local token_variable="$1" expiry_variable="$2" user="$3" password="$4" clordid="$5" expected_quantity="${6:-$quantity}"
+wait_order_filled_into() {
+    local output_variable="$1" token_variable="$2" expiry_variable="$3" user="$4" password="$5" clordid="$6" expected_quantity="${7:-$quantity}"
     local started orders status cum empty_request_body=""
     started=$SECONDS
     while (( SECONDS - started < fill_timeout_seconds )); do
@@ -1533,8 +1533,7 @@ wait_order_filled() {
         status="$(jq -r --arg id "$clordid"             '.[] | select((.clOrdId|tostring)==$id) | .status'             <<<"$orders" | tail -n1)" || return 1
         cum="$(jq -r --arg id "$clordid"             '.[] | select((.clOrdId|tostring)==$id) | .cumulativeQuantity'             <<<"$orders" | tail -n1)" || return 1
         if [[ "$status" == "Filled" && "$cum" == "$expected_quantity" ]]; then
-            printf '%s
-' "$((SECONDS - started))"
+            printf -v "$output_variable" '%s' "$((SECONDS - started))"
             return 0
         fi
         if [[ "$status" == "Rejected" || "$status" == "Cancelled" ]]; then
@@ -1563,7 +1562,7 @@ submit_order() {
         return 1
     }
     clordid="$(jq -er '.clOrdId | tostring' <<<"$response")" || return 1
-    latency="$(wait_order_filled "$token_variable" "$expiry_variable" "$user" "$password" "$clordid")" || return 1
+    wait_order_filled_into latency "$token_variable" "$expiry_variable" "$user" "$password" "$clordid" || return 1
     printf '%s,%s,%s,%s,%s,%s,%s
 '         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase" "$symbol" "$user" "$side" "$clordid" "$latency"         >>"$workload_csv" || return 1
     if [[ "$profile" == "pause-and-cancel" ]]; then
@@ -1578,7 +1577,7 @@ submit_recovery_cross() {
     local cross_symbol="$1" cross_quantity="$2" cross_price="$3"
     local phase="${4:-feed-recovery-cross}" segment="${5:-post-recovery}"
     local price_source="${6:-configured-reference}" direction="${7:-trading-buys}"
-    local sell_response buy_response sell_id buy_id latency request_body timestamp refresh_row
+    local sell_response buy_response sell_id buy_id latency sell_latency request_body timestamp refresh_row
     local seller buyer sell_token_variable sell_expiry_variable sell_password
     local buy_token_variable buy_expiry_variable buy_password
     if [[ "$direction" == "trading-buys" ]]; then
@@ -1624,8 +1623,8 @@ submit_recovery_cross() {
         return 1
     }
     buy_id="$(jq -er '.clOrdId | tostring' <<<"$buy_response")" || return 1
-    latency="$(wait_order_filled "$buy_token_variable" "$buy_expiry_variable" "$buyer" "$buy_password" "$buy_id" "$cross_quantity")" || return 1
-    wait_order_filled "$sell_token_variable" "$sell_expiry_variable" "$seller" "$sell_password" "$sell_id" "$cross_quantity" >/dev/null ||
+    wait_order_filled_into latency "$buy_token_variable" "$buy_expiry_variable" "$buyer" "$buy_password" "$buy_id" "$cross_quantity" || return 1
+    wait_order_filled_into sell_latency "$sell_token_variable" "$sell_expiry_variable" "$seller" "$sell_password" "$sell_id" "$cross_quantity" ||
         return 1
     timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
     refresh_row="$(jq -cn         --arg timestampUtc "$timestamp"         --arg segment "$segment"         --arg phase "$phase"         --arg symbol "$cross_symbol"         --arg direction "$direction"         --arg seller "$seller"         --arg buyer "$buyer"         --arg priceSource "$price_source"         --argjson quantity "$cross_quantity"         --argjson price "$cross_price"         --arg sellClOrdId "$sell_id"         --arg buyClOrdId "$buy_id"         --argjson fillLatencySeconds "$latency" '
