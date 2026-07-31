@@ -64,9 +64,20 @@ if soak_reference_timestamp_is_fresh 1000001 1000000 30; then
     echo "ERROR: future live-reference timestamp was accepted" >&2
     exit 1
 fi
-soak_live_reference_fallback_allowed missing
-if soak_live_reference_fallback_allowed stale; then
+soak_primary_reference_bootstrap_reset
+soak_primary_reference_fallback_allowed missing
+soak_primary_reference_mark_live_observed
+if soak_primary_reference_fallback_allowed missing; then
+    echo "ERROR: missing live reference re-enabled fallback after a valid observation" >&2
+    exit 1
+fi
+if soak_primary_reference_fallback_allowed stale; then
     echo "ERROR: stale live reference was allowed to use the bootstrap fallback" >&2
+    exit 1
+fi
+soak_primary_reference_bootstrap_reset
+if soak_primary_reference_fallback_allowed stale; then
+    echo "ERROR: stale initial live reference was allowed to use the bootstrap fallback" >&2
     exit 1
 fi
 

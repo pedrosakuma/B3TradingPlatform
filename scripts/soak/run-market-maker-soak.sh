@@ -1394,6 +1394,7 @@ primary_price_collar_absolute="$(jq -r '.limits.priceCollarAbsolute // empty' \
 strict_primary_reference_pending=false
 strict_primary_reference_baseline=
 strict_primary_reference_direction=
+soak_primary_reference_bootstrap_reset
 
 read_live_refresh_price_into() {
     local output_variable="$1" refresh_symbol="$2" status_variable="${3:-}"
@@ -1430,6 +1431,9 @@ read_live_refresh_price_into() {
             price="$(jq -er '.price' <<<"$live_row")" || return 1
             printf -v "$output_variable" '%s' "$price"
             [[ -z "$status_variable" ]] || printf -v "$status_variable" '%s' "fresh"
+            if [[ "$refresh_symbol" == "$symbol" ]]; then
+                soak_primary_reference_mark_live_observed
+            fi
             return
         fi
         sleep 0.25
@@ -1446,7 +1450,7 @@ resolve_primary_order_price_into() {
 
     if ! read_live_refresh_price_into \
         live_reference "$symbol" live_reference_status; then
-        if soak_live_reference_fallback_allowed "$live_reference_status"; then
+        if soak_primary_reference_fallback_allowed "$live_reference_status"; then
             log "WARN: no raw live reference has arrived for ${phase}; using configured bootstrap ${side,,} price ${configured_price}"
             printf -v "$output_variable" '%s' "$configured_price"
             return 0

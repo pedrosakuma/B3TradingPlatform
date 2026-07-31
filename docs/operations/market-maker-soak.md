@@ -136,8 +136,11 @@ collar-bound order. It also fails explicitly when no fresh live reference is
 available after a raw cache entry has been observed. Before the first market
 data print, and only while the raw `.live` entry is missing rather than stale,
 `SOAK_MARKETABLE_BUY_PRICE` / `SOAK_MARKETABLE_SELL_PRICE` bootstrap that entry
-with an explicit warning. Buy derivation crosses only the predicted ask side;
-sell derivation crosses only the predicted bid side.
+with an explicit warning. The profile process records the first valid primary
+live reference in persistent shell state; after that observation, missing,
+null, invalid, or stale raw values fail closed and cannot re-enable fallback
+after a reconnect. Buy derivation crosses only the predicted ask side; sell
+derivation crosses only the predicted bid side.
 Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.

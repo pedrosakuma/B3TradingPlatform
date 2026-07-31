@@ -173,8 +173,17 @@ soak_reference_timestamp_is_fresh() {
     ((now_epoch_ms - updated_epoch_ms < max_age_seconds * 1000))
 }
 
-soak_live_reference_fallback_allowed() {
-    [[ "$1" == "missing" ]]
+soak_primary_reference_bootstrap_reset() {
+    soak_primary_live_reference_observed=false
+}
+
+soak_primary_reference_mark_live_observed() {
+    soak_primary_live_reference_observed=true
+}
+
+soak_primary_reference_fallback_allowed() {
+    [[ "$1" == "missing" &&
+       "${soak_primary_live_reference_observed:-false}" == "false" ]]
 }
 
 soak_evaluate_strict_freshness() {
