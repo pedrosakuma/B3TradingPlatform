@@ -83,6 +83,19 @@ soak_curl_json_request_with_status() {
     )
 }
 
+soak_curl_status_envelope_into() {
+    local response_variable="$1" status_variable="$2" envelope="$3"
+    local parsed_curl_exit parsed_http_status parsed_response_body
+    parsed_curl_exit="$(jq -er '.curlExit' <<<"$envelope")" || return 1
+    parsed_http_status="$(jq -er '.httpStatus' <<<"$envelope")" || return 1
+    parsed_response_body="$(jq -r '.body' <<<"$envelope")" || return 1
+    printf -v "$response_variable" '%s' "$parsed_response_body"
+    printf -v "$status_variable" '%s' "$parsed_http_status"
+    ((parsed_curl_exit == 0)) || return "$parsed_curl_exit"
+    [[ "$parsed_http_status" =~ ^[0-9]{3}$ ]] || return 1
+    ((10#$parsed_http_status < 400)) || return 22
+}
+
 soak_sanitize_response_body() {
     local body="$1"
     if jq -e . >/dev/null 2>&1 <<<"$body"; then

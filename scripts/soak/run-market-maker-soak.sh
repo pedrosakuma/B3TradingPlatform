@@ -1366,20 +1366,14 @@ authed_json_request_with_status_into() {
     local response_variable="$1" status_variable="$2"
     local method="$3" url="$4" token_variable="$5" expiry_variable="$6"
     local user="$7" password="$8" body_variable="$9"
-    local token envelope curl_exit http_status response_body
+    local token envelope
     refresh_session_token_if_due \
         "$token_variable" "$expiry_variable" "$user" "$password" || return 1
     token="${!token_variable}"
     envelope="$(soak_curl_json_request_with_status \
         "$method" "$url" token "$body_variable")" || return 1
-    curl_exit="$(jq -er '.curlExit' <<<"$envelope")" || return 1
-    http_status="$(jq -er '.httpStatus' <<<"$envelope")" || return 1
-    response_body="$(jq -r '.body' <<<"$envelope")" || return 1
-    printf -v "$response_variable" '%s' "$response_body"
-    printf -v "$status_variable" '%s' "$http_status"
-    ((curl_exit == 0)) || return "$curl_exit"
-    [[ "$http_status" =~ ^[0-9]{3}$ ]] || return 1
-    ((10#$http_status < 400)) || return 22
+    soak_curl_status_envelope_into \
+        "$response_variable" "$status_variable" "$envelope"
 }
 
 set_session_token trading_token trading_token_expires_at "$trading_user" "$trading_password"

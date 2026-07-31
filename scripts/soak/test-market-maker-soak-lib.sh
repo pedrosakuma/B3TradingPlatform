@@ -83,21 +83,33 @@ fi
 
 mock_status_curl() {
     printf '%s\n' '{"status":"Rejected","code":"cash_limit","token":"must-redact"}' 422
+    return 22
 }
 status_envelope="$(SOAK_CURL_BIN=mock_status_curl \
     soak_curl_json_request_with_status POST https://example.invalid \
         absent_token absent_body)"
-[[ "$(jq -r '.curlExit' <<<"$status_envelope")" == "0" ]]
+[[ "$(jq -r '.curlExit' <<<"$status_envelope")" == "22" ]]
 [[ "$(jq -r '.httpStatus' <<<"$status_envelope")" == "422" ]]
-status_body="$(jq -r '.body' <<<"$status_envelope")"
+status_body=""
+http_status=""
+set +e
+soak_curl_status_envelope_into status_body http_status "$status_envelope"
+status_unpack_exit=$?
+set -e
+[[ "$status_unpack_exit" == "22" ]]
+[[ "$http_status" == "422" ]]
+[[ "$(jq -r '.code' <<<"$status_body")" == "cash_limit" ]]
 submit_failure_file="$ROOT/soak-artifacts/submit-failure-self-test-$$.jsonl"
-submit_context='{"profile":"inventory-skew","expectedSequence":3181}'
+submit_context='{"profile":"inventory-skew","phase":"duration","side":"Sell","quantity":100,"expectedSequence":3181}'
 soak_append_submit_failure \
-    "$submit_failure_file" "2026-07-31T14:46:05Z" http-post 22 422 \
+    "$submit_failure_file" "2026-07-31T14:46:05Z" http-post \
+    "$status_unpack_exit" "$http_status" \
     "$status_body" "$submit_context"
 [[ "$(jq -r '.httpStatus' "$submit_failure_file")" == "422" ]]
 [[ "$(jq -r '.responseBody.code' "$submit_failure_file")" == "cash_limit" ]]
 [[ "$(jq -r '.responseBody.token' "$submit_failure_file")" == "[REDACTED]" ]]
+[[ "$(jq -r '.requestContext.phase' "$submit_failure_file")" == "duration" ]]
+[[ "$(jq -r '.requestContext.expectedSequence' "$submit_failure_file")" == "3181" ]]
 rm -f "$submit_failure_file"
 
 suite_test_root="$ROOT/soak-artifacts/suite-control-flow-test-$$"
