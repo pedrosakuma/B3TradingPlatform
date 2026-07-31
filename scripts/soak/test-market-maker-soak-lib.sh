@@ -38,6 +38,52 @@ if soak_validate_strict_refresh_timing 12 6 6 6; then
     exit 1
 fi
 
+[[ "$(soak_resolve_marketable_limit Buy 32.70 0.01 5 5 1 10 "")" == "32.81000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 32.70 0.01 5 5 1 10 "")" == "32.59000000" ]]
+[[ "$(soak_resolve_marketable_limit Buy 100 1 4 0 1 5 "")" == "105.00000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 100 1 4 0 1 5 "")" == "95.00000000" ]]
+if soak_resolve_marketable_limit Buy 100 1 5 0 1 5 "" >/dev/null 2>&1; then
+    echo "ERROR: buy outside the configured collar was accepted" >&2
+    exit 1
+fi
+if soak_resolve_marketable_limit Sell 100 1 5 0 1 5 "" >/dev/null 2>&1; then
+    echo "ERROR: sell outside the configured collar was accepted" >&2
+    exit 1
+fi
+
+suite_test_root="$ROOT/soak-artifacts/suite-control-flow-test-$$"
+mkdir -p "$suite_test_root"
+trap 'rm -rf "$suite_test_root"' EXIT
+cat >"$suite_test_root/fake-runner.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mode=build
+while (($#)); do
+    if [[ "$1" == "--profile" ]]; then
+        profile="$2"
+        shift 2
+    elif [[ "$1" == "--no-build" ]]; then
+        mode=no-build
+        shift
+    else
+        shift
+    fi
+done
+printf '%s:%s\n' "$profile" "$mode" >>"$SOAK_SUITE_TEST_LOG"
+[[ "$profile" != "inventory-skew" ]]
+EOF
+chmod +x "$suite_test_root/fake-runner.sh"
+if SOAK_SUITE_TEST_LOG="$suite_test_root/calls.log" \
+    SOAK_SUITE_PROFILE_RUNNER="$suite_test_root/fake-runner.sh" \
+    SOAK_SUITE_MANIFEST="$suite_test_root/suite/suite-manifest.json" \
+    SOAK_SUITE_ID="suite-control-flow-test" \
+    "$ROOT/scripts/soak/run-market-maker-soak-suite.sh"; then
+    echo "ERROR: suite orchestrator accepted a failed profile" >&2
+    exit 1
+fi
+[[ "$(cat "$suite_test_root/calls.log")" == \
+    $'baseline:build\ninventory-skew:no-build' ]]
+
 accelerated_freshness="$(jq -n '
   ["PETR4","VALE3","ITUB4"] as $symbols |
   def refresh($timestamp; $segment; $symbol; $direction):

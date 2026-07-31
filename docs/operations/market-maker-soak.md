@@ -124,16 +124,16 @@ The helper reuses the same real-stack sandbox seam as
 4. submit one-lot PETR4 marketable limits through `POST /api/orders`;
 5. wait for each order to fill against the bot before sending the next.
 
-The primary workload keeps two configured outer guardrails
-(`SOAK_MARKETABLE_BUY_PRICE`, `SOAK_MARKETABLE_SELL_PRICE`) but, when a fresh
-live reference is available, derives each actual order limit from that live
-reference plus one configured half-spread, the target symbol's worst-case
-inventory skew, and `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` of extra crossing
-margin. The buy path uses the lower of the configured buy cap and the derived
-live-reference price; the sell path uses the greater of the configured sell
-floor and the derived live-reference price. This keeps the workload
-marketable when live inventory skew moves the quote away from the initial
-reference without reintroducing the previous fixed `32.80` live-collar failure.
+When a fresh live reference is available, the primary workload derives each
+actual order limit immediately before submission from that reference plus one
+configured half-spread, the target symbol's worst-case inventory skew, and
+`SOAK_MARKETABLE_PRICE_EXTRA_TICKS` of extra crossing margin. It validates the
+result against the effective percent/absolute collar returned by
+`/api/admin/risk/limits` and fails rather than submitting a non-marketable
+collar-bound order. `SOAK_MARKETABLE_BUY_PRICE` and
+`SOAK_MARKETABLE_SELL_PRICE` are fallback prices only when no live reference
+is available. Buy derivation crosses only the predicted ask side; sell
+derivation crosses only the predicted bid side.
 Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
@@ -225,24 +225,9 @@ export SOAK_TRADING_IMAGE="b3tp-719-trading-host:${image_tag}"
 export SOAK_MARKET_MAKER_BOT_IMAGE="b3tp-719-market-maker-bot:${image_tag}"
 export SOAK_ALERT_RECEIVER_IMAGE="b3tp-719-alert-receiver:${image_tag}"
 
-# The manifest-creating run must build the exact clean checkout. Do not add
-# --no-build here; the helper rejects it while the suite has no accepted runs.
-SOAK_PROJECT_NAME=b3tp-719-baseline-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/baseline" \
-  scripts/soak/run-market-maker-soak.sh --profile baseline
-
-# Reuse the same images. The helper compares actual sha256 image IDs, not tags.
-SOAK_PROJECT_NAME=b3tp-719-inventory-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/inventory-skew" \
-  scripts/soak/run-market-maker-soak.sh --profile inventory-skew --no-build
-
-SOAK_PROJECT_NAME=b3tp-719-volatility-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/volatility-spread" \
-  scripts/soak/run-market-maker-soak.sh --profile volatility-spread --no-build
-
-SOAK_PROJECT_NAME=b3tp-719-feed-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/pause-and-cancel" \
-  scripts/soak/run-market-maker-soak.sh --profile pause-and-cancel --no-build
+# The suite runner clean-builds baseline, reuses the pinned images for later
+# profiles, and exits immediately on the first non-zero profile result.
+SOAK_SUITE_ID="$suite_id" scripts/soak/run-market-maker-soak-suite.sh
 ```
 
 The configured tags are labels only and may be mutable. The first
@@ -276,8 +261,8 @@ Useful controls:
 | `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
-| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Configured buy cap; actual buy limit is `min(cap, liveReference + tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
-| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Configured sell floor; actual sell limit is `max(floor, liveReference - tickSize × (spreadTicks + maxSkewTicks + SOAK_MARKETABLE_PRICE_EXTRA_TICKS))` when a fresh live reference exists |
+| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Buy fallback used only when no fresh live reference is available |
+| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Sell fallback used only when no fresh live reference is available |
 | `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Extra live-reference crossing margin beyond spread + worst-case skew |
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |

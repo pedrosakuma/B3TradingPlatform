@@ -111,6 +111,57 @@ soak_validate_strict_refresh_timing() {
         ((interval_seconds + margin_seconds < max_age_seconds))
 }
 
+soak_resolve_marketable_limit() {
+    local side="$1" reference="$2" tick="$3" spread_ticks="$4"
+    local skew_ticks="$5" extra_ticks="$6" collar_percent="$7"
+    local collar_absolute="$8"
+
+    awk \
+        -v side="$side" \
+        -v reference="$reference" \
+        -v tick="$tick" \
+        -v spread="$spread_ticks" \
+        -v skew="$skew_ticks" \
+        -v extra="$extra_ticks" \
+        -v collar_percent="$collar_percent" \
+        -v collar_absolute="$collar_absolute" '
+          BEGIN {
+            if (reference <= 0 || tick <= 0 ||
+                (side != "Buy" && side != "Sell"))
+              exit 2
+
+            lower = -1.0e100
+            upper = 1.0e100
+            if (collar_percent != "") {
+              percent_lower = reference * (1 - collar_percent / 100)
+              percent_upper = reference * (1 + collar_percent / 100)
+              if (percent_lower > lower) lower = percent_lower
+              if (percent_upper < upper) upper = percent_upper
+            }
+            if (collar_absolute != "" && collar_absolute > 0) {
+              absolute_lower = reference - collar_absolute
+              absolute_upper = reference + collar_absolute
+              if (absolute_lower > lower) lower = absolute_lower
+              if (absolute_upper < upper) upper = absolute_upper
+            }
+
+            offset = tick * (spread + skew + extra)
+            required = side == "Buy" ? reference + offset : reference - offset
+            if ((side == "Buy" && required > upper) ||
+                (side == "Sell" && required < lower))
+              exit 3
+
+            ticks = required / tick
+            rounded_ticks = side == "Buy" ? int(ticks + 0.999999999) : int(ticks)
+            resolved = rounded_ticks * tick
+            if (resolved < lower || resolved > upper)
+              exit 3
+
+            printf "%.8f\n", resolved
+          }
+        '
+}
+
 soak_evaluate_strict_freshness() {
     jq -c '
       . as $evidence |

@@ -1365,6 +1365,20 @@ deposit() {
 deposit trading_token trading_token_expires_at "$trading_user" "$trading_password" "$deposit_amount"
 deposit counterparty_token counterparty_token_expires_at "$counterparty_user" "$counterparty_password" "$counterparty_deposit_amount"
 
+primary_price_collar_percent=""
+primary_price_collar_absolute=""
+empty_request_body=""
+primary_firm="$(jq -er '.trading.firm' <<<"$identity_mappings_json")" || exit 1
+authed_json_request_into primary_risk_limits \
+    GET \
+    "${base_url}/api/admin/risk/limits?endClient=${trading_user}&firmId=${primary_firm}&symbol=${symbol}" \
+    admin_token admin_token_expires_at "$admin_user" "$trading_password" \
+    empty_request_body || exit 1
+primary_price_collar_percent="$(jq -r '.limits.priceCollarPercent // empty' \
+    <<<"$primary_risk_limits")" || exit 1
+primary_price_collar_absolute="$(jq -r '.limits.priceCollarAbsolute // empty' \
+    <<<"$primary_risk_limits")" || exit 1
+
 strict_primary_reference_pending=false
 strict_primary_reference_baseline=
 strict_primary_reference_direction=
@@ -1400,7 +1414,7 @@ read_live_refresh_price_into() {
 
 resolve_primary_order_price_into() {
     local output_variable="$1" side="$2" configured_price="$3" phase="$4"
-    local live_reference tick_size spread_ticks max_skew_ticks required_price resolved_price
+    local live_reference tick_size spread_ticks max_skew_ticks resolved_price
 
     if ! read_live_refresh_price_into live_reference "$symbol" 2>/dev/null; then
         printf -v "$output_variable" '%s' "$configured_price"
@@ -1420,37 +1434,20 @@ resolve_primary_order_price_into() {
         '.[] | select(.symbol == $symbol) | .maxSkewTicks' \
         <<<"$configured_instruments_json")" || return 1
 
-    required_price="$(awk \
-        -v live="$live_reference" \
-        -v tick="$tick_size" \
-        -v spread="$spread_ticks" \
-        -v skew="$max_skew_ticks" \
-        -v extra="$marketable_price_extra_ticks" \
-        -v side="$side" '
-          BEGIN {
-            offset = tick * (spread + skew + extra)
-            adjusted = side == "Buy" ? live + offset : live - offset
-            printf "%.8f\n", adjusted
-          }
-        ')" || return 1
+    resolved_price="$(soak_resolve_marketable_limit \
+        "$side" \
+        "$live_reference" \
+        "$tick_size" \
+        "$spread_ticks" \
+        "$max_skew_ticks" \
+        "$marketable_price_extra_ticks" \
+        "$primary_price_collar_percent" \
+        "$primary_price_collar_absolute")" || {
+        log "ERROR: the fresh ${side,,} marketable limit is outside the configured price collar for ${phase} (reference=${live_reference}, spreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, extraTicks=${marketable_price_extra_ticks}, collarPercent=${primary_price_collar_percent:-unset}, collarAbsolute=${primary_price_collar_absolute:-unset})"
+        return 1
+    }
 
-    resolved_price="$(awk \
-        -v configured="$configured_price" \
-        -v required="$required_price" \
-        -v side="$side" '
-          BEGIN {
-            if (side == "Buy") {
-              adjusted = configured < required ? configured : required
-            } else {
-              adjusted = configured > required ? configured : required
-            }
-            printf "%.8f\n", adjusted
-          }
-        ')" || return 1
-
-    if [[ "$resolved_price" != "$configured_price" ]]; then
-        log "derived ${side,,} limit ${resolved_price} for ${phase} from liveReference=${live_reference}, spreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, extraTicks=${marketable_price_extra_ticks}, configured=${configured_price}"
-    fi
+    log "derived fresh ${side,,} limit ${resolved_price} for ${phase} from liveReference=${live_reference}, spreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, extraTicks=${marketable_price_extra_ticks}, collarPercent=${primary_price_collar_percent:-unset}, collarAbsolute=${primary_price_collar_absolute:-unset}, fallback=${configured_price}"
 
     printf -v "$output_variable" '%s' "$resolved_price"
 }
