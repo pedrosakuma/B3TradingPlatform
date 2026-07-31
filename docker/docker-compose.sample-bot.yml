@@ -153,7 +153,12 @@ services:
       SampleBot__DemoOrder__MaxNotional: "5000.00"
       SampleBot__DemoOrder__OrderTimeout: "00:00:15"
       SampleBot__DemoOrder__CancellationAttemptTimeout: "00:00:10"
-      SampleBot__DemoOrder__RequireOpenPhase: "true"
+      # The standalone matching/market-data sandbox currently exposes no
+      # authoritative phase signal through the participant websocket, so its
+      # snapshot is intentionally Unknown. The image default remains fail-safe
+      # (`true`) for real deployments; this explicit sandbox override lets the
+      # documented smoke trade against the known-open local matching engine.
+      SampleBot__DemoOrder__RequireOpenPhase: "false"
       SampleBot__DemoOrder__PostWorkflowWait: "00:00:03"
       SampleBot__DemoOrder__IdempotencyKeyPrefix: samplebot-overlay
     # Bounded cleanup: SampleBotWorker's ExecuteAsync awaits the
