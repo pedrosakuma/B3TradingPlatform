@@ -38,6 +38,19 @@ if soak_validate_strict_refresh_timing 12 6 6 6; then
     exit 1
 fi
 
+[[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1250000.00)" == "1250000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1500000.00)" == "1500000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1500000.00 1250000.00)" == "1500000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1750000.00)" == "1750000.00" ]]
+if soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1499999.99 >/dev/null; then
+    echo "ERROR: explicit sandbox cap below the counterparty deposit was accepted" >&2
+    exit 1
+fi
+if soak_resolve_sandbox_max_deposit 1500000.00 1250000.00 1499999.99 >/dev/null; then
+    echo "ERROR: explicit sandbox cap below the primary deposit was accepted" >&2
+    exit 1
+fi
+
 [[ "$(soak_conservative_profile_funding_bound baseline)" == "232719" ]]
 [[ "$(soak_conservative_profile_funding_bound inventory-skew)" == "1120238" ]]
 [[ "$(soak_conservative_profile_funding_bound volatility-spread)" == "886408" ]]

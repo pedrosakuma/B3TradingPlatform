@@ -3,6 +3,25 @@
 readonly SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT="1250000.00"
 readonly SOAK_ACCEPTANCE_FUNDING_HEADROOM_PERCENT="25"
 
+soak_resolve_sandbox_max_deposit() {
+    local primary_deposit="$1" counterparty_deposit="$2" explicit_max="${3:-}"
+    awk \
+        -v primary="$primary_deposit" \
+        -v counterparty="$counterparty_deposit" \
+        -v explicit_max="$explicit_max" '
+          BEGIN {
+            if (primary <= 0 || counterparty <= 0) exit 2
+            required = primary > counterparty ? primary : counterparty
+            if (explicit_max != "") {
+              if (explicit_max <= 0 || explicit_max < required) exit 3
+              printf "%s\n", explicit_max
+            } else {
+              printf "%.2f\n", required
+            }
+          }
+        '
+}
+
 soak_conservative_profile_funding_bound() {
     local profile="$1"
     awk \

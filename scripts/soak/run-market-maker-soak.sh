@@ -159,7 +159,13 @@ readonly marketable_price_extra_ticks="${SOAK_MARKETABLE_PRICE_EXTRA_TICKS:-1}"
 readonly reference_cross_price="${SOAK_REFERENCE_CROSS_PRICE:-30.00}"
 readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT}"
 readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-$deposit_amount}"
-readonly sandbox_max_deposit_amount="${SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT:-$deposit_amount}"
+sandbox_max_deposit_amount="$(soak_resolve_sandbox_max_deposit \
+    "$deposit_amount" "$counterparty_deposit_amount" \
+    "${SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT:-}")" || {
+    echo "ERROR: SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT must cover both SOAK_DEPOSIT_AMOUNT and SOAK_COUNTERPARTY_DEPOSIT_AMOUNT" >&2
+    exit 3
+}
+readonly sandbox_max_deposit_amount
 readonly auth_refresh_margin_seconds="${SOAK_AUTH_REFRESH_MARGIN_SECONDS:-300}"
 
 for identity in "$trading_user" "$counterparty_user" "$admin_user"; do
@@ -195,11 +201,6 @@ require_uint SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS "$strict_refresh_cycle_bud
 require_bool SOAK_KEEP_STACK "$keep_stack"
 require_bool SOAK_BUILD_IMAGES "$build_images"
 require_bool SOAK_WITH_GRAFANA "$with_grafana"
-awk -v deposit="$deposit_amount" -v maximum="$sandbox_max_deposit_amount" \
-    'BEGIN { exit !(deposit > 0 && maximum >= deposit) }' || {
-    echo "ERROR: SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT must cover SOAK_DEPOSIT_AMOUNT" >&2
-    exit 3
-}
 (( sample_interval_seconds > 0 )) || { echo "ERROR: sample interval must be positive" >&2; exit 3; }
 (( workload_interval_seconds > 0 )) || { echo "ERROR: workload interval must be positive" >&2; exit 3; }
 (( duration_seconds > 0 )) || { echo "ERROR: duration must be positive" >&2; exit 3; }
