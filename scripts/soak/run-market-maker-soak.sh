@@ -1396,8 +1396,9 @@ strict_primary_reference_baseline=
 strict_primary_reference_direction=
 
 read_live_refresh_price_into() {
-    local output_variable="$1" refresh_symbol="$2" empty_request_body="" response live_row
-    local updated_epoch_ms now_epoch_ms price last_rejection="missing"
+    local output_variable="$1" refresh_symbol="$2" status_variable="${3:-}"
+    local empty_request_body="" response live_row updated_epoch_ms now_epoch_ms price
+    local last_status="missing" last_rejection="missing"
     local started=$SECONDS
     while ((SECONDS - started < max_reference_age_seconds)); do
         authed_json_request_into response \
@@ -1414,33 +1415,43 @@ read_live_refresh_price_into() {
             ' <<<"$response" 2>/dev/null || true)"
         if [[ -n "$live_row" ]]; then
             updated_epoch_ms="$(date -u -d "$(jq -r '.updatedUtc' <<<"$live_row")" +%s%3N)" || {
+                [[ -z "$status_variable" ]] || printf -v "$status_variable" '%s' "invalid"
                 log "ERROR: live reference for '$refresh_symbol' has an invalid updatedUtc"
                 return 1
             }
             now_epoch_ms="$(date -u +%s%3N)" || return 1
             if ! soak_reference_timestamp_is_fresh \
                 "$updated_epoch_ms" "$now_epoch_ms" "$max_reference_age_seconds"; then
+                last_status="stale"
                 last_rejection="stale updatedUtc=$(jq -r '.updatedUtc' <<<"$live_row") ageMs=$((now_epoch_ms - updated_epoch_ms))"
                 sleep 0.25
                 continue
             fi
             price="$(jq -er '.price' <<<"$live_row")" || return 1
             printf -v "$output_variable" '%s' "$price"
+            [[ -z "$status_variable" ]] || printf -v "$status_variable" '%s' "fresh"
             return
         fi
         sleep 0.25
     done
+    [[ -z "$status_variable" ]] || printf -v "$status_variable" '%s' "$last_status"
     log "ERROR: no fresh live reference is available for '$refresh_symbol' within ${max_reference_age_seconds}s (${last_rejection})"
     return 1
 }
 
 resolve_primary_order_price_into() {
     local output_variable="$1" side="$2" configured_price="$3" phase="$4"
-    local live_reference tick_size spread_ticks max_skew_ticks
+    local live_reference live_reference_status tick_size spread_ticks max_skew_ticks
     local max_volatility_additional_spread_ticks resolved_price
 
-    if ! read_live_refresh_price_into live_reference "$symbol"; then
-        log "ERROR: refusing to derive the ${side,,} price for ${phase} without a fresh live reference (configured fallback=${configured_price})"
+    if ! read_live_refresh_price_into \
+        live_reference "$symbol" live_reference_status; then
+        if soak_live_reference_fallback_allowed "$live_reference_status"; then
+            log "WARN: no raw live reference has arrived for ${phase}; using configured bootstrap ${side,,} price ${configured_price}"
+            printf -v "$output_variable" '%s' "$configured_price"
+            return 0
+        fi
+        log "ERROR: refusing to derive the ${side,,} price for ${phase} from a ${live_reference_status} raw live reference"
         return 1
     fi
 

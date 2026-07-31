@@ -133,10 +133,11 @@ volatility additional half-spread when enabled, and
 against the effective percent/absolute collar returned by
 `/api/admin/risk/limits` and fails rather than submitting a non-marketable
 collar-bound order. It also fails explicitly when no fresh live reference is
-available. `SOAK_MARKETABLE_BUY_PRICE` and `SOAK_MARKETABLE_SELL_PRICE` remain
-diagnostic context only; they do not bypass freshness. Buy derivation crosses
-only the predicted ask side; sell derivation crosses only the predicted bid
-side.
+available after a raw cache entry has been observed. Before the first market
+data print, and only while the raw `.live` entry is missing rather than stale,
+`SOAK_MARKETABLE_BUY_PRICE` / `SOAK_MARKETABLE_SELL_PRICE` bootstrap that entry
+with an explicit warning. Buy derivation crosses only the predicted ask side;
+sell derivation crosses only the predicted bid side.
 Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
@@ -264,8 +265,8 @@ Useful controls:
 | `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
-| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Diagnostic legacy buy value; fresh live pricing is required |
-| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Diagnostic legacy sell value; fresh live pricing is required |
+| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Initial bootstrap buy used only while raw `.live` is missing, never stale |
+| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Initial bootstrap sell used only while raw `.live` is missing, never stale |
 | `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Crossing margin beyond configured/adaptive half-spread + worst-case skew |
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |

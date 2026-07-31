@@ -173,6 +173,10 @@ soak_reference_timestamp_is_fresh() {
     ((now_epoch_ms - updated_epoch_ms < max_age_seconds * 1000))
 }
 
+soak_live_reference_fallback_allowed() {
+    [[ "$1" == "missing" ]]
+}
+
 soak_evaluate_strict_freshness() {
     jq -c '
       . as $evidence |

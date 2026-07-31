@@ -64,6 +64,11 @@ if soak_reference_timestamp_is_fresh 1000001 1000000 30; then
     echo "ERROR: future live-reference timestamp was accepted" >&2
     exit 1
 fi
+soak_live_reference_fallback_allowed missing
+if soak_live_reference_fallback_allowed stale; then
+    echo "ERROR: stale live reference was allowed to use the bootstrap fallback" >&2
+    exit 1
+fi
 
 suite_test_root="$ROOT/soak-artifacts/suite-control-flow-test-$$"
 mkdir -p "$suite_test_root"
