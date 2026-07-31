@@ -41,6 +41,7 @@ TestResults/
 coverage/
 dotnet_*.nettrace
 BenchmarkDotNet.Artifacts/
+soak-artifacts/
 
 ## Node.js (frontend tooling, when/if introduced)
 node_modules/

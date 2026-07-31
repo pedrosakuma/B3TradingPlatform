@@ -103,6 +103,151 @@ public sealed class SubAccountPnlKeeper
     }
 
     /// <summary>
+    /// #671/#753 (RFC PR 1, code-review addendum #2). Companion to
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> for the sub-account
+    /// keeper's MASTER bucket (<see cref="MasterBucketKey"/>) ONLY.
+    /// v1 admin position adjustment (<c>POST /api/admin/positions</c>)
+    /// is account-wide/master-only — this method deliberately has no
+    /// <c>subAccount</c> parameter and NEVER fabricates, alters, or
+    /// removes any NAMED sub-account bucket in <see cref="_bucketAvgCost"/>;
+    /// per-sub-account adjustment is out of scope until a future PR
+    /// (if ever) explicitly extends the RFC.
+    ///
+    /// <para>
+    /// Replaces the master bucket's avg-cost basis for
+    /// (<paramref name="firmId"/>, <paramref name="endClient"/>,
+    /// <paramref name="symbol"/>) with an ABSOLUTE
+    /// (<paramref name="netQuantity"/>, <paramref name="averageEntryPrice"/>)
+    /// pair outright, discarding whatever basis was tracked there. A
+    /// zero <paramref name="netQuantity"/> CLEARS the master bucket
+    /// entirely (no stale <c>(0, 0m)</c> entry left behind) — mirroring
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> exactly.
+    /// </para>
+    ///
+    /// <para>
+    /// Must be invoked in the SAME dispatcher-serialised apply as
+    /// <see cref="PositionKeeper.SetAbsolute"/> and
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> (see
+    /// <c>AdminEndpoints.HandlePositionAdjustment</c> and the
+    /// <c>PositionAdjustmentEvent</c> replay case in
+    /// <c>EventReplayer.Apply</c>) so all three keepers converge on the
+    /// identical post-adjustment state, live and on replay.
+    /// </para>
+    ///
+    /// <para>
+    /// Invariant re-checked here as defense-in-depth (mirrors
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/> exactly): zero
+    /// <paramref name="netQuantity"/> requires zero
+    /// <paramref name="averageEntryPrice"/>; non-zero requires a
+    /// strictly positive average entry price.
+    /// </para>
+    /// </summary>
+    public void SetAbsoluteMasterBucketAvgCost(
+        string firmId, string endClient, string symbol, long netQuantity, decimal averageEntryPrice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endClient);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (netQuantity == 0 && averageEntryPrice != 0m)
+            throw new ArgumentException("averageEntryPrice must be 0 when netQuantity is 0", nameof(averageEntryPrice));
+        if (netQuantity != 0 && averageEntryPrice <= 0m)
+            throw new ArgumentException("averageEntryPrice must be > 0 when netQuantity is non-zero", nameof(averageEntryPrice));
+
+        var key = (firmId, endClient, MasterBucketKey, symbol);
+        if (netQuantity == 0)
+        {
+            _bucketAvgCost.TryRemove(key, out _);
+            return;
+        }
+        _bucketAvgCost[key] = new PnlKeeper.AvgCostState(netQuantity, averageEntryPrice);
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3). Removes EVERY
+    /// avg-cost bucket — <see cref="MasterBucketKey"/> AND every
+    /// named sub-account bucket — for (<paramref name="firmId"/>,
+    /// <paramref name="endClient"/>) across all symbols. A whole-
+    /// account reset (unlike v1 position adjustment, which is
+    /// master-bucket-only, see <see cref="SetAbsoluteMasterBucketAvgCost"/>)
+    /// changes the account's aggregate position outright, so ANY
+    /// named sub-account bucket's basis necessarily references a
+    /// position that no longer exists post-reset — leaving it behind
+    /// would be stale risk state. Named buckets are only ever
+    /// CLEARED here, never fabricated/reseeded: reset seeding (like
+    /// position adjustment) only ever targets the master bucket via
+    /// <see cref="SetAbsoluteMasterBucketAvgCost"/>, called separately
+    /// per resolved symbol.
+    /// <para>
+    /// Does NOT touch <see cref="_realized"/> (historical realized
+    /// P&amp;L) — that ledger is permanent audit history, not a basis,
+    /// and is intentionally left untouched by reset (mirrors
+    /// <see cref="PnlKeeper.SetAbsoluteAvgCost"/>'s own scope).
+    /// </para>
+    /// </summary>
+    public void ClearAllBucketsForAccount(string firmId, string endClient)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endClient);
+        foreach (var key in _bucketAvgCost.Keys)
+        {
+            if (string.Equals(key.FirmId, firmId, StringComparison.Ordinal)
+                && string.Equals(key.EndClient, endClient, StringComparison.Ordinal))
+            {
+                _bucketAvgCost.TryRemove(key, out _);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3). Captures every
+    /// avg-cost bucket — master and named — currently tracked for
+    /// (<paramref name="firmId"/>, <paramref name="endClient"/>), so
+    /// the admin reset endpoint's <c>DispatchWithPreApply</c> rollback
+    /// path can restore EXACTLY the pre-reset bucket state if the WAL
+    /// append later fails. Paired with <see cref="RestoreBucketsForAccount"/>.
+    /// </summary>
+    public IReadOnlyList<SubAccountPnlBucketEntry> SnapshotBucketsForAccount(string firmId, string endClient)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endClient);
+        List<SubAccountPnlBucketEntry>? buf = null;
+        foreach (var kv in _bucketAvgCost)
+        {
+            if (!string.Equals(kv.Key.FirmId, firmId, StringComparison.Ordinal)
+                || !string.Equals(kv.Key.EndClient, endClient, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            buf ??= new List<SubAccountPnlBucketEntry>();
+            buf.Add(new SubAccountPnlBucketEntry(
+                kv.Key.SubAccount, kv.Key.Symbol, kv.Value.NetQuantity, kv.Value.AvgPrice));
+        }
+        return (IReadOnlyList<SubAccountPnlBucketEntry>?)buf ?? Array.Empty<SubAccountPnlBucketEntry>();
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3). Rollback companion
+    /// to <see cref="SnapshotBucketsForAccount"/>: clears every bucket
+    /// currently tracked for the account, then reinserts exactly
+    /// <paramref name="entries"/> — restoring the precise pre-reset
+    /// state (master AND named buckets) after a failed WAL append.
+    /// </summary>
+    public void RestoreBucketsForAccount(
+        string firmId, string endClient, IReadOnlyList<SubAccountPnlBucketEntry> entries)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endClient);
+        ArgumentNullException.ThrowIfNull(entries);
+        ClearAllBucketsForAccount(firmId, endClient);
+        foreach (var entry in entries)
+        {
+            if (entry.NetQuantity == 0) continue;
+            _bucketAvgCost[(firmId, endClient, entry.SubAccount, entry.Symbol)] =
+                new PnlKeeper.AvgCostState(entry.NetQuantity, entry.AvgPrice);
+        }
+    }
+
+    /// <summary>
     /// PR #316 P2. Live-path entry point used by
     /// <c>ExecutionReportProcessor</c>: computes the realized delta
     /// for <paramref name="subAccount"/>'s bucket (master when null)
@@ -376,3 +521,13 @@ public sealed class SubAccountPnlKeeper
                         new PnlKeeper.AvgCostState(b.NetQuantity, b.AvgPrice);
     }
 }
+
+/// <summary>
+/// #671/#753 (RFC: admin account reset, PR 3). One avg-cost bucket
+/// row captured by <see cref="SubAccountPnlKeeper.SnapshotBucketsForAccount"/>
+/// and replayed by <see cref="SubAccountPnlKeeper.RestoreBucketsForAccount"/>.
+/// <see cref="SubAccount"/> is <see cref="SubAccountPnlKeeper.MasterBucketKey"/>
+/// (empty string) for the master bucket, or the raw
+/// <see cref="SubAccountId.Value"/> for a named bucket.
+/// </summary>
+public sealed record SubAccountPnlBucketEntry(string SubAccount, string Symbol, long NetQuantity, decimal AvgPrice);

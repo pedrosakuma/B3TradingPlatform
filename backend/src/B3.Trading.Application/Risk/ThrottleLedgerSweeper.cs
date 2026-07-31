@@ -51,29 +51,42 @@ public sealed class ThrottleLedgerSweeper : BackgroundService
                 return;
             }
 
-            // Window is read each tick so config reloads take effect
-            // without restarting the sweeper.
-            var notionalWindow = _notional.Window;
-            var rateWindow = _rate.Window;
+            SweepOnce();
+        }
+    }
 
-            try
-            {
-                var n1 = _notional.EndClientLedger.SweepEmptyBuckets(notionalWindow);
-                var n2 = _notional.FirmLedger.SweepEmptyBuckets(notionalWindow);
-                var n3 = _notional.AlgoLedger.SweepEmptyBuckets(notionalWindow);
-                var n4 = _rate.EndClientLedger.SweepEmptyBuckets(rateWindow);
-                var n5 = _rate.FirmLedger.SweepEmptyBuckets(rateWindow);
-                var n6 = _rate.AlgoLedger.SweepEmptyBuckets(rateWindow);
-                if (n1 + n2 + n3 + n4 + n5 + n6 > 0)
-                    _logger.LogDebug(
-                        "Throttle ledger sweep removed {Count} empty buckets",
-                        n1 + n2 + n3 + n4 + n5 + n6);
-            }
-            catch (Exception ex)
-            {
-                // Sweeper failure must not take the host down.
-                _logger.LogWarning(ex, "Throttle ledger sweep failed; will retry next interval");
-            }
+    /// <summary>
+    /// Runs a single sweep pass synchronously, independent of the
+    /// hosted-service timer loop. Exposed so tests can exercise the
+    /// pruning logic deterministically (inject a controllable
+    /// <see cref="TimeProvider"/> into the accountants and call this
+    /// directly) instead of racing the real <see cref="PeriodicTimer"/>
+    /// against wall-clock <c>Task.Delay</c>.
+    /// </summary>
+    internal void SweepOnce()
+    {
+        // Window is read each call so config reloads take effect
+        // without restarting the sweeper.
+        var notionalWindow = _notional.Window;
+        var rateWindow = _rate.Window;
+
+        try
+        {
+            var n1 = _notional.EndClientLedger.SweepEmptyBuckets(notionalWindow);
+            var n2 = _notional.FirmLedger.SweepEmptyBuckets(notionalWindow);
+            var n3 = _notional.AlgoLedger.SweepEmptyBuckets(notionalWindow);
+            var n4 = _rate.EndClientLedger.SweepEmptyBuckets(rateWindow);
+            var n5 = _rate.FirmLedger.SweepEmptyBuckets(rateWindow);
+            var n6 = _rate.AlgoLedger.SweepEmptyBuckets(rateWindow);
+            if (n1 + n2 + n3 + n4 + n5 + n6 > 0)
+                _logger.LogDebug(
+                    "Throttle ledger sweep removed {Count} empty buckets",
+                    n1 + n2 + n3 + n4 + n5 + n6);
+        }
+        catch (Exception ex)
+        {
+            // Sweeper failure must not take the host down.
+            _logger.LogWarning(ex, "Throttle ledger sweep failed; will retry next interval");
         }
     }
 }

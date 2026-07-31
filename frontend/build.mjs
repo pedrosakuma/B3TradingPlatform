@@ -25,6 +25,11 @@ await build({
     join(root, "js", "app.js"),
     join(root, "js", "worker.js"),
     join(root, "js", "mdWorker.js"),
+    // state.js is also published as its own entry so E2E specs can
+    // `import("/js/state.js")` directly in the browser and mutate the
+    // same singleton the running app uses (esbuild code-splitting keeps
+    // it a shared chunk with app.js, not a duplicate module instance).
+    join(root, "js", "state.js"),
   ],
   bundle: true,
   format: "esm",

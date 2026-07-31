@@ -1,0 +1,111 @@
+using B3.Trading.MarketMakerBot;
+using Microsoft.Extensions.Configuration;
+
+namespace B3.Trading.MarketMakerBot.Tests;
+
+public class MarketMakerOptionsBindingTests
+{
+    [Fact]
+    public void LegacyInstrumentConfiguration_KeepsVolatilityDisabledDefaults()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:Instruments:0:Symbol"] = "PETR4",
+            ["MarketMaker:Instruments:0:SecurityId"] = "1",
+            ["MarketMaker:Instruments:0:RefPrice"] = "30.00",
+            ["MarketMaker:Instruments:0:TickSize"] = "0.01",
+            ["MarketMaker:Instruments:0:SpreadTicks"] = "5",
+        });
+
+        var volatility = Assert.Single(options.Instruments).VolatilitySpread;
+        Assert.False(volatility.Enabled);
+        Assert.Equal(TimeSpan.FromMinutes(1), volatility.Window);
+        Assert.Equal(120, volatility.MaxSamples);
+        Assert.Equal(10, volatility.MinSamples);
+        Assert.Equal(1m, volatility.Multiplier);
+        Assert.Equal(20, volatility.MaxAdditionalSpreadTicks);
+    }
+
+    [Fact]
+    public void PartialVolatilityOverride_BindsEnabledAndKeepsOtherDefaults()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:Instruments:0:Symbol"] = "PETR4",
+            ["MarketMaker:Instruments:0:VolatilitySpread:Enabled"] = "true",
+        });
+
+        var volatility = Assert.Single(options.Instruments).VolatilitySpread;
+        Assert.True(volatility.Enabled);
+        Assert.Equal(TimeSpan.FromMinutes(1), volatility.Window);
+        Assert.Equal(120, volatility.MaxSamples);
+        Assert.Equal(10, volatility.MinSamples);
+        Assert.Equal(1m, volatility.Multiplier);
+        Assert.Equal(20, volatility.MaxAdditionalSpreadTicks);
+    }
+
+    [Fact]
+    public void LegacyConfiguration_KeepsStaticFeedLossDefaults()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:MarketData:WsUrl"] = "",
+        });
+
+        Assert.Equal(FeedLossPolicy.StaticRefPrice, options.MarketData.FeedLossPolicy);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
+        Assert.Equal(TimeSpan.FromSeconds(10), options.CancelAckTimeout);
+        Assert.False(options.StartupCleanupEnabled);
+        Assert.Equal(TimeSpan.FromMinutes(5), options.StartupCleanupTimeout);
+    }
+
+    [Fact]
+    public void PartialFeedPolicyOverride_KeepsFreshnessDefault()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:MarketData:FeedLossPolicy"] = "PauseAndCancel",
+            ["MarketMaker:MarketData:WsUrl"] = "wss://marketdata.test/ws",
+        });
+
+        Assert.Equal(FeedLossPolicy.PauseAndCancel, options.MarketData.FeedLossPolicy);
+        Assert.Equal(TimeSpan.FromSeconds(30), options.MarketData.MaxReferenceAge);
+    }
+
+    [Fact]
+    public void CancelAckTimeoutOverrideBindsWithoutChangingOtherBehaviourDefaults()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:CancelAckTimeout"] = "00:00:15",
+        });
+
+        Assert.Equal(TimeSpan.FromSeconds(15), options.CancelAckTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(5), options.ReconcileInterval);
+        Assert.Equal(TimeSpan.FromMilliseconds(250), options.MinRequoteInterval);
+    }
+
+    [Fact]
+    public void StartupCleanupOverridesBindWithoutChangingCancelAckTimeout()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["MarketMaker:StartupCleanupEnabled"] = "true",
+            ["MarketMaker:StartupCleanupTimeout"] = "00:03:00",
+        });
+
+        Assert.True(options.StartupCleanupEnabled);
+        Assert.Equal(TimeSpan.FromMinutes(3), options.StartupCleanupTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(10), options.CancelAckTimeout);
+    }
+
+    private static MarketMakerBotOptions Bind(Dictionary<string, string?> values)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(values)
+            .Build();
+        var options = new MarketMakerBotOptions();
+        configuration.GetSection(MarketMakerBotOptions.SectionName).Bind(options);
+        return options;
+    }
+}

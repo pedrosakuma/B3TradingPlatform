@@ -23,38 +23,67 @@ public class SuspendedTimeoutBoundarySpecTests
         var roundTripPrice = SessionRollSpecSupport.PriceNearUpperCollar(petr4ReferencePrice);
         var probePrice = SessionRollSpecSupport.PriceNearLowerCollar(vale3ReferencePrice);
 
-        var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
-        var clOrdId = await SessionRollSpecSupport.SubmitOrderAsync(http, userAuth, "PETR4", restingPrice);
-        await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
-            order.Status == "Working" && !order.IsStale,
-            SessionRollSpecSupport.OrderTimeout,
-            "order to reach Working before transport interruption");
+        await SessionRollSpecSupport.RunWithOrderCleanupAsync(
+            http,
+            userAuth,
+            adminAuth,
+            (venueOrderId, clOrdId) => docker.IsVenueOrderPresentAsync(
+                venueOrderId,
+                clOrdId,
+                SessionRollSpecSupport.TradeTimeout),
+            (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
+                venueOrderId,
+                clOrdId,
+                SessionRollSpecSupport.TradeTimeout),
+            async cleanup =>
+            {
+                var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
+                var clOrdId = await cleanup.SubmitOrderAsync("PETR4", restingPrice);
+                var probeClOrdId = await cleanup.SubmitOrderAsync(
+                    "VALE3",
+                    probePrice,
+                    side: "Sell");
+                await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
+                        order.Status == "Working" && !order.IsStale,
+                    SessionRollSpecSupport.OrderTimeout,
+                    "order to reach Working before transport interruption");
+                await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, probeClOrdId, order =>
+                        order.Status == "Working" && !order.IsStale,
+                    SessionRollSpecSupport.OrderTimeout,
+                    "probe order to reach Working before transport interruption");
 
-        var disconnectStartedUtc = DateTimeOffset.UtcNow;
-        ulong? probeClOrdId;
-        await using (var detached = await docker.DisconnectMatchingAsync())
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(250));
-            probeClOrdId = await SessionRollSpecSupport.StimulateGatewayWriteAsync(
-                http, userAuth, "VALE3", probePrice, side: "Sell");
-            await SessionRollSpecSupport.DelayUntilAsync(disconnectStartedUtc, WithinWindowDisconnect);
-            await detached.ReconnectAsync();
-        }
-        var after = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth, priorVerId: before.SessionVerId, expectAdvance: false);
-        var orderAfter = await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
-            order.Status == "Working" && !order.IsStale,
-            SessionRollSpecSupport.ReconnectTimeout,
-            "order to remain Working and non-stale after reattach");
+                var disconnectStartedUtc = DateTimeOffset.UtcNow;
+                await using (var detached = await docker.DisconnectMatchingAsync())
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250));
+                    await SessionRollSpecSupport.StimulateGatewayWriteAsync(
+                        http, userAuth, probeClOrdId);
+                    await SessionRollSpecSupport.DelayUntilAsync(disconnectStartedUtc, WithinWindowDisconnect);
+                    await detached.ReconnectAsync();
+                }
+                var after = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(
+                    http,
+                    adminAuth,
+                    priorVerId: before.SessionVerId,
+                    expectAdvance: false);
+                var orderAfter = await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
+                        order.Status == "Working" && !order.IsStale,
+                    SessionRollSpecSupport.ReconnectTimeout,
+                    "order to remain Working and non-stale after reattach");
 
-        Assert.Equal(before.SessionVerId, after.SessionVerId);
-        Assert.False(orderAfter.IsStale);
-        Assert.Null(orderAfter.StaleReason);
-        if (probeClOrdId is { } reattachProbeClOrdId)
-            await SessionRollSpecSupport.CancelOrderIfPresentAsync(http, userAuth, reattachProbeClOrdId);
+                Assert.Equal(before.SessionVerId, after.SessionVerId);
+                Assert.False(orderAfter.IsStale);
+                Assert.Null(orderAfter.StaleReason);
 
-        await SessionRollSpecSupport.AssertPostRecoveryTradingRoundTripAsync(
-            http, userAuth, docker, "PETR4", roundTripPrice, SessionRollSpecSupport.RoundTripQuantity);
-        await SessionRollSpecSupport.CancelOrderIfPresentAsync(http, userAuth, clOrdId);
+                await SessionRollSpecSupport.AssertPostRecoveryTradingRoundTripAsync(
+                    cleanup,
+                    http,
+                    userAuth,
+                    docker,
+                    "PETR4",
+                    roundTripPrice,
+                    SessionRollSpecSupport.RoundTripQuantity);
+            });
     }
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
@@ -72,36 +101,66 @@ public class SuspendedTimeoutBoundarySpecTests
         var roundTripPrice = SessionRollSpecSupport.PriceNearUpperCollar(itub4ReferencePrice);
         var probePrice = SessionRollSpecSupport.PriceNearLowerCollar(petr4ReferencePrice);
 
-        var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
-        var clOrdId = await SessionRollSpecSupport.SubmitOrderAsync(http, userAuth, "VALE3", restingPrice);
-        await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
-            order.Status == "Working" && !order.IsStale,
-            SessionRollSpecSupport.OrderTimeout,
-            "order to reach Working before transport interruption");
+        await SessionRollSpecSupport.RunWithOrderCleanupAsync(
+            http,
+            userAuth,
+            adminAuth,
+            (venueOrderId, clOrdId) => docker.IsVenueOrderPresentAsync(
+                venueOrderId,
+                clOrdId,
+                SessionRollSpecSupport.TradeTimeout),
+            (venueOrderId, clOrdId) => docker.WaitForVenueOrderAbsentAsync(
+                venueOrderId,
+                clOrdId,
+                SessionRollSpecSupport.TradeTimeout),
+            async cleanup =>
+            {
+                var before = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth);
+                var clOrdId = await cleanup.SubmitOrderAsync("VALE3", restingPrice);
+                var probeClOrdId = await cleanup.SubmitOrderAsync("PETR4", probePrice);
+                await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
+                        order.Status == "Working" && !order.IsStale,
+                    SessionRollSpecSupport.OrderTimeout,
+                    "order to reach Working before transport interruption");
+                await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, probeClOrdId, order =>
+                        order.Status == "Working" && !order.IsStale,
+                    SessionRollSpecSupport.OrderTimeout,
+                    "probe order to reach Working before transport interruption");
 
-        var disconnectStartedUtc = DateTimeOffset.UtcNow;
-        ulong? probeClOrdId;
-        await using (var detached = await docker.DisconnectMatchingAsync())
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(250));
-            probeClOrdId = await SessionRollSpecSupport.StimulateGatewayWriteAsync(http, userAuth, "PETR4", probePrice);
-            await SessionRollSpecSupport.DelayUntilAsync(disconnectStartedUtc, PastWindowDisconnect);
-            await detached.ReconnectAsync();
-        }
-        var after = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(http, adminAuth, priorVerId: before.SessionVerId, expectAdvance: true);
-        var orderAfter = await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
-            order.Status == "Working" && order.IsStale && order.StaleReason?.StartsWith("session_rolled:", StringComparison.Ordinal) == true,
-            SessionRollSpecSupport.ReconnectTimeout,
-            "order to be marked stale after renegotiated reconnect");
+                var disconnectStartedUtc = DateTimeOffset.UtcNow;
+                await using (var detached = await docker.DisconnectMatchingAsync())
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250));
+                    await SessionRollSpecSupport.StimulateGatewayWriteAsync(
+                        http, userAuth, probeClOrdId);
+                    await SessionRollSpecSupport.DelayUntilAsync(disconnectStartedUtc, PastWindowDisconnect);
+                    await detached.ReconnectAsync();
+                }
+                var after = await SessionRollSpecSupport.WaitForFirmEstablishedAsync(
+                    http,
+                    adminAuth,
+                    priorVerId: before.SessionVerId,
+                    expectAdvance: true);
+                var orderAfter = await SessionRollSpecSupport.WaitForOrderAsync(http, userAuth, clOrdId, order =>
+                        order.Status == "Working"
+                        && order.IsStale
+                        && order.StaleReason?.StartsWith("session_rolled:", StringComparison.Ordinal) == true,
+                    SessionRollSpecSupport.ReconnectTimeout,
+                    "order to be marked stale after renegotiated reconnect");
 
-        Assert.True(after.SessionVerId > before.SessionVerId,
-            $"Expected sessionVerId to advance past {before.SessionVerId}, observed {after.SessionVerId}.");
-        Assert.True(orderAfter.IsStale);
-        Assert.StartsWith("session_rolled:", orderAfter.StaleReason);
-        if (probeClOrdId is { } renegotiatedProbeClOrdId)
-            await SessionRollSpecSupport.CancelOrderIfPresentAsync(http, userAuth, renegotiatedProbeClOrdId);
+                Assert.True(after.SessionVerId > before.SessionVerId,
+                    $"Expected sessionVerId to advance past {before.SessionVerId}, observed {after.SessionVerId}.");
+                Assert.True(orderAfter.IsStale);
+                Assert.StartsWith("session_rolled:", orderAfter.StaleReason);
 
-        await SessionRollSpecSupport.AssertPostRecoveryTradingRoundTripAsync(
-            http, userAuth, docker, "ITUB4", roundTripPrice, SessionRollSpecSupport.RoundTripQuantity);
+                await SessionRollSpecSupport.AssertPostRecoveryTradingRoundTripAsync(
+                    cleanup,
+                    http,
+                    userAuth,
+                    docker,
+                    "ITUB4",
+                    roundTripPrice,
+                    SessionRollSpecSupport.RoundTripQuantity);
+            });
     }
 }

@@ -1,0 +1,42 @@
+# Tiny merge overlay for the (real-stack + market-maker + sample-bot +
+# conformance) combination (#722).
+#
+# The conformance service is defined in docker-compose.conformance.yml.
+# When stacked on top of docker-compose.real.yml + docker-compose.market-maker.yml
+# + docker-compose.sample-bot.yml, this sets the env flag that opts the
+# run into RequiresSampleBotSandbox specs
+# (Spec_HTTP_SampleBot/SampleBotSmokeSpecTests.cs) and supplies the
+# dedicated sample-bot credentials (distinct from B3T_AUTH_USER/PASS)
+# so the smoke's own working-order/reconciliation assertions never
+# touch alice's book/position state.
+#
+# Usage:
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.real.yml \
+#       -f docker/docker-compose.market-maker.yml \
+#       -f docker/docker-compose.conformance.yml \
+#       -f docker/docker-compose.market-maker-conformance.yml \
+#       -f docker/docker-compose.sample-bot.yml \
+#       -f docker/docker-compose.sample-bot-conformance.yml \
+#       up -d --build --wait trading-host market-maker-bot
+#   docker compose ... run --rm --no-deps --build sample-bot
+#   docker compose ... run --rm --no-deps conformance
+#
+# Kept as a separate file (mirrors market-maker-conformance.yml) so
+# docker-compose.sample-bot.yml can be combined with overlays that
+# don't define a `conformance` service without tripping compose's
+# "service has neither image nor build" validation.
+services:
+  conformance:
+    environment:
+      B3T_SAMPLE_BOT_SANDBOX: "true"
+      B3T_REQUIRE_READY: "true"
+      # Dedicated sample-bot creds seeded by docker-compose.sample-bot.yml
+      # (Trading__Auth__Users__9). Read directly by
+      # SampleBotSmokeSpecTests rather than PlatformEndpoint's primary
+      # B3T_AUTH_USER/PASS pair — the smoke's terminal-state assertion
+      # ("no Working/PartiallyFilled sample-owned order") must observe
+      # only orders owned by this dedicated user, never alice's.
+      B3T_SAMPLE_BOT_USER: ${SAMPLE_BOT_USER:-sample-bot}
+      B3T_SAMPLE_BOT_PASS: ${SAMPLE_BOT_PASSWORD:-samplebotpass}

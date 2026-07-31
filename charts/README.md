@@ -49,6 +49,13 @@ used at install time. b3deploy pins both `chart@version` and
 `image@sha256:...` — the two need not move in lockstep, but a chart release
 should always be validated against the appVersion it declares.
 
+`b3-market-maker-bot` uses `appVersion: latest` because its image workflow
+promotes the exact candidate digest to `latest` only after the required
+main-branch validation succeeds. Explicit `values.image.tag` and digest pins
+remain available and are preferred for immutable environment deployments. Its
+default pull policy is therefore `Always`; immutable overrides may choose
+`IfNotPresent`.
+
 CI (`.github/workflows/helm-charts.yml`) lints + templates all three charts on
 every PR touching `charts/**`, and packages + pushes to GHCR on `main` —
 skipping the push if that exact `chart@version` is already published (OCI

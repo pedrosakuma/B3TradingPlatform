@@ -79,4 +79,150 @@ public class QuoteCalculatorTests
         Assert.Equal(QuoteCalculator.ComputeQuotePrice(instr, isBuy: true, instr.RefPrice),
             QuoteCalculator.ComputeQuotePrice(instr, isBuy: true));
     }
+
+    [Fact]
+    public void Decide_ReturnsCompleteImmutablePricingDecision()
+    {
+        var inputs = new QuoteInputs(
+            IsBuy: true,
+            ReferencePrice: 30m,
+            QuoteReferenceSource.LiveMarketData,
+            InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
+            ConfiguredHalfSpread: 0.05m,
+            EffectiveHalfSpread: 0.05m,
+            AdditionalHalfSpreadTicks: 0,
+            TickSize: 0.01m);
+
+        var decision = QuoteCalculator.Decide(inputs);
+
+        Assert.True(decision.ShouldQuote);
+        Assert.Equal(29.95m, decision.Price);
+        Assert.Equal(30m, decision.ReferencePrice);
+        Assert.Equal(QuoteReferenceSource.LiveMarketData, decision.ReferenceSource);
+        Assert.Equal(0m, decision.InventoryMidShift);
+        Assert.Equal(0m, decision.InventorySkewTicks);
+        Assert.Equal(0.05m, decision.ConfiguredHalfSpread);
+        Assert.Equal(0.05m, decision.EffectiveHalfSpread);
+        Assert.Equal(0, decision.AdditionalHalfSpreadTicks);
+        Assert.Equal(QuoteSuppressionReason.None, decision.SuppressionReason);
+    }
+
+    [Fact]
+    public void Decide_PreSuppressedContext_PreservesContextWithoutPrice()
+    {
+        var decision = QuoteCalculator.Decide(new QuoteInputs(
+            IsBuy: false,
+            ReferencePrice: 30m,
+            QuoteReferenceSource.ConfiguredRefPrice,
+            InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
+            ConfiguredHalfSpread: 0.05m,
+            EffectiveHalfSpread: 0.05m,
+            AdditionalHalfSpreadTicks: 0,
+            TickSize: 0.01m,
+            QuoteSuppressionReason.InstrumentDelisted));
+
+        Assert.False(decision.ShouldQuote);
+        Assert.Null(decision.Price);
+        Assert.Equal(QuoteSuppressionReason.InstrumentDelisted, decision.SuppressionReason);
+        Assert.Equal(QuoteReferenceSource.ConfiguredRefPrice, decision.ReferenceSource);
+    }
+
+    [Fact]
+    public void Decide_NonPositiveRoundedPrice_IsSuppressed()
+    {
+        var decision = QuoteCalculator.Decide(new QuoteInputs(
+            IsBuy: true,
+            ReferencePrice: 0.01m,
+            QuoteReferenceSource.ConfiguredRefPrice,
+            InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
+            ConfiguredHalfSpread: 0.05m,
+            EffectiveHalfSpread: 0.05m,
+            AdditionalHalfSpreadTicks: 0,
+            TickSize: 0.01m));
+
+        Assert.False(decision.ShouldQuote);
+        Assert.Null(decision.Price);
+        Assert.Equal(QuoteSuppressionReason.NonPositivePrice, decision.SuppressionReason);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Decide_DefaultInputs_MatchesConvenienceOverload(bool isBuy)
+    {
+        var instrument = Instrument();
+        var halfSpread = instrument.SpreadTicks * instrument.TickSize;
+        var decision = QuoteCalculator.Decide(new QuoteInputs(
+            isBuy,
+            instrument.RefPrice,
+            QuoteReferenceSource.ConfiguredRefPrice,
+            InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
+            ConfiguredHalfSpread: halfSpread,
+            EffectiveHalfSpread: halfSpread,
+            AdditionalHalfSpreadTicks: 0,
+            instrument.TickSize));
+
+        Assert.Equal(QuoteCalculator.ComputeQuotePrice(instrument, isBuy), decision.Price);
+    }
+
+    [Fact]
+    public void Decide_EffectiveSpreadCannotNarrowBelowConfiguredFloor()
+    {
+        var decision = QuoteCalculator.Decide(new QuoteInputs(
+            IsBuy: true,
+            ReferencePrice: 30m,
+            QuoteReferenceSource.Explicit,
+            InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
+            ConfiguredHalfSpread: 0.05m,
+            EffectiveHalfSpread: 0.01m,
+            AdditionalHalfSpreadTicks: -4,
+            TickSize: 0.01m));
+
+        Assert.Equal(29.95m, decision.Price);
+        Assert.Equal(0.05m, decision.EffectiveHalfSpread);
+        Assert.Equal(0, decision.AdditionalHalfSpreadTicks);
+    }
+
+    [Fact]
+    public void Decide_UsesEffectiveSpreadAndPreservesAdditionalTicks()
+    {
+        var decision = QuoteCalculator.Decide(new QuoteInputs(
+            IsBuy: false,
+            ReferencePrice: 30m,
+            QuoteReferenceSource.LiveMarketData,
+            InventoryMidShift: 0m,
+            InventorySkewTicks: 0m,
+            ConfiguredHalfSpread: 0.05m,
+            EffectiveHalfSpread: 0.08m,
+            AdditionalHalfSpreadTicks: 3,
+            TickSize: 0.01m));
+
+        Assert.Equal(30.08m, decision.Price);
+        Assert.Equal(0.05m, decision.ConfiguredHalfSpread);
+        Assert.Equal(0.08m, decision.EffectiveHalfSpread);
+        Assert.Equal(3, decision.AdditionalHalfSpreadTicks);
+    }
+
+    [Fact]
+    public void Decide_OverflowingPriceCalculation_IsSuppressed()
+    {
+        var decision = QuoteCalculator.Decide(new QuoteInputs(
+            IsBuy: false,
+            ReferencePrice: decimal.MaxValue,
+            QuoteReferenceSource.Explicit,
+            InventoryMidShift: 1m,
+            InventorySkewTicks: 0m,
+            ConfiguredHalfSpread: 0m,
+            EffectiveHalfSpread: 0m,
+            AdditionalHalfSpreadTicks: 0,
+            TickSize: 0.01m));
+
+        Assert.False(decision.ShouldQuote);
+        Assert.Equal(QuoteSuppressionReason.InvalidPriceCalculation, decision.SuppressionReason);
+    }
 }

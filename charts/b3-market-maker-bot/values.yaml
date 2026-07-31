@@ -8,12 +8,15 @@ fullnameOverride: ""
 
 image:
   repository: ghcr.io/pedrosakuma/b3-market-maker-bot
-  # Defaults to .Chart.AppVersion when empty.
+  # Defaults to .Chart.AppVersion (`latest`, the main-validated promoted digest)
+  # when empty. Pin tag or digest explicitly for immutable deployments.
   tag: ""
   # Optional digest pin (e.g. "sha256:05f6a7f6...").
   # When set, the image reference becomes "repository@digest" and `tag` is ignored.
   digest: ""
-  pullPolicy: IfNotPresent
+  # `latest` is mutable by design, so avoid stale node-cache reuse. Operators
+  # pinning an immutable tag/digest may override this to IfNotPresent.
+  pullPolicy: Always
 
 # Hardcoded to 1 in templates/statefulset.yaml — the bot's FIXP session
 # (sessionId/sessionVerId below) is single-writer against matching-platform,
@@ -59,17 +62,42 @@ session:
   senderLocation: SP
   enteringTrader: MM
 
-# ── Market data (best-effort quote anchor) ────────────────────────────────
-# Same feed b3-trading-host subscribes to. Optional: if unset, or the feed
-# can't connect, the bot quotes off each instrument's static refPrice.
+# ── Market data + feed-loss policy ────────────────────────────────────────
+# StaticRefPrice is the compatibility/default policy: if the feed is absent or
+# disconnected, quote from each configured refPrice. PauseAndCancel requires a
+# nonblank absolute wsUrl and a fresh per-symbol current-connection reference.
 marketData:
   wsUrl: ws://marketdata:8080/ws
+  feedLossPolicy: StaticRefPrice
+  maxReferenceAge: "00:00:30"
 
 # ── Behaviour ──────────────────────────────────────────────────────────────
 behaviour:
   # Defensive safety net only — the primary re-quote path is event-driven
   # (fills/cancels/rejects), see MarketMakerWorker.
   reconcileInterval: "00:00:05"
+  # Clears a lost cancel acknowledgement's pending marker after this window,
+  # retaining a bounded correlation tombstone so late ERs remain safe.
+  cancelAckTimeout: "00:00:10"
+  # Requires a matching-platform release containing B3MatchingPlatform#569.
+  # Keep false against older matching versions: their ACCEPTED report is not
+  # terminal and cannot safely gate quote startup.
+  startupCleanupEnabled: false
+  # Terminal startup cleanup can produce up to 100k cancellation ERs without
+  # weakening the normal single-cancel retry window above.
+  startupCleanupTimeout: "00:05:00"
+
+# ── Position/P&L observability ───────────────────────────────────────────────
+observability:
+  # Structured per-symbol gross/pre-fee position/P&L log cadence.
+  snapshotInterval: "00:00:30"
+  # Unrealized P&L is omitted when the connected live mark is older than this.
+  markMaxAge: "00:00:30"
+  # Cloud-neutral OTLP collector endpoint. Leave empty to disable the exporter.
+  # In b3deploy this should target the in-cluster collector; the collector owns
+  # any Azure Monitor (or other backend) export configuration.
+  otlpEndpoint: ""
+  otlpProtocol: grpc
 
 # ── Instruments (must match matching-platform's instruments-eqt.json) ─────
 instruments:
@@ -80,6 +108,18 @@ instruments:
     lotSize: 100
     quoteLots: 1
     spreadTicks: 5
+    inventorySkew:
+      enabled: false
+      # Normalization/saturation band only; this is not a position risk limit.
+      fullSkewAtLots: 10
+      maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
   - symbol: VALE3
     securityId: "900000000002"
     refPrice: "70.00"
@@ -87,6 +127,17 @@ instruments:
     lotSize: 100
     quoteLots: 1
     spreadTicks: 5
+    inventorySkew:
+      enabled: false
+      fullSkewAtLots: 10
+      maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
   - symbol: ITUB4
     securityId: "900000000003"
     refPrice: "32.00"
@@ -94,6 +145,17 @@ instruments:
     lotSize: 100
     quoteLots: 1
     spreadTicks: 5
+    inventorySkew:
+      enabled: false
+      fullSkewAtLots: 10
+      maxSkewTicks: 5
+    volatilitySpread:
+      enabled: false
+      window: "00:01:00"
+      maxSamples: 120
+      minSamples: 10
+      multiplier: 1.0
+      maxAdditionalSpreadTicks: 20
 
 resources:
   requests:

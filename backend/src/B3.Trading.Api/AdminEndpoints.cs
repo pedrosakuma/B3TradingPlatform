@@ -5,6 +5,7 @@ using B3.Trading.Application.Audit;
 using B3.Trading.Application.Lifecycle;
 using B3.Trading.Application.MarketData;
 using B3.Trading.Application.Observability;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
@@ -386,6 +387,58 @@ public static class AdminEndpoints
         group.MapPost("/cash", (CashLedgerRequest? req, HttpContext ctx, CashKeeper keeper, CashLedger cashLedger, EventDispatcher dispatcher, IAuditLogger audit) =>
             HandleCashLedger(req, ctx, keeper, cashLedger, dispatcher, audit));
 
+        // ── Position adjustment (#671/#753 RFC, PR 1) ───────────
+        // Admin-driven ABSOLUTE position overwrite, persisted as
+        // PositionAdjustmentEvent on the WAL and projected into
+        // PositionKeeper (SetAbsolute), PnlKeeper (SetAbsoluteAvgCost),
+        // AND SubAccountPnlKeeper's MASTER bucket only
+        // (SetAbsoluteMasterBucketAvgCost — code-review addendum #2:
+        // v1 adjustment is account-wide/master-only, never a named
+        // sub-account bucket) in the same dispatcher-serialised apply
+        // so the avg-cost basis never drifts from the position it is
+        // derived from. Mirrors the /cash pattern above: FirmId is
+        // always derived from the caller's JWT firm claim, never
+        // accepted from the request body.
+        group.MapPost("/positions", (PositionAdjustmentRequest? req, HttpContext ctx, PositionKeeper positions, PnlKeeper pnl, SubAccountPnlKeeper subAccountPnl, EventDispatcher dispatcher, IAuditLogger audit) =>
+            HandlePositionAdjustment(req, ctx, positions, pnl, subAccountPnl, dispatcher, audit));
+
+        // ── Whole-account reset (#671/#753 RFC, PR 3) ───────────
+        // Admin-driven ATOMIC whole end-client account reset,
+        // persisted as a SINGLE durable AccountResetEvent (never a
+        // sequence of cash/position events — a crash between
+        // separate events could expose a half-reset account) and
+        // projected across CashKeeper, CashLedger, PositionKeeper,
+        // PnlKeeper, and SubAccountPnlKeeper (every bucket cleared) in
+        // the same dispatcher-serialised apply. Fails closed with 409
+        // while the account has any working order OR any non-terminal
+        // (or reconciliation-pending) outbound mutation; the guard is
+        // re-evaluated INSIDE the same pre-apply critical region used
+        // to serialize outbound mutation dispatch, so a concurrent
+        // order submission cannot race the reset (TOCTOU-safe). Sub-
+        // account reset is out of scope — this always targets the
+        // whole end-client account.
+        group.MapPost("/accounts/{endClientId}/reset", (
+                string endClientId,
+                HttpContext ctx,
+                PositionKeeper positions,
+                PnlKeeper pnl,
+                SubAccountPnlKeeper subAccountPnl,
+                SubAccountPositionKeeper subAccountPositions,
+                CashKeeper cashKeeper,
+                CashLedger cashLedger,
+                WorkingOrderBook orders,
+                OutboundMutationLedger outboundLedger,
+                IOutboundCommandProtector commandProtector,
+                IMarginProvider marginProvider,
+                IOptions<CashSeedOptions> cashSeeds,
+                IOptions<PositionSeedOptions> positionSeeds,
+                EventDispatcher dispatcher,
+                IAuditLogger audit) =>
+            HandleAccountReset(
+                endClientId, ctx, positions, pnl, subAccountPnl, subAccountPositions, cashKeeper, cashLedger,
+                orders, outboundLedger, commandProtector, marginProvider,
+                cashSeeds.Value, positionSeeds.Value, dispatcher, audit));
+
         // POST /api/admin/simulator/er — synthetic ER injection (formerly the
         // ExchangeMode.Simulator-only route; merged into Mock+AllowErInjection
         // in #163). The route itself moved to the Infrastructure project as
@@ -558,6 +611,567 @@ public static class AdminEndpoints
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
     }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset + runtime position adjustment,
+    /// PR 1). Handles <c>POST /api/admin/positions</c> — an operator-driven
+    /// ABSOLUTE position overwrite, mirroring <see cref="HandleCashLedger"/>
+    /// exactly (audit-first ordering, WAL-backpressure 503, FirmId always
+    /// derived from the JWT firm claim rather than the request body).
+    /// Unlike the cash-withdrawal path there is no insufficient-funds
+    /// failure mode here — every failure mode (missing fields, invariant
+    /// violation) is a 400 checked BEFORE the audit emit / dispatch, so a
+    /// plain <see cref="EventDispatcher.Dispatch(Persistence.WalEvent, Action)"/>
+    /// suffices (no <c>DispatchWithPreApply</c> rollback branch needed).
+    /// <see cref="PositionKeeper"/>, <see cref="PnlKeeper"/>, AND
+    /// <see cref="SubAccountPnlKeeper"/>'s MASTER bucket (code-review
+    /// addendum #2 — v1 adjustment is account-wide/master-only; no named
+    /// sub-account bucket is ever fabricated or altered here) are all
+    /// updated inside the SAME apply delegate so no keeper's avg-cost
+    /// basis observably lags the position it derives from.
+    /// </summary>
+    private static IResult HandlePositionAdjustment(
+        PositionAdjustmentRequest? req,
+        HttpContext ctx,
+        PositionKeeper positions,
+        PnlKeeper pnl,
+        SubAccountPnlKeeper subAccountPnl,
+        EventDispatcher dispatcher,
+        IAuditLogger audit)
+    {
+        if (req is null)
+            return Results.BadRequest(new { error = "request body required" });
+        if (string.IsNullOrWhiteSpace(req.Endclient))
+            return Results.BadRequest(new { error = "endclient required" });
+        if (string.IsNullOrWhiteSpace(req.Symbol))
+            return Results.BadRequest(new { error = "symbol required" });
+        // Code-review addendum (#671/#753 PR 1). NetQuantity/AverageEntryPrice
+        // are nullable at the JSON-binding level specifically so an omitted
+        // field is distinguishable from an explicit 0 — see the DTO doc
+        // comment on PositionAdjustmentRequest. Both are semantically
+        // required: there is no sensible default for an absolute overwrite.
+        if (req.NetQuantity is null)
+            return Results.BadRequest(new { error = "netQuantity required" });
+        if (req.AverageEntryPrice is null)
+            return Results.BadRequest(new { error = "averageEntryPrice required" });
+
+        var netQuantity = req.NetQuantity.Value;
+        var averageEntryPrice = req.AverageEntryPrice.Value;
+
+        // RFC #753 invariant: a flat (zero) position carries a zero
+        // average entry price; a non-flat position requires a strictly
+        // positive average entry price. PositionKeeper.SetAbsolute /
+        // PnlKeeper.SetAbsoluteAvgCost re-check this as defense-in-depth
+        // (also guards WAL replay of a corrupted segment), but the
+        // primary 400 gate lives here so the operator gets an immediate,
+        // request-scoped error.
+        if (netQuantity == 0 && averageEntryPrice != 0m)
+            return Results.BadRequest(new { error = "averageEntryPrice must be 0 when netQuantity is 0" });
+        if (netQuantity != 0 && averageEntryPrice <= 0m)
+            return Results.BadRequest(new { error = "averageEntryPrice must be > 0 when netQuantity is non-zero" });
+
+        var owner = new EndClientId(req.Endclient);
+        var operatorId = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+        // RFC #753 product decision: admin operations are scoped to the
+        // administrator's JWT firm. No explicit cross-firm firmId
+        // request parameter in v1 — never trust a client-supplied firm.
+        //
+        // Code-review addendum (#671/#753 PR 1). FAIL CLOSED when the
+        // firm claim is missing or blank rather than silently defaulting
+        // to the DEFAULT tenant bucket: unlike the read-only endpoints
+        // elsewhere in this file that default to "default" for
+        // legacy/no-firm compatibility, this is a durable, tenant-scoped
+        // WRITE — misattributing it to the wrong (or a shared "default")
+        // firm bucket because a token happened to be missing its firm
+        // claim would be a silent cross-tenant data-integrity issue, not
+        // a benign read fallback. A normally-issued admin JWT (see
+        // JwtIssuer.Issue) always carries this claim; a token missing it
+        // is malformed/forged and must be rejected outright.
+        var firmIdClaim = ctx.User.FindFirstValue(JwtIssuer.FirmClaim);
+        if (string.IsNullOrWhiteSpace(firmIdClaim))
+        {
+            return Results.Json(
+                new { error = "firm claim missing or blank on caller JWT" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        var firmId = firmIdClaim;
+
+        try
+        {
+            // Pass-1 review (#322) P1.2 pattern, reused here: audit-first
+            // ordering — emit the operator's position-adjustment intent
+            // BEFORE the dispatch so a WAL-backpressured audit append
+            // refuses the mutation with 503 rather than committing it
+            // un-audited.
+            EmitAdminConfigChange(audit, ctx, "/api/admin/positions", AuditOutcomes.Success, new()
+            {
+                ["endclient"] = req.Endclient!,
+                ["firmId"] = firmId,
+                ["symbol"] = req.Symbol!,
+                ["netQuantity"] = netQuantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["averageEntryPrice"] = averageEntryPrice.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["reference"] = req.Reference ?? "",
+            }, failClosed: true);
+
+            dispatcher.Dispatch(
+                new PositionAdjustmentEvent
+                {
+                    EndClientId = req.Endclient,
+                    FirmId = firmId,
+                    Symbol = req.Symbol,
+                    NetQuantity = netQuantity,
+                    AverageEntryPrice = averageEntryPrice,
+                    Reference = req.Reference,
+                    OperatorId = operatorId,
+                },
+                () =>
+                {
+                    // All three keepers are updated in this single apply
+                    // delegate — the dispatcher serialises it exactly
+                    // like the live fill path (PositionKeeper.ApplyFill
+                    // + PnlKeeper.ApplyFillToAvgCost +
+                    // SubAccountPnlKeeper.ApplyBucketFill in
+                    // ExecutionReportProcessor) — so a reader can never
+                    // observe the position overwritten with a basis
+                    // still reflecting the pre-adjustment state, or
+                    // vice versa. SubAccountPnlKeeper only ever has its
+                    // MASTER bucket touched here (code-review addendum
+                    // #2) — v1 adjustment is account-wide/master-only,
+                    // never a named sub-account bucket.
+                    positions.SetAbsolute(firmId, owner, req.Symbol!, netQuantity, averageEntryPrice);
+                    pnl.SetAbsoluteAvgCost(firmId, req.Endclient!, req.Symbol!, netQuantity, averageEntryPrice);
+                    subAccountPnl.SetAbsoluteMasterBucketAvgCost(firmId, req.Endclient!, req.Symbol!, netQuantity, averageEntryPrice);
+                });
+
+            return Results.Ok(new
+            {
+                endclient = req.Endclient,
+                firmId,
+                symbol = req.Symbol,
+                netQuantity,
+                averageEntryPrice,
+            });
+        }
+        catch (WalBackpressureException ex)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "admin.positions"));
+            return Results.Json(
+                new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3). Handles
+    /// <c>POST /api/admin/accounts/{endClientId}/reset</c> — an
+    /// operator-driven ATOMIC whole end-client account reset. Mirrors
+    /// <see cref="HandleCashLedger"/>'s structural conventions
+    /// (audit-first ordering, WAL-backpressure 503, FirmId always
+    /// derived from the JWT firm claim rather than the request body,
+    /// <see cref="EventDispatcher.DispatchWithPreApply{TEvent}"/> for the
+    /// atomic-with-guard-recheck mutation) but is a SINGLE
+    /// <see cref="AccountResetEvent"/> rather than a per-field
+    /// event — splitting cash/position resets into separate WAL
+    /// records would risk a crash exposing a half-reset account.
+    ///
+    /// <para>
+    /// <b>Fail-closed guard.</b> Refuses with 409 while the account
+    /// has any working order (<see cref="WorkingOrderBook.CountNonTerminalForOwnerAndFirmIncludingStale"/>,
+    /// which excludes terminal orders but — code-review addendum #1 —
+    /// deliberately INCLUDES stale orders: a stale order's true venue-
+    /// side disposition can no longer be positively confirmed, so
+    /// reset must fail closed on it exactly like any other working
+    /// order rather than silently discard the possibility the venue
+    /// still considers it live) OR any outbound mutation that is
+    /// non-terminal or flagged <c>RequiresReconciliation</c>
+    /// (<see cref="OutboundMutationLedger.HasNonTerminalMutationForEndClientRef(string, System.Collections.Generic.IReadOnlyCollection{string})"/>,
+    /// checked against every stable-reference candidate from
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRefCandidates"/>
+    /// so a stable-reference key rotation cannot hide a pending
+    /// mutation recorded under a retired key). NEVER auto-cancels or
+    /// auto-resolves either condition — the operator must clear them
+    /// first. The guard runs twice: once as a cheap pre-check outside
+    /// the dispatcher lock (fast-fail the common case — it only
+    /// inspects orders/outbound-mutation state, never positions, so it
+    /// carries no resolve-time TOCTOU risk of its own), and again,
+    /// AUTHORITATIVELY, inside the event-factory callback — the same
+    /// critical region <see cref="EventDispatcher"/> uses to serialise
+    /// order submission — so a concurrent submit cannot race this
+    /// reset (RFC #753's TOCTOU requirement).
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Code-review addendum #3 — live payload resolution.</b> The
+    /// absolute reset payload (<see cref="AccountResetPayloadResolver.Resolve"/>)
+    /// is resolved from <see cref="PositionKeeper.ForEndClientAndFirm"/>
+    /// INSIDE the same event-factory callback as the authoritative
+    /// guard re-check — never from a value captured before the
+    /// dispatcher lock is acquired. Resolving it earlier would leave a
+    /// TOCTOU window in the PAYLOAD ITSELF: a fill/fee/adjustment
+    /// landing between the cheap pre-check and lock acquisition could
+    /// mutate or introduce a symbol that never makes it into the
+    /// persisted <see cref="AccountResetEvent"/>. This uses the
+    /// generic <see cref="EventDispatcher.DispatchWithPreApply{TEvent}"/>
+    /// overload, whose factory both re-validates the guard and returns
+    /// the event to persist together with its apply action, all
+    /// resolved at the exact linearization point of the WAL append.
+    /// The audit-first entry below therefore records only
+    /// (endclient, firmId) — the resolved cash/position payload is
+    /// authoritative only in the persisted event and the 200 response.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Rollback (code-review final finding).</b> The generic
+    /// <see cref="EventDispatcher.DispatchWithPreApply{TEvent}"/>
+    /// factory used here (<c>resolveAndPreApply</c>) is READ-ONLY — it
+    /// only resolves the payload and builds the <c>Apply</c>
+    /// delegate, never mutating a keeper itself. All in-memory
+    /// mutation is deferred to <c>Apply</c>, which the dispatcher only
+    /// invokes AFTER a successful, durable Append. Consequently a WAL
+    /// Append failure (503, WAL backpressure) needs — and gets — NO
+    /// rollback at all: nothing was mutated yet, so every projection
+    /// is left byte-for-byte, logically unchanged (no flat
+    /// <see cref="PositionKeeper"/> row materialised for a previously
+    /// untracked symbol, no <see cref="CashLedger.BalanceChanged"/>
+    /// side effect, no sub-account bucket/row change, no margin
+    /// release). The <c>rollbackOnApplyFailure</c> delegate passed
+    /// below instead guards ONLY the (expected-unreachable,
+    /// defense-in-depth) case where <c>Apply</c> itself throws AFTER
+    /// the event is already durably appended — it restores the EXACT
+    /// pre-reset value captured from the SAME live read used to
+    /// resolve the payload (same instant, same lock): cash,
+    /// per-symbol position/avg-cost — including, for a symbol that
+    /// had NO tracked row before the reset, removing it back to true
+    /// absence via <see cref="PositionKeeper.TryRemove"/> rather than
+    /// leaving a spurious flat row — the full sub-account PnL bucket
+    /// set, and — code-review addendum #2 — the full named sub-account
+    /// POSITION row set. Margin release is deliberately NOT rolled
+    /// back even in that path: by construction of the guard having
+    /// just passed, any reservation released is already orphaned, so
+    /// re-releasing it on a retried reset is idempotent-safe.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Code-review addendum #2 — named sub-account positions.</b>
+    /// A whole-account reset clears every named
+    /// <see cref="SubAccountPositionKeeper"/> row (all sub-accounts,
+    /// all symbols) for the account, alongside every named
+    /// <see cref="SubAccountPnlKeeper"/> bucket — both are equally
+    /// risk-visible state (e.g. the per-sub-account breakdown in
+    /// <c>GET /api/positions</c>) that would otherwise reference a
+    /// position no longer consistent with the reset aggregate. Named
+    /// rows/buckets are only ever CLEARED here, never fabricated —
+    /// reset seeding, like position adjustment, only ever targets the
+    /// master bucket.
+    /// </para>
+    /// </summary>
+    private static IResult HandleAccountReset(
+        string endClientId,
+        HttpContext ctx,
+        PositionKeeper positions,
+        PnlKeeper pnl,
+        SubAccountPnlKeeper subAccountPnl,
+        SubAccountPositionKeeper subAccountPositions,
+        CashKeeper cashKeeper,
+        CashLedger cashLedger,
+        WorkingOrderBook orders,
+        OutboundMutationLedger outboundLedger,
+        IOutboundCommandProtector commandProtector,
+        IMarginProvider marginProvider,
+        CashSeedOptions cashSeeds,
+        PositionSeedOptions positionSeeds,
+        EventDispatcher dispatcher,
+        IAuditLogger audit)
+    {
+        if (string.IsNullOrWhiteSpace(endClientId))
+            return Results.BadRequest(new { error = "endClientId required" });
+
+        var operatorId = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+        // RFC #753: firm scope comes EXCLUSIVELY from the caller's JWT
+        // firm claim — there is no request-body firm override. Fail
+        // closed (401) when the claim is missing or blank, mirroring
+        // HandlePositionAdjustment's rationale: silently defaulting a
+        // durable, tenant-scoped WRITE to a shared "default" bucket on
+        // a malformed/forged token would be a cross-tenant data-
+        // integrity issue, not a benign read fallback.
+        var firmIdClaim = ctx.User.FindFirstValue(JwtIssuer.FirmClaim);
+        if (string.IsNullOrWhiteSpace(firmIdClaim))
+        {
+            return Results.Json(
+                new { error = "firm claim missing or blank on caller JWT" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        var firmId = firmIdClaim;
+        var owner = new EndClientId(endClientId);
+
+        var refCandidates = commandProtector.CreateStableEndClientRefCandidates(firmId, endClientId);
+
+        // Cheap pre-check outside the dispatcher lock — fast-fails the
+        // overwhelmingly common "already blocked" case without paying
+        // for a lock acquisition. The authoritative re-check — AND the
+        // live payload resolution (code-review addendum #3) — both
+        // happen inside the dispatcher's critical region below.
+        if (IsResetBlocked(orders, outboundLedger, firmId, owner, refCandidates, out var preCheckReason))
+            return AccountResetBlockedResult(preCheckReason!);
+
+        // Mutable captures set inside the event-factory callback below
+        // (under the dispatcher lock) and read either by the
+        // apply-failure rollback delegate (same lock, only if Apply
+        // itself throws AFTER a successful Append — see the Rollback
+        // remarks above; an Append failure needs no rollback at all)
+        // or by this method after DispatchWithPreApply returns.
+        // Declared here so both lambdas close over the same locals.
+        // WasPresent distinguishes "previously absent" (must be
+        // restored via TryRemove, not a flat SetAbsolute(0, 0m), or a
+        // spurious row would be materialised) from "previously
+        // present with these values".
+        Dictionary<string, (bool WasPresent, long NetQuantity, decimal AverageEntryPrice)>? beforePositionsBySymbol = null;
+        Dictionary<string, PnlKeeper.PnlSymbolBasisSnapshot>? beforeAvgCostBySymbol = null;
+        var beforeCashKeeper = 0m;
+        var beforeCashLedger = 0m;
+        IReadOnlyList<SubAccountPnlBucketEntry>? beforeBuckets = null;
+        IReadOnlyList<SubAccountPositionEntry>? beforeSubAccountPositions = null;
+        AccountResetPayload? appliedPayload = null;
+        string? invariantViolation = null;
+
+        try
+        {
+            // Audit-first ordering (Pass-1 review #322 P1.2 pattern):
+            // emit the operator's reset intent BEFORE the dispatch so
+            // a WAL-backpressured audit append refuses the mutation
+            // with 503 rather than committing it un-audited. See the
+            // code-review addendum #3 remarks above for why this
+            // deliberately omits a resolved cashAvailable/symbolCount
+            // preview — that value only ever exists, authoritatively,
+            // inside the dispatcher lock.
+            EmitAdminConfigChange(audit, ctx, "/api/admin/accounts/reset", AuditOutcomes.Success, new()
+            {
+                ["endclient"] = endClientId,
+                ["firmId"] = firmId,
+            }, failClosed: true);
+
+            var outcome = dispatcher.DispatchWithPreApply<AccountResetEvent>(
+                resolveAndPreApply: () =>
+                {
+                    // Authoritative re-check INSIDE the same critical
+                    // region EventDispatcher uses to serialise order
+                    // submit/cancel/replace dispatch — this closes the
+                    // TOCTOU window a check-then-act outside the lock
+                    // would leave open.
+                    if (IsResetBlocked(orders, outboundLedger, firmId, owner, refCandidates, out _))
+                        return ((AccountResetEvent?)null, (Action)(static () => { }));
+
+                    // Code-review addendum #3: resolve the payload
+                    // from LIVE PositionKeeper state HERE, at the same
+                    // linearization point as the guard re-check above
+                    // — never from a value captured before the lock.
+                    // An intervening fill/fee/adjustment landing
+                    // between the cheap pre-check and this instant is
+                    // necessarily reflected in currentPositions, so it
+                    // cannot escape the persisted event.
+                    var currentPositions = positions.ForEndClientAndFirm(firmId, owner);
+                    var payload = AccountResetPayloadResolver.Resolve(
+                        firmId, owner, currentPositions, cashSeeds, positionSeeds);
+
+                    // Defense-in-depth invariant re-check.
+                    // PositionKeeper.SetAbsolute / PnlKeeper.SetAbsoluteAvgCost
+                    // re-check this invariant too, but this method has
+                    // no separate post-append apply step to fail out
+                    // of cleanly — the resolver's construction rules
+                    // make this unreachable in practice, but it is
+                    // checked here anyway so a regression fails the
+                    // request with 400 (via invariantViolation, since
+                    // a lock-scoped factory cannot return an IResult
+                    // directly) rather than corrupting state.
+                    foreach (var entry in payload.Positions)
+                    {
+                        if (entry.NetQuantity == 0 && entry.AverageEntryPrice != 0m)
+                        {
+                            invariantViolation = $"resolved averageEntryPrice must be 0 for flat symbol '{entry.Symbol}'";
+                            return ((AccountResetEvent?)null, (Action)(static () => { }));
+                        }
+                        if (entry.NetQuantity != 0 && entry.AverageEntryPrice <= 0m)
+                        {
+                            invariantViolation = $"resolved averageEntryPrice must be > 0 for non-flat symbol '{entry.Symbol}'";
+                            return ((AccountResetEvent?)null, (Action)(static () => { }));
+                        }
+                    }
+
+                    var evt = new AccountResetEvent
+                    {
+                        EndClientId = endClientId,
+                        FirmId = firmId,
+                        CashAvailable = payload.CashAvailable,
+                        Positions = payload.Positions,
+                        OperatorId = operatorId,
+                    };
+
+                    // "Before" capture for exact apply-failure rollback
+                    // (absolute overwrites are not deltas — see
+                    // class-level doc). Captured from the SAME live
+                    // read as the payload above, so a restore always
+                    // targets the TRUE pre-mutation state even if an
+                    // intervening mutation landed between the cheap
+                    // pre-check and this instant. WasPresent is
+                    // recorded per symbol so the rollback can
+                    // distinguish "restore to these exact values" from
+                    // "this symbol never had a row — remove it back to
+                    // true absence" (see PositionKeeper.TryRemove).
+                    var currentBySymbol = currentPositions.ToDictionary(static p => p.Symbol, StringComparer.Ordinal);
+                    beforePositionsBySymbol = new Dictionary<string, (bool WasPresent, long NetQuantity, decimal AverageEntryPrice)>(StringComparer.Ordinal);
+                    beforeAvgCostBySymbol = new Dictionary<string, PnlKeeper.PnlSymbolBasisSnapshot>(StringComparer.Ordinal);
+                    foreach (var entry in payload.Positions)
+                    {
+                        beforePositionsBySymbol[entry.Symbol] = currentBySymbol.TryGetValue(entry.Symbol, out var cur)
+                            ? (true, cur.NetQuantity, cur.AverageEntryPrice)
+                            : (false, 0L, 0m);
+                        // Discriminated capture (known basis / unknown-basis
+                        // qty / true absence) — NOT pnl.GetAvgCost, which
+                        // collapses the latter two into the same `null`
+                        // and would otherwise let a rollback silently wipe
+                        // a legacy unknown-basis leg (see PnlKeeper's
+                        // CaptureSymbolBasis remarks).
+                        beforeAvgCostBySymbol[entry.Symbol] = pnl.CaptureSymbolBasis(firmId, endClientId, entry.Symbol);
+                    }
+                    beforeCashKeeper = cashKeeper.GetAvailable(firmId, owner);
+                    beforeCashLedger = cashLedger.GetAvailable(firmId, owner);
+                    beforeBuckets = subAccountPnl.SnapshotBucketsForAccount(firmId, endClientId);
+                    beforeSubAccountPositions = subAccountPositions.SnapshotForAccount(firmId, owner);
+                    appliedPayload = payload;
+
+                    void Apply()
+                    {
+                        marginProvider.ReleaseAllReservationsForAccount(firmId, owner);
+
+                        // Named sub-account buckets AND position rows:
+                        // CLEARED, never fabricated (code-review
+                        // addendum #2). A whole-account reset changes
+                        // the aggregate position outright, so any
+                        // named bucket/row would otherwise reference a
+                        // position that no longer exists — stale risk
+                        // state. Historical realized P&L stays
+                        // untouched (permanent audit history, not a
+                        // basis).
+                        subAccountPnl.ClearAllBucketsForAccount(firmId, endClientId);
+                        subAccountPositions.ClearAllForAccount(firmId, owner);
+
+                        foreach (var entry in payload.Positions)
+                        {
+                            positions.SetAbsolute(
+                                firmId, owner, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                            pnl.SetAbsoluteAvgCost(
+                                firmId, endClientId, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                            subAccountPnl.SetAbsoluteMasterBucketAvgCost(
+                                firmId, endClientId, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                        }
+
+                        cashKeeper.SetAbsolute(firmId, owner, payload.CashAvailable);
+                        cashLedger.SetAbsolute(firmId, owner, payload.CashAvailable);
+                    }
+
+                    return (evt, Apply);
+                },
+                rollbackOnApplyFailure: () =>
+                {
+                    // Only reachable if Apply() itself throws AFTER a
+                    // successful, durable Append (see the Rollback
+                    // remarks above) — an Append failure never invokes
+                    // this delegate. Restores exact presence/absence,
+                    // not just zeroed values: a symbol with no row
+                    // before the reset is put back to true absence via
+                    // TryRemove rather than left as a spurious flat
+                    // (0, 0m) row that SetAbsolute would otherwise
+                    // materialise.
+                    foreach (var (symbol, before) in beforePositionsBySymbol!)
+                    {
+                        if (before.WasPresent)
+                            positions.SetAbsolute(firmId, owner, symbol, before.NetQuantity, before.AverageEntryPrice);
+                        else
+                            positions.TryRemove(firmId, owner, symbol);
+                    }
+                    foreach (var (symbol, before) in beforeAvgCostBySymbol!)
+                    {
+                        // RestoreSymbolBasis, not SetAbsoluteAvgCost:
+                        // the latter always clears the unknown-basis
+                        // leg, which would silently destroy a legacy
+                        // unknown-basis quantity that existed before
+                        // this reset instead of restoring it.
+                        pnl.RestoreSymbolBasis(firmId, endClientId, symbol, before);
+                    }
+                    subAccountPnl.RestoreBucketsForAccount(firmId, endClientId, beforeBuckets!);
+                    subAccountPositions.RestoreForAccount(firmId, owner, beforeSubAccountPositions!);
+                    cashKeeper.SetAbsolute(firmId, owner, beforeCashKeeper);
+                    cashLedger.SetAbsolute(firmId, owner, beforeCashLedger);
+                });
+
+            if (!outcome.Applied)
+            {
+                return invariantViolation is not null
+                    ? Results.BadRequest(new { error = invariantViolation })
+                    : AccountResetBlockedResult("account_reset_blocked");
+            }
+
+            return Results.Ok(new
+            {
+                endclient = endClientId,
+                firmId,
+                cashAvailable = appliedPayload!.CashAvailable,
+                positions = appliedPayload.Positions,
+            });
+        }
+        catch (WalBackpressureException ex)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "admin.accounts.reset"));
+            return Results.Json(
+                new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    }
+
+    /// <summary>
+    /// #671/#753. Shared guard body evaluated both as a cheap pre-
+    /// check (outside the dispatcher lock) and as the authoritative
+    /// re-check (inside the event-factory callback, under the lock)
+    /// by <see cref="HandleAccountReset"/>. Never mutates anything —
+    /// callers are responsible for never auto-cancelling or auto-
+    /// resolving either condition (RFC #753: fail closed, operator
+    /// clears manually).
+    /// </summary>
+    private static bool IsResetBlocked(
+        WorkingOrderBook orders,
+        OutboundMutationLedger outboundLedger,
+        string firmId,
+        EndClientId owner,
+        IReadOnlyCollection<string> refCandidates,
+        out string? reason)
+    {
+        // Code-review addendum #1: reset-specific, STALE-INCLUSIVE
+        // count. Unlike the max-open-orders risk-budget check (which
+        // deliberately exempts stale ghosts so a venue desync cannot
+        // freeze new trading), reset must fail closed on a stale order
+        // — its true venue-side disposition can no longer be
+        // positively confirmed, so the operator must resolve it
+        // (cancel / clear-stale) before an irreversible reset proceeds.
+        if (orders.CountNonTerminalForOwnerAndFirmIncludingStale(firmId, owner) > 0)
+        {
+            reason = "open_working_order";
+            return true;
+        }
+        if (outboundLedger.HasNonTerminalMutationForEndClientRef(firmId, refCandidates))
+        {
+            reason = "non_terminal_outbound_mutation";
+            return true;
+        }
+        reason = null;
+        return false;
+    }
+
+    private static IResult AccountResetBlockedResult(string reason) =>
+        Results.Json(
+            new { error = "account_reset_blocked", reason },
+            statusCode: StatusCodes.Status409Conflict);
 
     private static IResult ToggleKill(
         EventDispatcher dispatcher,
@@ -836,5 +1450,44 @@ public sealed class CashLedgerRequest
     public string? Kind { get; set; }
     public decimal Amount { get; set; }
     public string? Currency { get; set; }
+    public string? Reference { get; set; }
+}
+
+/// <summary>
+/// Body for <c>POST /api/admin/positions</c> (#671/#753 RFC, PR 1).
+/// Operator-driven ABSOLUTE position overwrite. <see cref="NetQuantity"/>
+/// is signed (positive = long, negative = short); <see cref="AverageEntryPrice"/>
+/// must be exactly 0 when <see cref="NetQuantity"/> is 0, and strictly
+/// positive otherwise (RFC #753 invariant, enforced in
+/// <c>AdminEndpoints.HandlePositionAdjustment</c> and, defense-in-depth,
+/// in <c>PositionKeeper.SetAbsolute</c>). There is deliberately no
+/// <c>FirmId</c> field here — per the RFC's "admin operations are
+/// scoped to the administrator's JWT firm" product decision, the firm
+/// is always derived from the caller's JWT firm claim, never accepted
+/// from the request body. <see cref="Reference"/> is operator free-form
+/// (ticket id, journal note), mirroring <see cref="CashLedgerRequest.Reference"/>.
+///
+/// <para>
+/// Code-review addendum (#671/#753 PR 1). <see cref="NetQuantity"/> and
+/// <see cref="AverageEntryPrice"/> are nullable at the JSON-binding
+/// level ON PURPOSE: both fields are semantically REQUIRED (there is
+/// no sensible default for an absolute overwrite), but the intentional
+/// "flatten to zero" request legitimately sends a literal
+/// <c>netQuantity: 0, averageEntryPrice: 0</c>. Using non-nullable
+/// <c>long</c>/<c>decimal</c> would make an omitted field
+/// indistinguishable from an explicit <c>0</c> (System.Text.Json
+/// silently defaults missing value-typed properties), silently
+/// accepting a malformed/incomplete request as a flatten-to-zero
+/// instruction. <c>HandlePositionAdjustment</c> rejects either field
+/// being <c>null</c> with 400 before evaluating the flatten/invariant
+/// rule below.
+/// </para>
+/// </summary>
+public sealed class PositionAdjustmentRequest
+{
+    public string? Endclient { get; set; }
+    public string? Symbol { get; set; }
+    public long? NetQuantity { get; set; }
+    public decimal? AverageEntryPrice { get; set; }
     public string? Reference { get; set; }
 }

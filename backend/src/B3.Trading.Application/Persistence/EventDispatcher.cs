@@ -348,6 +348,121 @@ public sealed class EventDispatcher
     }
 
     /// <summary>
+    /// #671/#753 (RFC PR 3, code-review addendum #3). Event-FACTORY
+    /// variant of <see cref="DispatchWithPreApply(WalEvent, Func{bool}, Action)"/>
+    /// for callers whose event payload cannot be safely resolved
+    /// before the dispatcher lock is acquired — e.g. whole-account
+    /// reset, whose absolute position payload must be derived from
+    /// live keeper state (which symbols are currently non-flat) at the
+    /// SAME linearization point as the guard re-check. Resolving that
+    /// payload from a snapshot captured before this method is called
+    /// would leave a TOCTOU window: a fill/fee/adjustment landing
+    /// between the caller's pre-check and lock acquisition could
+    /// mutate or introduce a symbol that never makes it into the
+    /// persisted event, silently escaping the reset.
+    ///
+    /// <para>
+    /// <paramref name="resolveAndPreApply"/> runs FIRST, under the
+    /// lock: it MUST re-validate the guard predicate against live
+    /// state and, if not blocked, resolve the event to persist —
+    /// reading whatever live keeper state it needs at that exact
+    /// instant — and return it together with the in-memory mutation
+    /// (<c>Apply</c>) to run immediately after a successful append.
+    /// Returning a <c>null</c> event means "blocked" (or "nothing to
+    /// resolve") — same contract as a <c>false</c> return from the
+    /// classic <c>preApply</c> overload — and skips both append and
+    /// apply.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Contract: <paramref name="resolveAndPreApply"/> itself MUST
+    /// be free of in-memory-projection side effects.</b> Unlike the
+    /// classic overload's <c>preApply</c> — which mutates state BEFORE
+    /// <c>Append</c>, and therefore needs a pre-append rollback on an
+    /// Append failure — this factory only RESOLVES the event and
+    /// returns a separate <c>Apply</c> delegate; all in-memory mutation
+    /// is deferred until AFTER a successful, durable <c>Append</c>.
+    /// Consequently an Append failure here (e.g. WAL backpressure)
+    /// needs — and gets — NO rollback at all: nothing was mutated, so
+    /// the exception simply propagates with every in-memory projection
+    /// left byte-for-byte, logically unchanged (no flat rows
+    /// materialised, no change-notification side effects, no
+    /// keeper/ledger writes of any kind).
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Code-review final finding.</b> <paramref name="rollbackOnApplyFailure"/>
+    /// (optional) instead guards the ONE step that runs after the
+    /// durable Append: if <c>apply()</c> itself throws — the event IS
+    /// already persisted, but the in-memory mutation only partially
+    /// completed — <paramref name="rollbackOnApplyFailure"/> is invoked
+    /// as a best-effort restore of the pre-apply state before the
+    /// exception is rethrown (the applied-sequence tracker is
+    /// deliberately NOT advanced in that case, since the live
+    /// projection does not yet fully reflect the persisted event; a
+    /// future cold-start/snapshot+tail replay will still reconstruct
+    /// the authoritative post-event state deterministically from the
+    /// durable record). Under the individual keeper APIs this feature
+    /// uses (simple absolute-overwrite dictionary sets with no I/O),
+    /// <c>apply()</c> throwing is not expected in practice — this is a
+    /// defense-in-depth safety net, not the primary correctness
+    /// mechanism (that is Append succeeding or failing atomically).
+    /// </para>
+    ///
+    /// <para>
+    /// Unlike the pre-serialised RFC §5.1 (F1) fast path the other
+    /// overloads use, JSON serialisation of the resolved event
+    /// necessarily happens INSIDE the lock here, because the event's
+    /// content is not knowable before the lock is acquired. Callers
+    /// with a statically-known event should keep using the classic
+    /// <see cref="DispatchWithPreApply(WalEvent, Func{bool}, Action)"/>
+    /// overload — this one trades a small amount of in-lock
+    /// serialisation cost for closing the resolve-time TOCTOU window,
+    /// and is intended for low-frequency admin operations, not the hot
+    /// order-submit path.
+    /// </para>
+    /// </summary>
+    public DispatchOutcome DispatchWithPreApply<TEvent>(
+        Func<(TEvent? Event, Action Apply)> resolveAndPreApply,
+        Action? rollbackOnApplyFailure = null)
+        where TEvent : WalEvent
+    {
+        ArgumentNullException.ThrowIfNull(resolveAndPreApply);
+        lock (_lock)
+        {
+            var (evt, apply) = resolveAndPreApply();
+            if (evt is null)
+                return new DispatchOutcome(false, 0);
+            ArgumentNullException.ThrowIfNull(apply);
+            var payload = JsonSerializer.SerializeToUtf8Bytes<WalEvent>(evt, WalEventJsonContext.Default.WalEvent);
+
+            // No in-memory projection has been touched yet — by the
+            // contract documented above, resolveAndPreApply must be
+            // read-only. An Append failure (e.g. WalBackpressureException)
+            // therefore propagates directly with nothing to roll back;
+            // there is no pre-append rollback path in this overload.
+            var seq = _store.Append(evt, payload);
+
+            try
+            {
+                apply();
+            }
+            catch
+            {
+                // apply() ran AFTER a successful, durable Append: the
+                // event is persisted, but the in-memory mutation only
+                // partially completed. Best-effort restore, then
+                // rethrow — AdvanceApplied deliberately does not run.
+                rollbackOnApplyFailure?.Invoke();
+                throw;
+            }
+
+            AdvanceApplied(seq);
+            return new DispatchOutcome(true, seq);
+        }
+    }
+
+    /// <summary>
     /// Captures a raw snapshot and its WAL lineage at the highest contiguous
     /// sequence whose in-memory projection has completed. The callback runs
     /// under the dispatcher lock; projection and durability waits must run

@@ -4,6 +4,7 @@ using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace B3.Trading.Application.Tests;
@@ -172,6 +173,31 @@ public sealed class DurableOrderSubmissionServiceTests
         Assert.Equal(0, fixture.Ledger.ReadinessBlockingCount);
     }
 
+    // #768. The modern outbound-dispatch non-success branch previously
+    // only incremented a metric; verify it now also logs the business
+    // identifiers an operator needs to correlate a lost HTTP response
+    // (MutationId/FirmId/ClOrdId) without duplicating them as high-
+    // cardinality metric labels.
+    [Fact]
+    public async Task ProvenUnsent_LogsMutationFirmClOrdIdAndOutcome()
+    {
+        var logger = new CapturingLogger<OrderSubmissionService>();
+        var fixture = CreateFixture(
+            Array.Empty<IRiskCheck>(),
+            gateway: new ProvenUnsentGateway(),
+            logger: logger);
+
+        var result = await fixture.Service.SubmitAsync(
+            Request(),
+            CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.Rejected, result.Kind);
+        var entry = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        Assert.Contains(result.MutationId.ToString(), entry.Message);
+        Assert.Contains("FIRM-A", entry.Message);
+        Assert.Contains(result.ClOrdId.ToString(), entry.Message);
+    }
+
     [Fact]
     public async Task AlgoProvenUnsent_TerminalizesPhantomChildWithoutPermittingAutomaticRetry()
     {
@@ -283,7 +309,8 @@ public sealed class DurableOrderSubmissionServiceTests
         IEnumerable<IRiskCheck> checks,
         CompletingGateway? gateway = null,
         RecordingStore? store = null,
-        IOutboundSubmissionFaultInjector? faultInjector = null)
+        IOutboundSubmissionFaultInjector? faultInjector = null,
+        ILogger<OrderSubmissionService>? logger = null)
     {
         var protector = new AeadOutboundCommandProtector(
             new OutboundCommandProtectionOptions
@@ -332,7 +359,7 @@ public sealed class DurableOrderSubmissionServiceTests
             new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
             dispatcher,
             drain,
-            NullLogger<OrderSubmissionService>.Instance,
+            logger ?? NullLogger<OrderSubmissionService>.Instance,
             outboundLedger: ledger,
             approvalFactory: new NewOrderApprovalFactory(protector),
             outboundCoordinator: coordinator,
@@ -552,4 +579,18 @@ public sealed class DurableOrderSubmissionServiceTests
 
     private sealed class SimulatedApprovalCommitCrashException()
         : Exception("Simulated crash after approval append and before marker commit.");
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+    }
 }

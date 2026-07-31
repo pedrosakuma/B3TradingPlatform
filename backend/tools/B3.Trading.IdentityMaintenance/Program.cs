@@ -1,6 +1,7 @@
 using System.Text.Json;
 using B3.Trading.Application.Identity;
 using B3.Trading.Infrastructure.Identity;
+using B3.Trading.Infrastructure.Persistence;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -9,6 +10,9 @@ return await IdentityMaintenanceCli.RunAsync(args);
 
 public static class IdentityMaintenanceCli
 {
+    private const string LegacyWalRecoveryConfirmationFlag =
+        "i-understand-this-promotes-a-legacy-wal-without-proving-the-tail-was-durable";
+
     public static async Task<int> RunAsync(
         string[] args,
         TextWriter? stdout = null,
@@ -23,12 +27,22 @@ public static class IdentityMaintenanceCli
             return args.Length == 0 ? 2 : 0;
         }
 
-        var parsed = Parse(args.Skip(1).ToArray());
+        var parsed = Parse(
+            args.Skip(1).ToArray(),
+            args[0] switch
+            {
+                "recover-legacy-wal" => new HashSet<string>(StringComparer.Ordinal)
+                {
+                    LegacyWalRecoveryConfirmationFlag,
+                },
+                _ => new HashSet<string>(StringComparer.Ordinal)
+            });
         return args[0] switch
         {
             "backup" => await RunBackupAsync(parsed, stdout, stderr).ConfigureAwait(false),
             "validate" => await RunValidateAsync(parsed, stdout, stderr).ConfigureAwait(false),
             "recover-admin" => await RunRecoverAdminAsync(parsed, stdout, stderr).ConfigureAwait(false),
+            "recover-legacy-wal" => await RunRecoverLegacyWalAsync(parsed, stdout, stderr).ConfigureAwait(false),
             _ => UnknownCommand(stderr),
         };
     }
@@ -144,6 +158,66 @@ public static class IdentityMaintenanceCli
         }
     }
 
+    private static async Task<int> RunRecoverLegacyWalAsync(
+        IReadOnlyDictionary<string, string> parsed,
+        TextWriter stdout,
+        TextWriter stderr)
+    {
+        if (!TryRequire(
+                parsed,
+                stderr,
+                "data-directory",
+                "firm-id",
+                "operator",
+                "change-ticket",
+                "reason"))
+        {
+            return 2;
+        }
+
+        try
+        {
+            var recovery = new LegacyWalAdministrativeRecovery(new PersistenceOptions
+            {
+                DataDirectory = parsed["data-directory"],
+                FirmId = parsed["firm-id"],
+                FsyncOnFlush = true,
+            });
+            var result = await recovery.RecoverAsync(
+                new ControlledLegacyWalRecoveryRequest(
+                    parsed["operator"],
+                    parsed["change-ticket"],
+                    parsed["reason"],
+                    parsed.TryGetValue(LegacyWalRecoveryConfirmationFlag, out var confirmed)
+                    && string.Equals(confirmed, "true", StringComparison.OrdinalIgnoreCase)))
+                .ConfigureAwait(false);
+            await WriteJsonAsync(stdout, new
+            {
+                command = "recover-legacy-wal",
+                result.Status,
+                result.ReasonCode,
+                result.Message,
+                result.WalRoot,
+                result.MarkerPath,
+                result.Generation,
+                result.LastDurableSeq,
+                result.Segments,
+                result.LatestSnapshotPath,
+                result.LatestSnapshotSeq,
+                result.AuditLogPath,
+            }).ConfigureAwait(false);
+            return 0;
+        }
+        catch (LegacyWalAdministrativeRecoveryRefusedException ex)
+        {
+            return await WriteFailureAsync(stderr, ex.Message).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return await WriteFailureAsync(stderr, ex.Message).ConfigureAwait(false);
+        }
+    }
+
     private static SqliteTradingUserDirectory CreateDirectory(string database) =>
         new(
             Options.Create(new IdentityDirectoryOptions
@@ -185,14 +259,24 @@ public static class IdentityMaintenanceCli
         }
     }
 
-    private static Dictionary<string, string> Parse(string[] args)
+    private static Dictionary<string, string> Parse(
+        string[] args,
+        IReadOnlySet<string> switchOptions)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var i = 0; i < args.Length; i++)
         {
-            if (!args[i].StartsWith("--", StringComparison.Ordinal) || i + 1 >= args.Length)
+            if (!args[i].StartsWith("--", StringComparison.Ordinal))
                 continue;
-            result[args[i][2..]] = args[++i];
+            var option = args[i][2..];
+            if (switchOptions.Contains(option))
+            {
+                result[option] = "true";
+                continue;
+            }
+            if (i + 1 >= args.Length)
+                continue;
+            result[option] = args[++i];
         }
         return result;
     }
@@ -246,9 +330,19 @@ public static class IdentityMaintenanceCli
                 --operator ops-user \
                 --change-ticket INC-1234
 
+              B3.Trading.IdentityMaintenance recover-legacy-wal \
+                --data-directory /var/lib/b3trading \
+                --firm-id FIRM01 \
+                --operator ops-user \
+                --change-ticket INC-1234 \
+                --reason "post-crash legacy WAL marker recovery" \
+                --i-understand-this-promotes-a-legacy-wal-without-proving-the-tail-was-durable
+
             backup is safe while trading-host is live and emits JSON metadata.
             validate opens an existing database read-only and never creates or migrates it.
             recover-admin requires trading-host to be scaled down and refuses an active writer.
+            recover-legacy-wal requires trading-host to be scaled down, refuses a held active-host fence,
+            and records an audit entry under data/{firm}/maintenance/.
             """);
     }
 }

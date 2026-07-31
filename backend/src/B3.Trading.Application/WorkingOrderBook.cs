@@ -110,6 +110,49 @@ public sealed class WorkingOrderBook
     }
 
     /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3, code-review addendum
+    /// #1). Reset-specific variant of <see cref="CountOpenForOwnerAndFirm"/>
+    /// that counts every PendingNew/Working/PartiallyFilled order for
+    /// (<paramref name="firmId"/>, <paramref name="owner"/>) WITHOUT
+    /// excluding <see cref="Order.IsStale"/> orders.
+    /// <para>
+    /// <see cref="CountOpenForOwnerAndFirm"/>'s stale-skip exists for
+    /// the max-open-orders RISK BUDGET: a venue-desync ghost must not
+    /// silently freeze new trading. That rationale does not extend to
+    /// whole-account reset — reset is destructive (aside from the
+    /// caller's rollback capture) and a stale order is, by definition,
+    /// one whose true venue-side disposition the platform can no
+    /// longer positively confirm (see <c>OrderStaledEvent</c>). RFC
+    /// #753 requires reset to fail closed rather than silently
+    /// discard the possibility that the venue still considers a stale
+    /// order live; an operator must explicitly resolve it (mark
+    /// cancelled/clear-stale) first, exactly like any other working
+    /// order.
+    /// </para>
+    /// <para>
+    /// <b>Do not repurpose this for any risk-budget gate.</b> This
+    /// method is reset-guard-only by construction; reusing it for
+    /// <see cref="Risk.Checks.MaxOpenOrdersCheck"/> or any other
+    /// consumer of <see cref="CountOpenForOwnerAndFirm"/> would
+    /// silently change that check's stale-order exemption.
+    /// </para>
+    /// </summary>
+    public int CountNonTerminalForOwnerAndFirmIncludingStale(string firmId, EndClientId owner)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (!_byOwner.TryGetValue(owner.Value, out var set)) return 0;
+        var count = 0;
+        foreach (var clOrdId in set.Keys)
+        {
+            if (!_orders.TryGetValue(clOrdId, out var order)) continue;
+            if (IsTerminal(order.Status)) continue;
+            if (!string.Equals(order.FirmId, firmId, StringComparison.Ordinal)) continue;
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>
     /// Q4.1 (#301). Counts an owner's non-terminal orders restricted to
     /// the given <c>(firm, sub-account)</c> bucket. Orders without a
     /// sub-account tag are NOT included (they live in the master bucket

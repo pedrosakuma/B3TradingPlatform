@@ -106,6 +106,94 @@ internal sealed class DockerVenueTransportController
             $"Timed out after {timeout.TotalSeconds:F0}s waiting for marketdata client reconnect in container '{_marketDataContainer}' since {sinceUtc:o}.");
     }
 
+    public async Task WaitForVenueOrderAbsentAsync(
+        ulong? venueOrderId,
+        ulong clOrdId,
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        string? lastSnapshot = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            lastSnapshot = await CaptureFreshMatchingSnapshotAsync(
+                deadline,
+                ct);
+            if (!SnapshotContainsTrackedOrder(
+                    lastSnapshot,
+                    venueOrderId,
+                    clOrdId))
+                return;
+        }
+
+        throw new InvalidOperationException(
+            $"Timed out after {timeout.TotalSeconds:F0}s proving venue order " +
+            $"{venueOrderId?.ToString() ?? $"ClOrdID {clOrdId}"} absent " +
+            $"lastSnapshot={lastSnapshot ?? "<none>"}.");
+    }
+
+    public async Task<bool> IsVenueOrderPresentAsync(
+        ulong? venueOrderId,
+        ulong clOrdId,
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        var snapshot = await CaptureFreshMatchingSnapshotAsync(
+            DateTimeOffset.UtcNow + timeout,
+            ct);
+        return SnapshotContainsTrackedOrder(
+            snapshot,
+            venueOrderId,
+            clOrdId);
+    }
+
+    private async Task<string> CaptureFreshMatchingSnapshotAsync(
+        DateTimeOffset deadline,
+        CancellationToken ct)
+    {
+        await EnsureDockerAvailableAsync(ct);
+
+        string? lastError = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var force = await RunDockerAsync(
+                new[]
+                {
+                    "exec", _matchingContainer,
+                    "wget", "-qO-", "--post-data=",
+                    "http://localhost:8080/admin/channels/84/snapshot/force",
+                },
+                ct,
+                allowNonZeroExit: true);
+            if (force.ExitCode != 0)
+            {
+                lastError = force.StdErr;
+                await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+                continue;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(1500), ct);
+            var snapshot = await RunDockerAsync(
+                new[]
+                {
+                    "exec", _matchingContainer,
+                    "wget", "-qO-",
+                    "http://localhost:8080/admin/channels/84/snapshot",
+                },
+                ct,
+                allowNonZeroExit: true);
+            if (snapshot.ExitCode == 0)
+            {
+                return snapshot.StdOut;
+            }
+            lastError = snapshot.StdErr;
+        }
+
+        throw new InvalidOperationException(
+            "Timed out capturing a fresh matching channel-84 snapshot. " +
+            $"lastError={lastError ?? "<none>"}.");
+    }
+
     public async Task KillTradingHostAsync(CancellationToken ct = default)
     {
         await EnsureDockerAvailableAsync(ct);
@@ -485,6 +573,75 @@ internal sealed class DockerVenueTransportController
             }
         }
 
+        return false;
+    }
+
+    internal static bool SnapshotContainsTrackedOrder(
+        string snapshotJson,
+        ulong? venueOrderId,
+        ulong clOrdId)
+    {
+        using var document = JsonDocument.Parse(snapshotJson);
+        if (!TryGetPropertyIgnoreCase(document.RootElement, "Engine", out var engine) ||
+            !TryGetPropertyIgnoreCase(engine, "Books", out var books) ||
+            books.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException(
+                "Matching snapshot did not contain engine.books.");
+        }
+
+        foreach (var book in books.EnumerateArray())
+        {
+            if (!TryGetPropertyIgnoreCase(book, "Orders", out var orders) ||
+                orders.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var order in orders.EnumerateArray())
+            {
+                if (TryGetPropertyIgnoreCase(order, "OrderId", out var orderId) &&
+                    orderId.TryGetUInt64(out var parsed) &&
+                    venueOrderId is { } expectedVenueOrderId &&
+                    parsed == expectedVenueOrderId)
+                {
+                    return true;
+                }
+                if (venueOrderId is null &&
+                    TryGetPropertyIgnoreCase(order, "ClOrdId", out var clOrdIdProperty) &&
+                    clOrdIdProperty.ValueKind == JsonValueKind.String &&
+                    ulong.TryParse(clOrdIdProperty.GetString(), out var parsedClOrdId) &&
+                    parsedClOrdId == clOrdId &&
+                    TryGetPropertyIgnoreCase(order, "EnteringFirm", out var enteringFirm) &&
+                    enteringFirm.TryGetUInt32(out var parsedFirm) &&
+                    parsedFirm == 100)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(
+        JsonElement element,
+        string propertyName,
+        out JsonElement value)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(
+                    property.Name,
+                    propertyName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
         return false;
     }
 

@@ -51,6 +51,9 @@ Start here. This is the map for everything under `docs/` in
 - [operations/fixp-listener.md](operations/fixp-listener.md) —
   enabling, sizing, credentials, retransmit, drain & shutdown for the
   FIXP listener.
+- [operations/market-maker-soak.md](operations/market-maker-soak.md) —
+  reproducible static/inventory/volatility/feed-loss soak profiles,
+  thresholds, OTLP mapping expectations, and evidence template.
 
 ## Persistence
 
@@ -72,7 +75,7 @@ Start here. This is the map for everything under `docs/` in
 ## Metrics & Observability
 
 - [METRICS.md](METRICS.md) — OpenTelemetry metric surface emitted by
-  the trading-host.
+  the trading-host and standalone market-maker bot.
 - [OBSERVABILITY.md](OBSERVABILITY.md) — generic Kubernetes / Linux
   host wiring (lifecycle, drain, health).
 - For the FIXP listener metric surface specifically, see code at

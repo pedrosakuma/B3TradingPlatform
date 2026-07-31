@@ -24,8 +24,9 @@ public sealed class MarketMakerBotOptions
     /// <summary>EnteringFirm code from matching's <c>firms[].enteringFirmCode</c>.</summary>
     [Required] public uint EnteringFirm { get; set; }
 
-    /// <summary>Configured floor for the FIXP <c>SessionVerId</c>; the SDK's
-    /// <c>FileSessionStateStore</c> bumps from this on warm restart.</summary>
+    /// <summary>Configured floor for the FIXP <c>SessionVerId</c>. Warm
+    /// restart first attempts to reattach the persisted version; a rejected
+    /// reattach advances monotonically to at least this value.</summary>
     public uint SessionVerId { get; set; } = 1;
 
     /// <summary>Verbatim JSON credential payload — matching's FixpSession
@@ -48,16 +49,85 @@ public sealed class MarketMakerBotOptions
     /// </summary>
     public TimeSpan ReconcileInterval { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// RFC #703 order lease: the SDK exposes no mass
+    /// order-status query, so there is no way to ask the venue "what do I
+    /// actually have open right now" — this is a purely time-based
+    /// heuristic instead. Any resting order older than this is cancelled
+    /// (and, via the normal <c>OrderCancelled</c> event path, immediately
+    /// re-quoted) by <see cref="ReconcileLoopAsync"/> on every tick. This
+    /// expected TTL renewal also bounds how long an order whose terminal
+    /// event was silently dropped can linger on the book.
+    /// </summary>
+    public TimeSpan MaxOrderAge { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// RFC #703 client-side safety cap, defense in depth against the exact
+    /// failure mode that produced <c>pedrosakuma/B3MatchingPlatform#567</c>
+    /// (73k+ resting orders overflowing matching's fixed snapshot buffer):
+    /// once the bot's own tracked open-order count reaches this, it stops
+    /// submitting NEW quotes (existing resting orders are left alone —
+    /// this is not a panic-cancel) and logs loudly. There is normally at
+    /// most one resting order per (instrument, side), so this should only
+    /// ever trip if something upstream (venue or bot bug) is preventing
+    /// orders from actually terminating.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int MaxOpenOrders { get; set; } = 500;
+
+    /// <summary>
+    /// RFC #703 book-driven quoting: minimum distance (in <see
+    /// cref="InstrumentConfig.TickSize"/> multiples) a side's resting
+    /// price may drift from the freshly-computed target price before a
+    /// market-data book change (see <see cref="MarketDataFeed.BookOrderChanged"/>)
+    /// triggers a reactive cancel-and-requote. Kept nonzero so a
+    /// no-op-sized book wiggle doesn't churn a perfectly fine quote.
+    /// </summary>
+    [Range(1, int.MaxValue)]
+    public int RequoteDeviationTicks { get; set; } = 2;
+
+    /// <summary>
+    /// RFC #703 book-driven quoting: minimum time a side must have been
+    /// resting before a book-driven deviation can trigger a reactive
+    /// cancel-and-requote for it. Throttles the reactive path so a burst
+    /// of book updates for the same symbol can't repeatedly cancel a
+    /// quote that itself hasn't even been acknowledged yet — the exact
+    /// venue-flooding shape RFC #703 exists to prevent, just triggered
+    /// from the market-data side this time instead of the ER side.
+    /// </summary>
+    public TimeSpan MinRequoteInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Maximum time a submitted cancel may remain without a terminal
+    /// acknowledgement before its pending marker expires and guarded retry is
+    /// allowed. The original order remains open until an authoritative ER.
+    /// </summary>
+    public TimeSpan CancelAckTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Opts into terminal startup mass-cancel hygiene. Keep disabled unless
+    /// matching-platform includes B3MatchingPlatform#569, where the solicited
+    /// ACCEPTED report is emitted only after dispatcher execution and all
+    /// cancellation ERs. Recovered session state fails startup while disabled
+    /// because replacement quoting cannot safely proceed without that barrier.
+    /// </summary>
+    public bool StartupCleanupEnabled { get; set; }
+
+    /// <summary>
+    /// Maximum startup wait for the terminal session mass-cancel report.
+    /// Sized separately from a single-order cancel because a legacy session
+    /// may contain up to the venue's 100k open-order cap.
+    /// </summary>
+    public TimeSpan StartupCleanupTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
     [Required, MinLength(1)]
     public List<InstrumentConfig> Instruments { get; set; } = new();
 
-    /// <summary>Live market-data anchor. Optional by design: if unset the
-    /// bot degrades gracefully to quoting off each instrument's static
-    /// <see cref="InstrumentConfig.RefPrice"/> only (same fallback shape
-    /// as the trading-host's own market-data gate) rather than failing to
-    /// start — a co-located bot without a feed is still useful liquidity
-    /// in a pinch.</summary>
+    /// <summary>Live market-data anchor and explicit feed-loss behavior.</summary>
     public MarketDataOptions MarketData { get; set; } = new();
+
+    /// <summary>Process-local P&amp;L snapshot and mark-freshness settings.</summary>
+    public MarketMakerTelemetryOptions Telemetry { get; set; } = new();
 }
 
 /// <summary>Connection to B3MarketDataPlatform's WebSocket feed (see
@@ -69,6 +139,34 @@ public sealed class MarketDataOptions
     /// <summary>WebSocket endpoint, e.g. <c>ws://market-data-platform:8080/ws</c>.
     /// Leave unset to run with static RefPrice anchors only.</summary>
     public string? WsUrl { get; set; }
+
+    /// <summary>
+    /// Behavior when a fresh per-symbol live reference is unavailable.
+    /// StaticRefPrice preserves the historical fallback and is the default.
+    /// </summary>
+    public FeedLossPolicy FeedLossPolicy { get; set; } = FeedLossPolicy.StaticRefPrice;
+
+    /// <summary>
+    /// Maximum age of a current-connection-epoch reference under
+    /// PauseAndCancel. Ignored by StaticRefPrice.
+    /// </summary>
+    public TimeSpan MaxReferenceAge { get; set; } = TimeSpan.FromSeconds(30);
+}
+
+public enum FeedLossPolicy
+{
+    StaticRefPrice,
+    PauseAndCancel,
+}
+
+public sealed class MarketMakerTelemetryOptions
+{
+    /// <summary>Cadence for structured per-symbol position/P&amp;L logs.</summary>
+    public TimeSpan SnapshotInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Maximum live-market mark age allowed for unrealized P&amp;L.
+    /// Missing, disconnected, or older marks suppress that measurement.</summary>
+    public TimeSpan MarkMaxAge { get; set; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>One instrument the bot quotes. <see cref="SecurityId"/> must
@@ -100,4 +198,52 @@ public sealed class InstrumentConfig
     /// <see cref="RefPrice"/>.</summary>
     [Range(0, int.MaxValue)]
     public int SpreadTicks { get; set; } = 5;
+
+    /// <summary>
+    /// Optional inventory-aware mid-price shift. Disabled by default so the
+    /// historical symmetric quote behavior remains unchanged.
+    /// </summary>
+    public InventorySkewConfig InventorySkew { get; set; } = new();
+
+    /// <summary>
+    /// Optional trade-driven widening added to <see cref="SpreadTicks"/>.
+    /// Disabled by default so historical static-spread pricing is unchanged.
+    /// </summary>
+    public VolatilitySpreadConfig VolatilitySpread { get; set; } = new();
+}
+
+public sealed class InventorySkewConfig
+{
+    /// <summary>Whether this instrument's quotes react to process-local inventory.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Absolute inventory, in lots, at which the configured maximum shift is
+    /// reached. This is only a normalization/saturation band, not a risk limit.
+    /// </summary>
+    public long FullSkewAtLots { get; set; } = 10;
+
+    /// <summary>Maximum absolute mid-price shift, in ticks.</summary>
+    public decimal MaxSkewTicks { get; set; } = 5m;
+}
+
+public sealed class VolatilitySpreadConfig
+{
+    /// <summary>Whether valid market-data trades may widen this instrument's spread.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Maximum age of absolute trade-to-trade move samples.</summary>
+    public TimeSpan Window { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>Hard per-symbol sample-count bound.</summary>
+    public int MaxSamples { get; set; } = 120;
+
+    /// <summary>Samples required before dynamic widening becomes active.</summary>
+    public int MinSamples { get; set; } = 10;
+
+    /// <summary>Scale applied to the arithmetic mean move in ticks before ceiling.</summary>
+    public decimal Multiplier { get; set; } = 1m;
+
+    /// <summary>Maximum dynamic ticks added to the configured half-spread.</summary>
+    public int MaxAdditionalSpreadTicks { get; set; } = 20;
 }

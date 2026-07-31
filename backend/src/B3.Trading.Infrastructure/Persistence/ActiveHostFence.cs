@@ -10,6 +10,7 @@ namespace B3.Trading.Infrastructure.Persistence;
 public sealed class ActiveHostFence : IDisposable
 {
     private const int EpochFileVersion = 1;
+    private const string MaintenanceLockFileName = "maintenance.lock";
 
     private readonly object _gate = new();
     private readonly PersistenceOptions _persistence;
@@ -78,6 +79,13 @@ public sealed class ActiveHostFence : IDisposable
                 var deploymentRoot = ResolveDeploymentRoot(_persistence);
                 var fenceRoot = Path.Combine(deploymentRoot, "active-host");
                 Directory.CreateDirectory(fenceRoot);
+                _leases.Add(new FileStream(
+                    Path.Combine(fenceRoot, MaintenanceLockFileName),
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 1,
+                    FileOptions.WriteThrough));
                 foreach (var firmId in RequiredFirmIds.OrderBy(static firm => firm, StringComparer.Ordinal))
                 {
                     var path = Path.Combine(fenceRoot, $"{HashFirmId(firmId)}.lock");

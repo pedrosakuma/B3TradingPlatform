@@ -327,7 +327,27 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public void Apply(OutboundTransportWriteCompletedEvent evt)
+    /// <summary>
+    /// Applies transport-write-completion evidence. Returns <c>true</c> when
+    /// the write is known complete, either because the attempt reaches
+    /// <see cref="OutboundMutationState.TransportWriteCompleted"/> or because
+    /// stronger venue evidence already moved it to
+    /// <see cref="OutboundMutationState.VenueAcknowledged"/>. Returns
+    /// <c>false</c> when the evidence was accepted but diverted the mutation
+    /// to <see cref="OutboundMutationState.Ambiguous"/> instead (races
+    /// described below) — callers MUST check this and treat it like
+    /// <c>MarkAmbiguous</c>/reconciliation-required, not like a clean
+    /// dispatch, even though no exception was thrown.
+    /// </summary>
+    public bool Apply(OutboundTransportWriteCompletedEvent evt)
+        => ApplyTransportWriteCompleted(evt, allowMissingFramePrepared: false);
+
+    public bool ApplyRecovered(OutboundTransportWriteCompletedEvent evt)
+        => ApplyTransportWriteCompleted(evt, allowMissingFramePrepared: true);
+
+    private bool ApplyTransportWriteCompleted(
+        OutboundTransportWriteCompletedEvent evt,
+        bool allowMissingFramePrepared)
     {
         ArgumentNullException.ThrowIfNull(evt);
         lock (_gate)
@@ -338,8 +358,85 @@ public sealed class OutboundMutationLedger
             {
                 if (existing == evt.CompletedAtUtc
                     && attempt.GatewayReceiptVersion == evt.GatewayReceiptVersion)
-                    return;
+                    return mutation.State is OutboundMutationState.TransportWriteCompleted
+                        or OutboundMutationState.VenueAcknowledged;
                 throw TransitionError("Conflicting transport-write evidence.");
+            }
+            if (allowMissingFramePrepared
+                && mutation.State == OutboundMutationState.AttemptIntentPrepared
+                && attempt.FramePrepared is null
+                && index == mutation.Attempts.Count - 1)
+            {
+                var recoveredAttempt = attempt with
+                {
+                    TransportWriteCompletedAtUtc = evt.CompletedAtUtc,
+                    GatewayReceiptVersion = evt.GatewayReceiptVersion,
+                    AmbiguityReason = OutboundAmbiguityReason.MissingFramePreparedEvidence,
+                };
+                _mutations[evt.MutationId] = ReplaceAttempt(
+                    mutation,
+                    index,
+                    recoveredAttempt,
+                    OutboundMutationState.Ambiguous,
+                    evt.TimestampUtc,
+                    requiresReconciliation: true);
+                return false;
+            }
+            // Late-arriving genuine transport-write evidence can race
+            // ClassifySessionRolledAttempts: that reclassifier speculatively
+            // marks a still-in-flight FramePrepared attempt Ambiguous
+            // (SessionRolledFramePrepared) as soon as its session rolls,
+            // without waiting for (or being able to observe) the owning
+            // coordinator's own in-progress gateway write, which may
+            // legitimately complete moments later on the pre-roll transport
+            // handle it already held. Unlike the throw below — a genuine
+            // ordering violation — this is real evidence resolving exactly
+            // the open question the speculative reclassification left
+            // unanswered ("did the write land"), so it is accepted and
+            // upgrades the ambiguity reason to SessionRolledTransportWriteCompleted
+            // (mirroring PlanSessionRolledAttempts' own choice of reason for
+            // attempts it finds already in that state) rather than being
+            // rejected as an ordering violation. The mutation stays
+            // Ambiguous/RequiresReconciliation either way: a completed write
+            // after a session roll still lacks proof the venue processed it
+            // on that session, so reconciliation remains required.
+            if (mutation.State == OutboundMutationState.Ambiguous
+                && attempt.AmbiguityReason == OutboundAmbiguityReason.SessionRolledFramePrepared
+                && attempt.FramePrepared is not null
+                && index == mutation.Attempts.Count - 1)
+            {
+                var lateAttempt = attempt with
+                {
+                    TransportWriteCompletedAtUtc = evt.CompletedAtUtc,
+                    GatewayReceiptVersion = evt.GatewayReceiptVersion,
+                    AmbiguityReason = OutboundAmbiguityReason.SessionRolledTransportWriteCompleted,
+                };
+                _mutations[evt.MutationId] = ReplaceAttempt(
+                    mutation, index, lateAttempt,
+                    OutboundMutationState.Ambiguous, evt.TimestampUtc,
+                    requiresReconciliation: true);
+                return false;
+            }
+            // The venue can acknowledge a frame before SubmitWithReceiptAsync
+            // returns to the coordinator. That acknowledgement is stronger
+            // evidence that the transport write landed, so retain the terminal
+            // state and resolution while filling in the late receipt evidence.
+            if (mutation.State == OutboundMutationState.VenueAcknowledged
+                && attempt.FramePrepared is not null
+                && index == mutation.Attempts.Count - 1)
+            {
+                var acknowledgedAttempt = attempt with
+                {
+                    TransportWriteCompletedAtUtc = evt.CompletedAtUtc,
+                    GatewayReceiptVersion = evt.GatewayReceiptVersion,
+                };
+                _mutations[evt.MutationId] = ReplaceAttempt(
+                    mutation,
+                    index,
+                    acknowledgedAttempt,
+                    mutation.State,
+                    mutation.StateChangedAtUtc);
+                return true;
             }
             if (mutation.State != OutboundMutationState.FramePrepared
                 || attempt.FramePrepared is null
@@ -353,6 +450,7 @@ public sealed class OutboundMutationLedger
             _mutations[evt.MutationId] = ReplaceAttempt(
                 mutation, index, updatedAttempt,
                 OutboundMutationState.TransportWriteCompleted, evt.TimestampUtc);
+            return true;
         }
     }
 
@@ -425,7 +523,15 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public void Apply(OutboundOperatorResolutionProposedEvent evt)
+    public void Apply(OutboundOperatorResolutionProposedEvent evt) =>
+        ApplyOperatorResolutionProposed(evt, allowRecoveredPreclassification: false);
+
+    public void ApplyRecovered(OutboundOperatorResolutionProposedEvent evt) =>
+        ApplyOperatorResolutionProposed(evt, allowRecoveredPreclassification: true);
+
+    private void ApplyOperatorResolutionProposed(
+        OutboundOperatorResolutionProposedEvent evt,
+        bool allowRecoveredPreclassification)
     {
         ArgumentNullException.ThrowIfNull(evt);
         if (evt.ProposalId.Value == Guid.Empty
@@ -452,7 +558,9 @@ public sealed class OutboundMutationLedger
                     return;
                 throw TransitionError("Conflicting operator resolution proposal.");
             }
-            if (!CanOperatorResolve(mutation))
+            if (!CanOperatorResolve(mutation)
+                && !(allowRecoveredPreclassification
+                    && CanReplayAfterEphemeralClassification(mutation)))
                 throw TransitionError("Operator resolution is not valid in the current state.");
             if (mutation.ResolutionProposals.Any(proposal => proposal.ApprovedAtUtc is null))
                 throw TransitionError("A maker/checker proposal is already pending.");
@@ -492,7 +600,15 @@ public sealed class OutboundMutationLedger
         }
     }
 
-    public void Apply(OutboundOperatorResolvedEvent evt)
+    public void Apply(OutboundOperatorResolvedEvent evt) =>
+        ApplyOperatorResolved(evt, allowRecoveredPreclassification: false);
+
+    public void ApplyRecovered(OutboundOperatorResolvedEvent evt) =>
+        ApplyOperatorResolved(evt, allowRecoveredPreclassification: true);
+
+    private void ApplyOperatorResolved(
+        OutboundOperatorResolvedEvent evt,
+        bool allowRecoveredPreclassification)
     {
         ArgumentNullException.ThrowIfNull(evt);
         ValidateOperatorEvidencePair(evt.Decision, evt.EvidenceType, evt.ReleaseCapacity);
@@ -538,8 +654,21 @@ public sealed class OutboundMutationLedger
                 && mutation.State is OutboundMutationState.OperatorResolved
                     or OutboundMutationState.VenueAcknowledged)
                 throw TransitionError("Outbound mutation already has a terminal operator resolution.");
-            if (!CanOperatorResolve(mutation))
+            if (!CanOperatorResolve(mutation)
+                && !(allowRecoveredPreclassification
+                    && CanReplayAfterEphemeralClassification(mutation)))
                 throw TransitionError("Operator resolution is not valid in the current state.");
+            ulong? venueOrderId = null;
+            if (evt.Decision == OutboundOperatorDecision.VenueAcknowledged &&
+                evt.EvidenceType == OutboundOperatorEvidenceType.TerminalExecutionReport &&
+                evt.EvidenceReference is { } venueEvidenceReference &&
+                HasAuthoritativeTerminalExecutionReportUnsafe(
+                    mutation,
+                    venueEvidenceReference,
+                    out var venueEvidence))
+            {
+                venueOrderId = venueEvidence.VenueOrderId;
+            }
             var proposals = mutation.ResolutionProposals.ToList();
             if (evt.ProposalId is { } proposalId)
             {
@@ -599,7 +728,7 @@ public sealed class OutboundMutationLedger
                 : OutboundMutationState.OperatorResolved;
             Terminalise(
                 mutation, terminalState, evt.ResolvedAtUtc,
-                evt.EvidenceType.ToString(), evt.EvidenceDigest, venueOrderId: null);
+                evt.EvidenceType.ToString(), evt.EvidenceDigest, venueOrderId);
         }
     }
 
@@ -1418,6 +1547,127 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    /// <summary>
+    /// Cold-start's <see cref="ClassifyRecoveredAttempts"/> only reclassifies
+    /// attempts whose <see cref="OutboundProcessEpoch"/> died with a process
+    /// restart. Within a single long-running process, a CONFIRMED FIXP
+    /// session roll (#380/#512) discards the venue's per-session state just
+    /// as thoroughly, but leaves any attempt whose frame was prepared on the
+    /// superseded session stuck in FramePrepared/TransportWriteCompleted
+    /// forever: no execution report can ever arrive over a session that no
+    /// longer exists, and no other reactor revisits it. That silently blocks
+    /// every later genuine cancel/replace on the same original order via
+    /// <see cref="TryGetActiveForOriginal"/> (#749) without ever setting
+    /// <c>RequiresReconciliation</c>, so operator/reconciliation tooling has
+    /// no signal to act on either. Plan (dry-run) + Classify mirror the
+    /// dead-epoch pair exactly, keyed on the attempt's committed
+    /// <see cref="OutboundFramePreparedEvent.SessionVerId"/> instead of the
+    /// process epoch, scoped to the rolled firm.
+    /// </summary>
+    public IReadOnlyList<RecoveredOutboundAttemptClassification> PlanSessionRolledAttempts(
+        string firmId,
+        uint currentSessionVerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        lock (_gate)
+        {
+            var result = new List<RecoveredOutboundAttemptClassification>();
+            foreach (var mutation in _mutations.Values)
+            {
+                if (!string.Equals(mutation.FirmId, firmId, StringComparison.Ordinal)
+                    || mutation.Attempts.Count == 0
+                    || IsTerminal(mutation.State))
+                    continue;
+                var attempt = mutation.Attempts[^1];
+                if (attempt.FramePrepared is not { } framePrepared
+                    || framePrepared.SessionVerId >= currentSessionVerId
+                    || attempt.ProvenUnsentEvidence is not null
+                    || attempt.AmbiguityReason is not null)
+                {
+                    continue;
+                }
+                result.Add(new RecoveredOutboundAttemptClassification(
+                    mutation.MutationId,
+                    attempt.AttemptId,
+                    mutation.FirmId,
+                    RecoveredOutboundAttemptDisposition.Ambiguous,
+                    null,
+                    attempt.TransportWriteCompletedAtUtc is null
+                        ? OutboundAmbiguityReason.SessionRolledFramePrepared
+                        : OutboundAmbiguityReason.SessionRolledTransportWriteCompleted));
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Applies <see cref="PlanSessionRolledAttempts"/> for a firm that just
+    /// had a confirmed session roll, marking each still-stuck attempt
+    /// Ambiguous (the same <see cref="OutboundMutationState.Ambiguous"/>
+    /// transition <see cref="ClassifyRecoveredAttempts"/> uses, so
+    /// <c>RequiresReconciliation</c> flips true and the mutation surfaces to
+    /// operator/reconciliation tooling exactly like a dead-epoch attempt
+    /// would). This does not change <see cref="TryGetActiveForOriginal"/>'s
+    /// dedup guard — that stays intentionally blocking (no retry on
+    /// unresolved ambiguity is a deliberate invariant) until the ambiguity is
+    /// resolved with real venue evidence. Re-validates each classification
+    /// under a single lock (mirroring <see cref="ClassifyRecoveredAttempts"/>)
+    /// rather than trusting the Plan snapshot, because a genuine execution
+    /// report can concurrently resolve a mutation between Plan and Classify.
+    /// Not itself WAL-recorded: like cold-start reclassification, it is
+    /// safely re-derivable — a crash before this runs leaves the attempt in
+    /// its last WAL state, and the next cold start's
+    /// <see cref="ClassifyRecoveredAttempts"/> will reclassify it as
+    /// dead-epoch instead.
+    /// </summary>
+    public int ClassifySessionRolledAttempts(
+        string firmId,
+        uint currentSessionVerId,
+        DateTimeOffset atUtc)
+    {
+        var classifications = PlanSessionRolledAttempts(firmId, currentSessionVerId);
+        lock (_gate)
+        {
+            var changed = 0;
+            foreach (var classification in classifications)
+            {
+                // Re-validate against the current state under this single
+                // lock acquisition — mirrors ClassifyRecoveredAttempts
+                // (lines ~1378-1384). Plan (above) took its own lock and
+                // released it, so the mutation may have genuinely resolved
+                // (e.g. a real execution report finalised it to
+                // VenueAcknowledged) in between; without this re-check,
+                // MarkAmbiguous would blindly force a resolved mutation back
+                // to Ambiguous.
+                if (!_mutations.TryGetValue(classification.MutationId, out var mutation)
+                    || mutation.Attempts.Count == 0
+                    || IsTerminal(mutation.State))
+                {
+                    continue;
+                }
+                var attempt = mutation.Attempts[^1];
+                if (attempt.AttemptId != classification.AttemptId
+                    || attempt.FramePrepared is null
+                    || attempt.AmbiguityReason is not null)
+                {
+                    continue;
+                }
+                var reason = classification.AmbiguityReason
+                    ?? throw new InvalidOperationException(
+                        "Session-rolled ambiguous classification lacks a reason.");
+                _mutations[classification.MutationId] = ReplaceAttempt(
+                    mutation,
+                    mutation.Attempts.Count - 1,
+                    attempt with { AmbiguityReason = reason },
+                    OutboundMutationState.Ambiguous,
+                    atUtc,
+                    requiresReconciliation: true);
+                changed++;
+            }
+            return changed;
+        }
+    }
+
     public void MarkAmbiguous(
         OutboundMutationId mutationId,
         OutboundAttemptId attemptId,
@@ -1455,6 +1705,85 @@ public sealed class OutboundMutationLedger
                 .Where(m => m.Kind == kind && m.State == state)
                 .OrderBy(m => m.RecordedAtUtc)
                 .ToArray();
+    }
+
+    /// <summary>
+    /// True when the end-client identified by <paramref name="endClientRef"/>
+    /// (the pseudonymized reference produced by
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRef"/> —
+    /// never a plaintext identity) currently has an outbound mutation that
+    /// is unsafe to build atop: any non-terminal state, OR a terminal state
+    /// still flagged <see cref="OutboundMutationSnapshot.RequiresReconciliation"/>.
+    /// A terminal-but-reconciliation-required mutation still blocks because
+    /// the venue outcome is not yet authoritative.
+    ///
+    /// <para>
+    /// Added for the admin account-reset fail-closed guard (RFC #753 /
+    /// #671); tracked alongside the outbound-mutation-ledger epic (#628)
+    /// rather than as a separate epic sub-task. Callers resolve the
+    /// <paramref name="endClientRef"/> via <see cref="IOutboundCommandProtector"/>
+    /// before calling — this method never sees plaintext end-client identity.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Stable-reference key rotation:</b> this single-reference overload
+    /// only checks the one digest supplied by the caller — typically
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRef"/>,
+    /// which reflects only the <i>currently active</i> stable-reference
+    /// key. If that key has ever been rotated, a mutation recorded under a
+    /// still-supported historical key would carry a different digest and
+    /// be silently invisible here. Callers that must be robust to
+    /// historical-key rotation should use the
+    /// <see cref="HasNonTerminalMutationForEndClientRef(string, IReadOnlyCollection{string})"/>
+    /// overload with
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRefCandidates"/>
+    /// instead.
+    /// </para>
+    /// </summary>
+    public bool HasNonTerminalMutationForEndClientRef(string firmId, string endClientRef)
+        => HasNonTerminalMutationForEndClientRef(firmId, [endClientRef]);
+
+    /// <summary>
+    /// Overload of <see cref="HasNonTerminalMutationForEndClientRef(string, string)"/>
+    /// that checks membership against a whole set of candidate pseudonymized
+    /// end-client references rather than a single digest. Intended for the
+    /// stable-reference key-rotation case: the caller (typically the
+    /// account-reset guard, #671 / RFC #753) computes one candidate per
+    /// still-supported key via
+    /// <see cref="IOutboundCommandProtector.CreateStableEndClientRefCandidates"/>
+    /// so a mutation recorded under any historical key — not just the
+    /// currently active one — still blocks. This method stays crypto-agnostic:
+    /// it never derives, rotates, or persists keys itself, it only checks set
+    /// membership under the existing <see cref="_gate"/>.
+    /// </summary>
+    public bool HasNonTerminalMutationForEndClientRef(
+        string firmId,
+        IReadOnlyCollection<string> endClientRefCandidates)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentNullException.ThrowIfNull(endClientRefCandidates);
+        if (endClientRefCandidates.Count == 0)
+        {
+            throw new ArgumentException(
+                "At least one end-client reference candidate is required.",
+                nameof(endClientRefCandidates));
+        }
+        var candidates = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in endClientRefCandidates)
+        {
+            if (!IsLowerHex(candidate, 32))
+            {
+                throw new ArgumentException(
+                    "Each end-client reference candidate must be a 32-character lowercase hex digest.",
+                    nameof(endClientRefCandidates));
+            }
+            candidates.Add(candidate);
+        }
+        lock (_gate)
+            return _mutations.Values.Any(m =>
+                string.Equals(m.FirmId, firmId, StringComparison.Ordinal)
+                && candidates.Contains(m.EndClientRef)
+                && (!IsTerminal(m.State) || m.RequiresReconciliation));
     }
 
     public int ReconcileLegacyPendingState(
@@ -2989,6 +3318,17 @@ public sealed class OutboundMutationLedger
             or OutboundMutationState.LegacyUnknown
             or OutboundMutationState.LegacyUnknownCancel
             or OutboundMutationState.LegacyUnknownReplace;
+
+    private static bool CanReplayAfterEphemeralClassification(
+        OutboundMutationSnapshot mutation) =>
+        mutation.State is OutboundMutationState.FramePrepared
+            or OutboundMutationState.TransportWriteCompleted
+        && mutation.Attempts.LastOrDefault() is
+        {
+            FramePrepared: not null,
+            ProvenUnsentEvidence: null,
+            AmbiguityReason: null,
+        };
 
     private static bool HasRegisteredAuthoritativeEvidence(
         OutboundMutationSnapshot mutation,

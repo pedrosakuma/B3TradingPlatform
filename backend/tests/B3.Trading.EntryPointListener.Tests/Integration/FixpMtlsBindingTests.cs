@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using B3.Entrypoint.Fixp.Sbe.V6;
@@ -44,6 +45,22 @@ public sealed class FixpMtlsBindingTests : IDisposable
         FixpListenerHostedService Listener,
         InMemoryUserBotCredentialRegistry Credentials,
         InMemoryUserBotSessionRegistry Sessions);
+
+    private enum NegotiateOutcomeKind
+    {
+        Frame,
+        TlsRejected,
+        ConnectionClosed,
+        ProtocolError,
+    }
+
+    private readonly record struct NegotiateOutcome(
+        NegotiateOutcomeKind Kind,
+        ushort? TemplateId = null)
+    {
+        public static NegotiateOutcome Frame(ushort templateId) =>
+            new(NegotiateOutcomeKind.Frame, templateId);
+    }
 
     private string WriteServerPfx()
     {
@@ -90,18 +107,6 @@ public sealed class FixpMtlsBindingTests : IDisposable
             host.Services.GetRequiredService<InMemoryUserBotSessionRegistry>());
     }
 
-    private static async Task<SslStream> TlsConnectAsync(IPEndPoint ep, X509Certificate2? clientCert)
-    {
-        var tcp = new TcpClient();
-        await tcp.ConnectAsync(ep);
-        var ssl = new SslStream(tcp.GetStream(), false, (_, _, _, _) => true);
-        var authOptions = new SslClientAuthenticationOptions { TargetHost = "localhost" };
-        if (clientCert is not null)
-            authOptions.ClientCertificates = new X509CertificateCollection { clientCert };
-        await ssl.AuthenticateAsClientAsync(authOptions);
-        return ssl;
-    }
-
     private static byte[] BuildNegotiateFrame(uint sessionId, ulong sessionVerId, string token)
     {
         var tokenBytes = Encoding.UTF8.GetBytes(token);
@@ -121,85 +126,148 @@ public sealed class FixpMtlsBindingTests : IDisposable
         return buf;
     }
 
-    private static async Task<ushort?> ReadTemplateIdAsync(Stream stream, CancellationToken ct)
+    private static async Task<NegotiateOutcome> ExchangeNegotiateAsync(
+        IPEndPoint ep,
+        X509Certificate2? clientCert,
+        byte[] negotiateFrame,
+        CancellationToken ct)
     {
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync(ep, ct);
+        using var ssl = new SslStream(tcp.GetStream(), false, (_, _, _, _) => true);
+
+        var authOptions = new SslClientAuthenticationOptions { TargetHost = "localhost" };
+        if (clientCert is not null)
+            authOptions.ClientCertificates = new X509CertificateCollection { clientCert };
+
+        try
+        {
+            await ssl.AuthenticateAsClientAsync(authOptions, ct);
+        }
+        catch (Exception ex) when (ex is AuthenticationException or IOException)
+        {
+            return new(NegotiateOutcomeKind.TlsRejected);
+        }
+
+        try
+        {
+            await ssl.WriteAsync(negotiateFrame, ct);
+        }
+        catch (Exception ex) when (ex is AuthenticationException or IOException)
+        {
+            return new(NegotiateOutcomeKind.ConnectionClosed);
+        }
+
         var reader = new SofhFrameReader();
         var buf = new byte[4096];
         while (true)
         {
             if (reader.TryReadFrame(out var frame))
-                return frame.TemplateId;
-            if (reader.HasProtocolError) return null;
-            var n = await stream.ReadAsync(buf, ct).ConfigureAwait(false);
-            if (n == 0) return null;
+                return NegotiateOutcome.Frame(frame.TemplateId);
+            if (reader.HasProtocolError)
+                return new(NegotiateOutcomeKind.ProtocolError);
+
+            int n;
+            try
+            {
+                n = await ssl.ReadAsync(buf, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is AuthenticationException or IOException)
+            {
+                return new(NegotiateOutcomeKind.ConnectionClosed);
+            }
+
+            if (n == 0)
+                return new(NegotiateOutcomeKind.ConnectionClosed);
             reader.Append(buf.AsSpan(0, n));
         }
     }
 
-    private async Task<ushort?> NegotiateOutcomeAsync(
+    private async Task<NegotiateOutcome> NegotiateOutcomeAsync(
         ClientCertificateMode mode,
         Func<X509Certificate2, (string? pin, X509Certificate2? presented)> arrange)
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var ca = CertTestUtil.CreateCaCertificate("B3 Bot CA");
         var bundle = CertTestUtil.WritePemBundle(_dir, "ca.pem", ca);
         var (pin, presented) = arrange(ca);
 
         var host = BuildHost(mode, bundle);
+        var started = false;
         try
         {
-            await host.Host.StartAsync(cts.Token);
-            var ep = await host.Listener.WhenBound.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await host.Host.StartAsync();
+            started = true;
+            var ep = await host.Listener.WhenBound.WaitAsync(TimeSpan.FromSeconds(5));
 
-            var created = await host.Credentials.CreateAsync("bot-user", "binding", pin, cts.Token);
-            var state = await host.Sessions.GetOrCreateAsync(created.Credential.Id, cts.Token);
+            var created = await host.Credentials.CreateAsync(
+                "bot-user", "binding", pin, CancellationToken.None);
+            var state = await host.Sessions.GetOrCreateAsync(
+                created.Credential.Id, CancellationToken.None);
+            var frame = BuildNegotiateFrame(
+                state.SessionId, state.CurrentVer, created.PlainToken);
 
-            using var ssl = await TlsConnectAsync(ep, presented);
-            await ssl.WriteAsync(
-                BuildNegotiateFrame(state.SessionId, state.CurrentVer, created.PlainToken), cts.Token);
-            return await ReadTemplateIdAsync(ssl, cts.Token);
+            // Certificate generation is CPU-heavy under parallel test load;
+            // bound the live exchange rather than consuming its budget in setup.
+            using var negotiateCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            return await ExchangeNegotiateAsync(ep, presented, frame, negotiateCts.Token);
         }
         finally
         {
             presented?.Dispose();
-            await host.Host.StopAsync();
+            try
+            {
+                if (started)
+                {
+                    await host.Host.StopAsync(CancellationToken.None);
+                    Assert.Equal(0, host.Listener.ActiveConnectionTaskCount);
+                }
+            }
+            finally
+            {
+                host.Host.Dispose();
+            }
         }
     }
 
     [Fact(Timeout = 20_000)]
     public async Task PinnedCredential_MatchingCert_NegotiateAccepted()
     {
-        var tid = await NegotiateOutcomeAsync(ClientCertificateMode.Required, ca =>
+        var outcome = await NegotiateOutcomeAsync(ClientCertificateMode.Required, ca =>
         {
             var leaf = CertTestUtil.CreateSignedLeaf(ca, "bot-1");
             return (CertTestUtil.Sha256Thumbprint(leaf), leaf);
         });
-        Assert.Equal((ushort)NegotiateResponseData.MESSAGE_ID, tid);
+        Assert.Equal(
+            NegotiateOutcome.Frame((ushort)NegotiateResponseData.MESSAGE_ID),
+            outcome);
     }
 
     [Fact(Timeout = 20_000)]
     public async Task PinnedCredential_WrongCert_NegotiateRejected()
     {
-        var tid = await NegotiateOutcomeAsync(ClientCertificateMode.Required, ca =>
+        var outcome = await NegotiateOutcomeAsync(ClientCertificateMode.Required, ca =>
         {
-            using var pinnedLeaf = CertTestUtil.CreateSignedLeaf(ca, "bot-pinned");
-            var pin = CertTestUtil.Sha256Thumbprint(pinnedLeaf);
-            // Present a *different* (but trusted) leaf — chain passes, pin fails.
             var presented = CertTestUtil.CreateSignedLeaf(ca, "bot-other");
+            var actualThumbprint = CertTestUtil.Sha256Thumbprint(presented);
+            var pin = (actualThumbprint[0] == '0' ? '1' : '0') + actualThumbprint[1..];
             return (pin, presented);
         });
-        Assert.Equal((ushort)NegotiateRejectData.MESSAGE_ID, tid);
+        Assert.Equal(
+            NegotiateOutcome.Frame((ushort)NegotiateRejectData.MESSAGE_ID),
+            outcome);
     }
 
     [Fact(Timeout = 20_000)]
     public async Task UnpinnedCredential_AnyTrustedCert_NegotiateAccepted()
     {
-        var tid = await NegotiateOutcomeAsync(ClientCertificateMode.Required, ca =>
+        var outcome = await NegotiateOutcomeAsync(ClientCertificateMode.Required, ca =>
         {
             var leaf = CertTestUtil.CreateSignedLeaf(ca, "bot-unpinned");
             return (null!, leaf); // null pin = unpinned
         });
-        Assert.Equal((ushort)NegotiateResponseData.MESSAGE_ID, tid);
+        Assert.Equal(
+            NegotiateOutcome.Frame((ushort)NegotiateResponseData.MESSAGE_ID),
+            outcome);
     }
 
     [Fact(Timeout = 20_000)]
@@ -207,11 +275,13 @@ public sealed class FixpMtlsBindingTests : IDisposable
     {
         // RFC §4.3: under Optional the pin is enforced only when a cert is
         // presented; a certless connection still authenticates by PAT alone.
-        var tid = await NegotiateOutcomeAsync(ClientCertificateMode.Optional, ca =>
+        var outcome = await NegotiateOutcomeAsync(ClientCertificateMode.Optional, ca =>
         {
             using var pinnedLeaf = CertTestUtil.CreateSignedLeaf(ca, "bot-pinned");
             return (CertTestUtil.Sha256Thumbprint(pinnedLeaf), null);
         });
-        Assert.Equal((ushort)NegotiateResponseData.MESSAGE_ID, tid);
+        Assert.Equal(
+            NegotiateOutcome.Frame((ushort)NegotiateResponseData.MESSAGE_ID),
+            outcome);
     }
 }

@@ -158,6 +158,44 @@ public in this repo. See
 for tuning, safety notes, and what is intentionally out of scope (live
 MD ticks, real-stack cross-firm bots).
 
+## Sample bot (authenticated end-client smoke)
+
+Want to see what an *ordinary end-client integration* looks like, not a
+demo/simulation shortcut? [`backend/tools/B3.Trading.SampleBot`](backend/tools/B3.Trading.SampleBot)
+is a small one-shot .NET console that authenticates through the same
+`POST /api/auth/login` a browser uses, opens the same authenticated
+`/ws`, subscribes to `B3MarketDataPlatform`'s public feed, submits one
+bounded REST order, and reconciles before exiting. It never receives a
+`matching-platform` endpoint or FIXP credential — that's enforced at
+the option-validation layer, not just documented.
+
+```bash
+cp docker/.env.example docker/.env
+# edit docker/.env — TRADING_AUTH_SIGNING_KEY is mandatory (>= 32 bytes)
+
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.market-maker.yml \
+    -f docker/docker-compose.sample-bot.yml \
+    up -d --build --wait trading-host market-maker-bot
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.market-maker.yml \
+    -f docker/docker-compose.sample-bot.yml \
+    run --rm --no-deps --build sample-bot
+```
+
+`LocalPassword` auth is the required default; `ExternalExchange` and
+`InternalToken` cover the Hybrid/Entra and supplied-token cases. The
+default order is deliberately priced away from the reference price, so
+the expected outcome on a clean run is submit -> observe `Working` ->
+timeout -> best-effort cancel -> `Cancelled`, with `GET /api/orders`
+showing no working order left behind — not a guaranteed fill. See
+[docs/DOCKER.md § Sample-bot overlay](docs/DOCKER.md#sample-bot-overlay-opt-in-authenticated-end-client-smoke-722)
+for auth-mode details, the optional sub-account flow, safety notes, and
+how this differs from `DemoDriver`, `MarketMakerBot`, and the external
+FIXP user-bot listener.
+
 ## Documentation
 
 Start at [`docs/README.md`](docs/README.md) for the full index — it
@@ -167,6 +205,8 @@ this repo. Highlights:
 - [Architecture](docs/ARCHITECTURE.md) — layered model, wire boundary, ER routing.
 - [FIXP listener — operations](docs/operations/fixp-listener.md) — the third inbound channel.
 - [Docker](docs/DOCKER.md) — canonical container topology + overlays.
+- [Market-maker strategy soak](docs/operations/market-maker-soak.md) —
+  reproducible baseline, feature, and feed-loss evidence procedure.
 - [WebSocket protocol](docs/WEBSOCKET-PROTOCOL.md) and [Frontend](docs/FRONTEND.md).
 
 ## Bootstrap scope (issue #1)

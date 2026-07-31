@@ -33,8 +33,8 @@ docker compose \
 
 | Service | Image | Port (host) | Purpose |
 |---|---|---|---|
-| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching@sha256:…` (pinned — see [Bumping the matching image](#bumping-the-matching-image)) | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/api/admin/channels/*` snapshot ops |
-| `marketdata` | `ghcr.io/pedrosakuma/b3-marketdata:latest` | `8081` | UMDF unicast consumer (`30084/30184/31084 udp`) + WebSocket fanout (`:8080`) |
+| `matching-platform` | `ghcr.io/pedrosakuma/b3-matching@sha256:…` (pinned — see [Bumping the matching and marketdata images](#bumping-the-matching-and-marketdata-images)) | (internal `:9876`, `:8080`) | FIXP TCP listener + UMDF unicast publisher + `/api/admin/channels/*` snapshot ops |
+| `marketdata` | `ghcr.io/pedrosakuma/b3-marketdata@sha256:…` (pinned with matching) | `8081` | UMDF unicast consumer (`30084/30184/31084 udp`) + WebSocket fanout (`:8080`) |
 | `trading-host` | `ghcr.io/pedrosakuma/b3-trading-host:latest` | `5000` | REST + WebSocket; `Mode=Real`, FIRM01 session against matching, live `IReferencePrice` wired through marketdata WS |
 | `frontend` | `ghcr.io/pedrosakuma/b3-trading-frontend:latest` | `8080` | nginx serving the static UI + reverse-proxy to trading-host |
 
@@ -202,7 +202,7 @@ injection vs. a real matching engine) and are not meant to compose.
 | Service | What it does |
 |---|---|
 | `trading-host` | stays `Mode=Real` (base default); `Trading__Sandbox__AllowSelfCashDeposit` flipped to `true` |
-| `market-maker-bot` | FIXP session 10102; one resting bid + ask per configured instrument; connects to the `marketdata` WS feed (best-effort) to anchor quotes on the live reference price instead of the static config `RefPrice` |
+| `market-maker-bot` | FIXP session 10102; one resting bid + ask per configured instrument; uses the `marketdata` WS feed with an explicit `StaticRefPrice` (default) or `PauseAndCancel` feed-loss policy |
 
 `market-maker-bot` is now published the same way as `trading-host`/`frontend`:
 CI builds+pushes a `candidate-<sha>` digest in the `trading-host` job,
@@ -230,15 +230,176 @@ overlay's `AllowErInjection`.
 ### Tuning
 
 The bot's instruments (`Symbol`/`SecurityId`/`RefPrice`/`TickSize`/
-`LotSize`/`QuoteLots`/`SpreadTicks`) and reconcile interval are set via
+`LotSize`/`QuoteLots`/`SpreadTicks`/`InventorySkew`/`VolatilitySpread`) and reconcile interval are set via
 `MarketMaker__*` env vars in `docker-compose.market-maker.yml` — see
 that file's inline comments for the full list. `MarketMaker__Instruments`
 must line up with `docker/real/instruments-eqt.json`'s `SecurityId`s
 (matching-platform's wire truth), which is independent of whatever
 `SecurityId` numbering `marketdata` itself uses for the same symbols.
 
+Feed-loss behavior is explicit and defaults to the legacy-compatible static
+fallback:
+
+```yaml
+MarketMaker__MarketData__WsUrl: ws://marketdata:8080/ws
+MarketMaker__MarketData__FeedLossPolicy: StaticRefPrice
+MarketMaker__MarketData__MaxReferenceAge: "00:00:30"
+```
+
+`StaticRefPrice` preserves the previous behavior exactly: live references are
+used while the socket is connected, and the configured instrument `RefPrice`
+is used before the first update or while disconnected. A reconnect may
+immediately reuse the retained live cache.
+
+Set `FeedLossPolicy=PauseAndCancel` for strict operation. It requires a
+nonblank absolute `WsUrl` and positive `MaxReferenceAge`. Each symbol remains
+paused until it receives a valid reference in the current connection epoch;
+disconnect/reconnecting/faulted state, a subscription error, no current-epoch
+update, or an over-age update suppresses new orders and repeatedly drives both
+active sides through the normal cancel-ack lifecycle. Initial connection
+failures keep the process alive and retry in the background while quotes stay
+paused. Reconnect alone is not sufficient: a fresh reference for that symbol
+is required before both missing sides resume.
+
+Cancel acknowledgements are also bounded:
+
+```yaml
+MarketMaker__CancelAckTimeout: "00:00:10"
+```
+
+If a transmitted cancel's execution report is lost, the bot expires only that
+matching pending marker after this positive timeout and retries through the
+existing reconcile/coalescing guards. The original order remains tracked as
+open until an authoritative cancel/fill ER arrives. Late cancel acknowledgements
+still close it, while late rejects of expired cancel IDs are recognized as
+cancel rejects and cannot free the original order as if they rejected a new
+submit. `MinRequoteInterval` continues to throttle strategy/feed retries.
+
+`MarketMaker__MaxOrderAge` is an order lease, not a missed-fill detector. Each
+healthy expiry submits a TTL refresh cancel at Information level and replaces
+that side after the authoritative cancel ACK. A brief one-sided book interval
+during this cancel/ACK/requote round trip is expected; it should end with the
+immediate replacement submit. Cancel rejection, synchronous cancel failure,
+`CancelAckTimeout`, or replacement-submit failure remain warnings because they
+mean the side could not be restored within the healthy cycle. An asynchronous
+replacement reject also emits one restoration warning plus
+`bot_orders_quote_restore_rejected_total`, while remaining included in the
+generic reject counter. The cancel trigger follows the side reservation, so a
+concurrent reconcile submit that wins before the direct requote is classified
+the same way. Monitor `bot_orders_ttl_refresh_total` as expected lifecycle
+volume, not as an incident.
+
+Startup cleanup is an explicit rollout opt-in with a separate, deliberately
+longer bound:
+
+```yaml
+MarketMaker__StartupCleanupEnabled: "false"
+MarketMaker__StartupCleanupTimeout: "00:05:00"
+```
+
+The default `false` preserves historical startup behavior and is the only safe
+setting with matching-platform versions from before
+[`B3MatchingPlatform#569`](https://github.com/pedrosakuma/B3MatchingPlatform/issues/569).
+Those versions emit `OrderMassActionReport(ACCEPTED)` before dispatcher
+execution, so neither that report nor a FIXP `Sequence` heartbeat is an
+execution barrier.
+
+If persisted state identifies a prior session that requires cleanup, the bot
+fails startup while this option is `false`; it never bypasses the compatibility
+opt-in or submits replacement quotes over potentially restored venue orders.
+
+Set `StartupCleanupEnabled=true` only after deploying a matching-platform
+release containing #569. Under that minimum contract, the solicited
+`MassActionExecuted(ACCEPTED)` correlated by the request `ClOrdID` is terminal:
+all cancellation ERs have already traversed the ordered FIXP business stream.
+The bot awaits both the outbound transport task and that terminal report before
+starting market data or submitting quotes. A legacy session can contain
+100,000 orders, so five minutes leaves production headroom without weakening
+the 10-second single-order cancel retry policy. Timeout, rejection, request
+failure, or event-stream failure terminates startup without quoting.
+
+Inventory skew is opt-in and defaults off independently for every
+instrument:
+
+```yaml
+MarketMaker__Instruments__0__InventorySkew__Enabled: "false"
+MarketMaker__Instruments__0__InventorySkew__FullSkewAtLots: "10"
+MarketMaker__Instruments__0__InventorySkew__MaxSkewTicks: "5"
+```
+
+When enabled, the bot reads signed net quantity from its process-local P&L
+ledger and shifts both sides' mid down while long or up while short. The shift
+scales linearly until `FullSkewAtLots * LotSize`, saturates at
+`MaxSkewTicks`, and is combined with the spread before the single final tick
+rounding. `FullSkewAtLots` is only the normalization/saturation band: it is
+not a position limit, does not suppress either side, and does not cap exposure.
+Each newly-accounted partial or full own fill reevaluates both resting sides
+through the normal throttled cancel-ack-then-requote path.
+
+Volatility-adaptive spread is also opt-in and defaults off per instrument:
+
+```yaml
+MarketMaker__Instruments__0__VolatilitySpread__Enabled: "false"
+MarketMaker__Instruments__0__VolatilitySpread__Window: "00:01:00"
+MarketMaker__Instruments__0__VolatilitySpread__MaxSamples: "120"
+MarketMaker__Instruments__0__VolatilitySpread__MinSamples: "10"
+MarketMaker__Instruments__0__VolatilitySpread__Multiplier: "1.0"
+MarketMaker__Instruments__0__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
+```
+
+When enabled, only valid `Trade` events contribute samples; repeated
+`InfoSnapshot` reference updates never count as returns. After the first trade,
+each absolute trade-to-trade move is measured in `TickSize` units, including
+zero moves. The bounded, age-pruned arithmetic mean is multiplied and rounded
+up, then capped before being added to the configured `SpreadTicks`. The static
+spread is always the floor, and both bid and ask use the same unified pricing
+decision and single final tick rounding.
+
+The estimator retains bounded state across market-data disconnects, but dynamic
+widening is disabled while disconnected: the existing `StaticRefPrice`
+fallback remains in force and quotes revert to the configured static spread.
+On reconnect, retained samples resume widening only if they are still inside
+`Window` and satisfy `MinSamples`; otherwise fresh valid trades must rebuild
+readiness. Under `PauseAndCancel`, the reference-readiness gate independently suppresses
+the symbol; retained volatility samples never bypass that gate.
+
+The standard OTLP meter exposes
+`bot.strategy.volatility_move_estimate_ticks` and
+`bot.strategy.volatility_additional_half_spread_ticks`, each tagged only by
+configured `symbol`; effective-tick changes also emit structured
+`[mm-volatility]` diagnostics.
+
+### Strategy soak evidence
+
+Use [`operations/market-maker-soak.md`](operations/market-maker-soak.md) and
+`scripts/soak/run-market-maker-soak.sh` for isolated static, inventory-skew,
+volatility-spread, and `PauseAndCancel` runs. The dedicated
+`docker-compose.market-maker-soak.yml` overlay routes the bot to the bundled
+Collector, parameterizes only the opt-in feature switches, and isolates
+container/network/volume names. It also pins `Trading__Auth__Mode=Local` plus
+local login and resolves the operator-selected trading/counterparty seed and
+risk mappings without recording credentials.
+Closure evidence uses one shared suite
+manifest and compares actual runtime `sha256:` image IDs across profiles;
+mutable tags alone are not accepted. It also proves container/image/start/restart
+continuity for all six critical services, allowing only the explicitly recorded
+marketdata stop/start in the outage profile. Evidence paths are restricted to
+the checkout's ignored `soak-artifacts/` tree. Missing Prometheus series are
+recorded as absent and fail rather than being treated as zero. Pre-run teardown
+is mandatory, and final teardown failures invalidate the result while retaining
+aggregated cleanup evidence. The strict profile stabilizes submitted-order
+telemetry before outage, then proves a connected feed remains ineligible with
+zero quotes for a full export-plus-scrape cycle before generating a fresh
+recovery trade. Sensitive HTTP bodies and bearer headers use anonymous file
+descriptors rather than process arguments; exported password inputs are unset
+before the first child process and the live Docker-event environment is checked.
+The first acceptance run must build from the recorded clean git SHA, while
+later no-build profiles must exactly match the manifest's image IDs/digests.
+Multi-hour evidence is operator-run and is not part of normal CI.
+
 ### Out of scope
 
+- `KeepLastAndWiden` is not a supported feed-loss policy.
 - No live-order-book-depth reaction: quotes anchor on
   `TradingReferencePrice`/`LastTradePrice`, not the SDK's `BookFeed`
   top-of-book. A closer-to-the-book anchor is a reasonable follow-up.
@@ -264,6 +425,148 @@ this scenario in its own job (`market-maker-conformance` in
 `docker-compose.market-maker.yml` + `docker-compose.conformance.yml` +
 `docker-compose.market-maker-conformance.yml`, so it never shares an
 order book with the `real-stack-conformance` job.
+
+## Sample-bot overlay (opt-in, authenticated end-client smoke, #722)
+
+```bash
+cp docker/.env.example docker/.env
+# edit docker/.env — TRADING_AUTH_SIGNING_KEY is mandatory (>= 32 bytes)
+
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.market-maker.yml \
+    -f docker/docker-compose.sample-bot.yml \
+    up -d --build --wait trading-host market-maker-bot
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.market-maker.yml \
+    -f docker/docker-compose.sample-bot.yml \
+    run --rm --no-deps --build sample-bot
+```
+
+The counterpart to the Demo and Market-maker overlays above, but for
+proving the platform's **consumer-facing** contract instead of a
+privileged/simulated one:
+[`backend/tools/B3.Trading.SampleBot`](../backend/tools/B3.Trading.SampleBot)
+is a small one-shot .NET console that behaves exactly like an ordinary
+end-client — it authenticates through `POST /api/auth/login` (or
+`/api/auth/exchange` / a supplied internal token, see below), opens the
+same authenticated `/ws` a browser opens, subscribes to
+`B3MarketDataPlatform`'s public feed for one symbol, submits at most one
+bounded REST limit order, observes it over its own private WebSocket
+channels, and reconciles over REST before exiting. `sample-bot` never
+receives a `matching-platform` endpoint or FIXP credential — enforced
+at the option-validation layer (`SampleBotOptionsValidator` rejects a
+`BaseUrl`/`MarketData:WsUrl` host of `matching-platform`), not just by
+convention.
+
+This overlay stacks on top of the Market-maker overlay so the sample
+bot observes a fresh, continuously-refreshed public reference price
+(`TradingReferencePrice`) instead of racing a possibly-empty order book
+on a freshly booted stack — it does **not** rely on crossing the
+market-maker's resting quotes for a fill. `SampleBotWorkflow.ComputePassiveLimitPrice`
+deliberately prices the default Buy below the observed reference, so
+the expected, deterministic journey on a clean checkout is: submit ->
+observe `Working` over the private feed -> `DemoOrder:OrderTimeout`
+elapses -> best-effort cancel -> `Cancelled`, confirmed by
+`GET /api/orders` showing no `Working`/`PartiallyFilled` order. An
+unexpected `Filled` (a third party crossing the resting order first) is
+not a failure — only a leaked working order is.
+
+| Service | What it does |
+|---|---|
+| `trading-host` | stays `Mode=Real` (base default); seeds a dedicated ordinary `sample-bot` FIRM01 user (`Trading__Auth__Users__9`) + cash, isolated from every other seed |
+| `sample-bot` | one-shot; authenticates, subscribes `/ws` + market data, submits/observes/cancels one order, exits (`restart: "no"`) |
+
+### Safety
+
+- **No exchange-side capability, ever.** `sample-bot` only ever talks to
+  the participant REST/WS surface and the public market-data WS —
+  never `matching-platform:9876`, never a FIXP session, never an
+  `EnteringFirm`/`AccessKey`. This is the opposite trust boundary from
+  the Market-maker overlay's co-located FIXP client.
+- The committed `sample-bot`/`samplebotpass` credential (PBKDF2 hash +
+  salt in `docker-compose.sample-bot.yml`) is public in this repo, same
+  posture as the Demo overlay's bot credentials — override
+  `SAMPLE_BOT_USER`/`SAMPLE_BOT_PASSWORD`/`SAMPLE_BOT_PASSWORD_HASH`/`SAMPLE_BOT_PASSWORD_SALT`
+  before running this anywhere beyond a laptop/CI job.
+- Trading is only ever enabled by the explicit
+  `SampleBot__DemoOrder__Enabled=true` flag this overlay sets. Running
+  the sample bot with that flag unset (or omitting the overlay
+  entirely and using `dotnet run` against a host of your choosing)
+  only authenticates and observes — it never submits an order.
+- `stop_grace_period: 30s` on the `sample-bot` service bounds cleanup:
+  the workflow's own best-effort cancel
+  (`DemoOrder:CancellationAttemptTimeout`, default 10s) plus
+  `DemoOrder:PostWorkflowWait` (3s) always completes well inside that
+  window before the container is asked to stop, so shutdown never
+  SIGKILLs an in-flight cancel.
+
+### Auth mode operation
+
+| Mode | What happens | When to use |
+|---|---|---|
+| `LocalPassword` (**required default**) | `POST /api/auth/login` with `SampleBot:Auth:Username`/`Password` | The smoke above; any `Local`/`Hybrid`-mode host with local login enabled |
+| `ExternalExchange` | An externally-acquired Entra access token (`SampleBot:Auth:ExternalAccessToken`) is exchanged via `POST /api/auth/exchange` | `Hybrid`/`Entra` hosts, once you have a real Entra test tenant/token — never simulate this with a token that bypasses `/api/auth/exchange` |
+| `InternalToken` | An already-issued internal trading JWT (`SampleBot:Auth:InternalTradingToken`) is used directly, no login round-trip | Wiring the sample against a token minted by another process (e.g. a CI harness) |
+
+The compose overlay only wires `LocalPassword` — it is the one mode
+every deployment topology (`Local`, `Hybrid`) supports out of the box.
+See [`backend/tools/B3.Trading.SampleBot/README.md`](../backend/tools/B3.Trading.SampleBot/README.md)
+for exact environment variable names for the other two modes.
+
+### Optional sub-account
+
+`SampleBot:SubAccountId` stays unset by default — it is validated
+(`GET /api/sub-accounts`, must exist and be active) but never required.
+To exercise it, an **admin** must pre-create the sub-account first
+(sub-account lifecycle is admin-only, there is no config-based seed):
+
+```bash
+curl -s -XPOST http://localhost:5000/api/sub-accounts \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"id":"tradingdesk","displayName":"Sample desk"}'
+```
+
+then set `SampleBot__SubAccountId=tradingdesk` on the `sample-bot`
+service before running it.
+
+### Conformance coverage (#722)
+
+`backend/tests/B3.Trading.Conformance/Spec_HTTP_SampleBot/SampleBotSmokeSpecTests.cs`
+logs in as the dedicated `sample-bot` end-client and asserts, purely
+over REST, that the one-shot container's run produced at least one
+successful terminal order (`Cancelled` or an unexpected-but-valid
+`Filled`) and left no `Working`/`PartiallyFilled` order behind. The
+verifier never cancels a straggler, because doing so would hide the
+cleanup regression this smoke is intended to detect; the isolated stack
+teardown handles cleanup after the assertion. It's gated on
+`RequiresSampleBotSandbox` (operator/CI sets
+`B3T_SAMPLE_BOT_SANDBOX=true` + `B3T_SAMPLE_BOT_USER`/`B3T_SAMPLE_BOT_PASS`)
+— a flag deliberately separate from `RequiresMarketMakerSandbox`, since
+this spec's assertions are scoped to the sample-bot's own end-client
+and don't depend on (or interfere with) the market-maker liquidity
+spec's crosses. The spec does **not** start the sample-bot container
+itself — CI (`sample-bot-conformance` job) runs
+`docker compose run --rm --no-deps sample-bot` to completion first,
+without reconciling/recreating the already-running stack, then runs
+this verifier against `docker-compose.yml` + `docker-compose.real.yml`
++ `docker-compose.market-maker.yml` + `docker-compose.conformance.yml`
++ `docker-compose.market-maker-conformance.yml` +
+`docker-compose.sample-bot.yml` + `docker-compose.sample-bot-conformance.yml`.
+This job is **not** part of the release gate/promote pipeline — it
+validates the sample and its docs stay in sync with the real stack,
+it does not gate shipping `trading-host`/`frontend`/`market-maker-bot`.
+
+### Distinctions from the other bots/consumers
+
+| | Trust boundary | Lifecycle | Purpose |
+|---|---|---|---|
+| **`sample-bot`** (this overlay) | Participant REST/WS + public market-data WS only — same as any external consumer | One-shot; exits after one bounded order lifecycle | Documented, reproducible proof of the ordinary end-client journey |
+| [`DemoDriver`](#demo-overlay-opt-in-laptop-only) | In-process `Mode=Mock` + `AllowErInjection` — a same-process shortcut, not a real wire | Long-running; continuous submit + synthetic-fill injection loops | Make the trader UI look alive for a laptop demo, no real matching |
+| [`MarketMakerBot`](#market-maker-overlay-opt-in-real-market-sandbox-demo) | Co-located FIXP client with its own matching-platform session/credentials | Long-running; continuously re-quotes | Provide real two-sided liquidity so *other* end-clients have a market |
+| [External FIXP user-bot listener](operations/fixp-listener.md) | Native FIXP/SBE over `Trading:EntryPointListener`, self-service credentials | Operator/bot-owned; independent of this repo's tooling | Let *third-party* bots connect over the wire protocol directly, bypassing REST/WS entirely |
 
 ## Honest no-broker mode
 
@@ -368,7 +671,9 @@ docker compose \
 ```
 
 This exports `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`
-into the trading-host container automatically — no extra env required.
+into the trading-host container automatically — no extra env required. The
+market-maker bot remains opt-in; the strategy-soak overlay wires that service
+to the same Collector.
 
 Default ports:
 
@@ -641,22 +946,22 @@ base stack remains PAT-only by default.
 See the full [FIXP listener operations guide](operations/fixp-listener.md) for
 TLS setup, rate-limit tuning, and monitoring.
 
-## Bumping the matching image
+## Bumping the matching and marketdata images
 
-The `matching-platform` service is pinned to an **immutable image
-digest** (`ghcr.io/pedrosakuma/b3-matching@sha256:…`) in
-`docker/docker-compose.yml`. We deliberately do **not** track
-`:latest` — every bump is a reviewable, CI-validated PR. This
-mitigates the class of flake where upstream churn lands on our builds
-without warning (e.g. #332, #345, #347).
+The `matching-platform` and `marketdata` services are pinned to
+**immutable image digests** in `docker/docker-compose.yml`. We deliberately
+do **not** track `:latest` — every bump is a reviewable, CI-validated PR.
+When a UMDF snapshot or epoch contract changes, update both digests in one
+PR so the producer and consumer remain compatible.
 
 ### Daily local override
 
-Devs who want the bleeding edge for a one-off run can override:
+Devs who want the bleeding edge for a one-off run can override both sides:
 
 ```bash
 MATCHING_IMAGE=ghcr.io/pedrosakuma/b3-matching:latest \
-  docker compose -f docker/docker-compose.yml up matching-platform
+MARKETDATA_IMAGE=ghcr.io/pedrosakuma/b3-marketdata:latest \
+  docker compose -f docker/docker-compose.yml up matching-platform marketdata
 ```
 
 ### Detecting drift
@@ -675,8 +980,10 @@ digest is printed on the last stdout line when drift is detected.
 The [`matching-image-bump`](../.github/workflows/matching-image-bump.yml)
 workflow runs the script on a weekly cron (Mondays 06:00 UTC) **and**
 on `workflow_dispatch`. When drift is detected it opens a PR bumping
-the pin; the standard CI matrix (`real-stack-conformance` included)
-validates the new digest before a human merges.
+the matching pin; the standard CI matrix (`real-stack-conformance` included)
+validates it against the pinned marketdata digest before a human merges.
+Marketdata digest changes are intentionally manual so a newer consumer cannot
+silently activate an incompatible snapshot contract.
 
 ### Manual bump (one-liner)
 

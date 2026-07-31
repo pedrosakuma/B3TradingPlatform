@@ -36,9 +36,12 @@
 # `marketdata:8080/ws` endpoint trading-host uses, see
 # Trading__MarketData__WsUrl in docker-compose.yml) to anchor its quotes
 # on the live TradingReferencePrice/LastTradePrice instead of a static
-# config value (#683, item "mm-marketdata-conn"). This is best-effort:
-# if `marketdata` is down or MarketData__WsUrl is unset, the bot just
-# falls back to each instrument's static RefPrice.
+# config value (#683, item "mm-marketdata-conn"). Feed-loss behavior is
+# explicit: this sandbox overlay retains the legacy StaticRefPrice fallback;
+# operators can select PauseAndCancel to require a fresh per-symbol mark.
+# Reproducible baseline/feature/outage evidence stacks the dedicated
+# docker-compose.market-maker-soak.yml overlay; see
+# docs/operations/market-maker-soak.md.
 
 name: b3trading
 
@@ -87,17 +90,40 @@ services:
       MarketMaker__SenderLocation: SP
       MarketMaker__EnteringTrader: MM
 
-      # ── Market data (best-effort quote anchor) ─────────────────────
+      # ── Market data + feed-loss policy ─────────────────────────────
       # Same feed trading-host subscribes to (see Trading__MarketData__WsUrl
       # in docker-compose.yml). Optional: if unset, or the feed can't
-      # connect, the bot quotes off each instrument's static RefPrice.
+      # connect, StaticRefPrice quotes off each instrument's configured
+      # RefPrice. PauseAndCancel instead suppresses/cancels that symbol
+      # until a fresh current-connection reference is available.
       MarketMaker__MarketData__WsUrl: ws://marketdata:8080/ws
+      MarketMaker__MarketData__FeedLossPolicy: StaticRefPrice
+      MarketMaker__MarketData__MaxReferenceAge: "00:00:30"
 
       # ── Behaviour ──────────────────────────────────────────────────
       MarketMaker__StateDirectory: /var/lib/b3-market-maker-bot
       # Defensive safety net only — the primary re-quote path is
       # event-driven (fills/cancels/rejects), see MarketMakerWorker.
       MarketMaker__ReconcileInterval: "00:00:05"
+      # A successfully transmitted cancel whose ER is lost is retried only
+      # after this bounded acknowledgement window; MinRequoteInterval remains
+      # the secondary anti-churn guard.
+      MarketMaker__CancelAckTimeout: "00:00:10"
+      # Opt in only when matching-platform contains B3MatchingPlatform#569:
+      # older matching versions emit ACCEPTED before mass-cancel execution.
+      MarketMaker__StartupCleanupEnabled: "false"
+      # Terminal cleanup may drain the venue's full 100k-order cap before
+      # reporting completion. Keep this separate from normal cancel recovery.
+      MarketMaker__StartupCleanupTimeout: "00:05:00"
+      # Gross/pre-fee process-local P&L snapshots. Unrealized P&L is
+      # omitted unless the connected live mark is newer than MarkMaxAge.
+      MarketMaker__Telemetry__SnapshotInterval: "00:00:30"
+      MarketMaker__Telemetry__MarkMaxAge: "00:00:30"
+      # OTLP remains disabled here by default. Set the standard
+      # OTEL_EXPORTER_OTLP_ENDPOINT/PROTOCOL variables when routing this
+      # bot to a collector (b3deploy owns collector -> Azure Monitor).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
 
       # ── Instruments (must match docker/real/instruments-eqt.json) ──
       MarketMaker__Instruments__0__Symbol: PETR4
@@ -107,6 +133,19 @@ services:
       MarketMaker__Instruments__0__LotSize: "100"
       MarketMaker__Instruments__0__QuoteLots: "1"
       MarketMaker__Instruments__0__SpreadTicks: "5"
+      # Inventory skew is opt-in per instrument. FullSkewAtLots is the
+      # normalization/saturation band only; it does not cap inventory.
+      MarketMaker__Instruments__0__InventorySkew__Enabled: "false"
+      MarketMaker__Instruments__0__InventorySkew__FullSkewAtLots: "10"
+      MarketMaker__Instruments__0__InventorySkew__MaxSkewTicks: "5"
+      # Trade-driven adaptive widening is independently opt-in per
+      # instrument. Static SpreadTicks always remains the floor.
+      MarketMaker__Instruments__0__VolatilitySpread__Enabled: "false"
+      MarketMaker__Instruments__0__VolatilitySpread__Window: "00:01:00"
+      MarketMaker__Instruments__0__VolatilitySpread__MaxSamples: "120"
+      MarketMaker__Instruments__0__VolatilitySpread__MinSamples: "10"
+      MarketMaker__Instruments__0__VolatilitySpread__Multiplier: "1.0"
+      MarketMaker__Instruments__0__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
 
       MarketMaker__Instruments__1__Symbol: VALE3
       MarketMaker__Instruments__1__SecurityId: "900000000002"
@@ -115,6 +154,15 @@ services:
       MarketMaker__Instruments__1__LotSize: "100"
       MarketMaker__Instruments__1__QuoteLots: "1"
       MarketMaker__Instruments__1__SpreadTicks: "5"
+      MarketMaker__Instruments__1__InventorySkew__Enabled: "false"
+      MarketMaker__Instruments__1__InventorySkew__FullSkewAtLots: "10"
+      MarketMaker__Instruments__1__InventorySkew__MaxSkewTicks: "5"
+      MarketMaker__Instruments__1__VolatilitySpread__Enabled: "false"
+      MarketMaker__Instruments__1__VolatilitySpread__Window: "00:01:00"
+      MarketMaker__Instruments__1__VolatilitySpread__MaxSamples: "120"
+      MarketMaker__Instruments__1__VolatilitySpread__MinSamples: "10"
+      MarketMaker__Instruments__1__VolatilitySpread__Multiplier: "1.0"
+      MarketMaker__Instruments__1__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
 
       MarketMaker__Instruments__2__Symbol: ITUB4
       MarketMaker__Instruments__2__SecurityId: "900000000003"
@@ -123,6 +171,15 @@ services:
       MarketMaker__Instruments__2__LotSize: "100"
       MarketMaker__Instruments__2__QuoteLots: "1"
       MarketMaker__Instruments__2__SpreadTicks: "5"
+      MarketMaker__Instruments__2__InventorySkew__Enabled: "false"
+      MarketMaker__Instruments__2__InventorySkew__FullSkewAtLots: "10"
+      MarketMaker__Instruments__2__InventorySkew__MaxSkewTicks: "5"
+      MarketMaker__Instruments__2__VolatilitySpread__Enabled: "false"
+      MarketMaker__Instruments__2__VolatilitySpread__Window: "00:01:00"
+      MarketMaker__Instruments__2__VolatilitySpread__MaxSamples: "120"
+      MarketMaker__Instruments__2__VolatilitySpread__MinSamples: "10"
+      MarketMaker__Instruments__2__VolatilitySpread__Multiplier: "1.0"
+      MarketMaker__Instruments__2__VolatilitySpread__MaxAdditionalSpreadTicks: "20"
     volumes:
       - market-maker-bot-state:/var/lib/b3-market-maker-bot
 

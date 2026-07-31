@@ -395,7 +395,10 @@ jobs:
           TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa
           TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
           TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+          TRADING_SEED_USER_2: soak-counterparty
           ALERT_SMOKE_RUN_ID: validate
+          MM_SOAK_COUNTERPARTY_USER: soak-counterparty
+          MM_SOAK_ADMIN_USER: soak-admin
         run: |
           docker compose -f docker/docker-compose.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.unavailable.yml config --quiet
@@ -404,10 +407,34 @@ jobs:
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.conformance.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.demo.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.market-maker.yml config --quiet
+          AUTH_MODE=Entra MM_SOAK_PROJECT_NAME=validate-mm-soak docker compose \
+            -f docker/docker-compose.yml \
+            -f docker/docker-compose.market-maker.yml \
+            -f docker/docker-compose.observability.yml \
+            -f docker/docker-compose.market-maker-soak.yml \
+            config --format json |
+            jq -e '
+              .services["trading-host"].environment.Trading__Auth__Mode == "Local" and
+              .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled == "true" and
+              .services["trading-host"].environment.Trading__Auth__Users__5__Username == "soak-counterparty" and
+              .services["trading-host"].environment.Trading__Auth__Users__8__Username == "soak-admin" and
+              .services["trading-host"].environment["Trading__Risk__PerEndClient__soak-counterparty__AllowShortSell"] == "true"
+            ' >/dev/null
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.real.yml -f docker/docker-compose.market-maker.yml -f docker/docker-compose.conformance.yml -f docker/docker-compose.market-maker-conformance.yml config --quiet
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.market-maker.yml -f docker/docker-compose.sample-bot.yml config --quiet
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.real.yml -f docker/docker-compose.market-maker.yml -f docker/docker-compose.conformance.yml -f docker/docker-compose.market-maker-conformance.yml -f docker/docker-compose.sample-bot.yml -f docker/docker-compose.sample-bot-conformance.yml config --quiet
+          docker compose -f docker/docker-compose.yml --profile marketdata-pcap config --format json |
+            jq -e '
+              (.services["matching-platform"].image | test("^ghcr\\.io/pedrosakuma/b3-matching@sha256:[0-9a-f]{64}$")) and
+              (.services.marketdata.image | test("^ghcr\\.io/pedrosakuma/b3-marketdata@sha256:[0-9a-f]{64}$")) and
+              (.services["marketdata-pcap"].image == .services.marketdata.image)
+            ' >/dev/null
 
       - name: docker compose auth mode wiring smoke
         run: python3 docker/test/compose-auth-config-smoke.py
+
+      - name: market-maker soak helper self-tests
+        run: scripts/soak/test-market-maker-soak-lib.sh
 
       - name: docker compose config (Hybrid auth mapping)
         env:
@@ -886,6 +913,137 @@ jobs:
               -f docker/docker-compose.market-maker.yml \
               -f docker/docker-compose.conformance.yml \
               -f docker/docker-compose.market-maker-conformance.yml \
+              down -v
+
+  sample-bot-conformance:
+    name: Run conformance against candidate (sample-bot smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: trading-host
+    # Deliberately NOT part of outbound-recovery-release-gate / promote
+    # (#722): this job proves the sample + its docs stay reproducible
+    # against the real stack, it does not gate shipping
+    # trading-host/frontend/market-maker-bot. See docs/DOCKER.md
+    # "Sample-bot overlay § Conformance coverage" for the rationale.
+    env:
+      # Same CI placeholders as the conformance jobs above (alice/wonderland).
+      TRADING_AUTH_SIGNING_KEY: ci-conformance-placeholder-key-min-32-bytes-long-aaaaa
+      TRADING_SEED_USER: alice
+      TRADING_SEED_PASSWORD: wonderland
+      TRADING_SEED_PASSWORD_HASH: ZDzDHANAHq8NDQK3BWk/YZjybKLCMKdRzw0z9Da5wic=
+      TRADING_SEED_PASSWORD_SALT: rXA+be7/gEYYZQrQDsUr2g==
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bring up real stack + market-maker bot + sample-bot overlay
+        # Same real-stack + market-maker bring-up as market-maker-conformance
+        # (the sample bot stacks on the market-maker overlay so it observes
+        # a fresh, continuously-refreshed public reference price instead of
+        # racing a possibly-empty book — see docker-compose.sample-bot.yml's
+        # header comment). sample-bot itself is built fresh in this job
+        # (not published/candidate-pulled, unlike trading-host/market-maker-bot)
+        # — it is not part of the release pipeline.
+        env:
+          CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.host_digest }}
+          HOST_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-trading-host
+          MM_BOT_CANDIDATE_DIGEST: ${{ needs.trading-host.outputs.market_maker_bot_digest }}
+          MM_BOT_IMAGE: ghcr.io/${{ github.repository_owner }}/b3-market-maker-bot
+        run: |
+          set -euo pipefail
+          compose=(
+            docker compose
+            -f docker/docker-compose.yml
+            -f docker/docker-compose.real.yml
+            -f docker/docker-compose.market-maker.yml
+            -f docker/docker-compose.conformance.yml
+            -f docker/docker-compose.market-maker-conformance.yml
+            -f docker/docker-compose.sample-bot.yml
+            -f docker/docker-compose.sample-bot-conformance.yml
+          )
+          "${compose[@]}" build conformance sample-bot
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            "${compose[@]}" build market-maker-bot
+            "${compose[@]}" up -d --build --wait trading-host market-maker-bot
+          else
+            test -n "$CANDIDATE_DIGEST"
+            test -n "$MM_BOT_CANDIDATE_DIGEST"
+            export TRADING_IMAGE="$HOST_IMAGE@$CANDIDATE_DIGEST"
+            export MARKET_MAKER_BOT_IMAGE="$MM_BOT_IMAGE@$MM_BOT_CANDIDATE_DIGEST"
+            docker pull "$TRADING_IMAGE"
+            docker pull "$MARKET_MAKER_BOT_IMAGE"
+            "${compose[@]}" up -d --no-build --wait trading-host
+            "${compose[@]}" up -d --no-build market-maker-bot
+            test "$(docker inspect -f '{{.Config.Image}}' b3-trading-host)" = "$TRADING_IMAGE"
+            test "$(docker inspect -f '{{.Config.Image}}' b3-market-maker-bot)" = "$MARKET_MAKER_BOT_IMAGE"
+          fi
+
+      - name: Run sample-bot (one-shot)
+        # Blocks until the container exits on its own (SampleBotWorker
+        # stops the host once the single-order workflow completes) and
+        # streams its logs inline — this is the run the conformance spec
+        # below verifies the REST-observable outcome of.
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.market-maker.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.market-maker-conformance.yml \
+              -f docker/docker-compose.sample-bot.yml \
+              -f docker/docker-compose.sample-bot-conformance.yml \
+              run --rm --no-deps sample-bot
+
+      - name: Run conformance
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.market-maker.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.market-maker-conformance.yml \
+              -f docker/docker-compose.sample-bot.yml \
+              -f docker/docker-compose.sample-bot-conformance.yml \
+              run --rm --no-deps conformance
+
+      - name: Logs (always)
+        if: always()
+        run: |
+          for svc in trading-host matching-platform marketdata market-maker-bot sample-bot; do
+            echo "::group::$svc"
+            docker compose \
+                -f docker/docker-compose.yml \
+                -f docker/docker-compose.real.yml \
+                -f docker/docker-compose.market-maker.yml \
+                -f docker/docker-compose.conformance.yml \
+                -f docker/docker-compose.market-maker-conformance.yml \
+                -f docker/docker-compose.sample-bot.yml \
+                -f docker/docker-compose.sample-bot-conformance.yml \
+                logs --no-color --timestamps "$svc" || true
+            echo "::endgroup::"
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose \
+              -f docker/docker-compose.yml \
+              -f docker/docker-compose.real.yml \
+              -f docker/docker-compose.market-maker.yml \
+              -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.market-maker-conformance.yml \
+              -f docker/docker-compose.sample-bot.yml \
+              -f docker/docker-compose.sample-bot-conformance.yml \
               down -v
 
   outbound-recovery-release-gate:

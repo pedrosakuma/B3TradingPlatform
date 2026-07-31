@@ -46,6 +46,8 @@ spec:
           image: {{ include "b3-market-maker-bot.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            {{- $marketData := default (dict) .Values.marketData }}
+            {{- $behaviour := default (dict) .Values.behaviour }}
             # ── FIXP session ─────────────────────────────────────────────
             - name: MarketMaker__Endpoint
               value: {{ .Values.session.endpoint | quote }}
@@ -61,16 +63,39 @@ spec:
               value: {{ .Values.session.senderLocation | quote }}
             - name: MarketMaker__EnteringTrader
               value: {{ .Values.session.enteringTrader | quote }}
-            # ── Market data (best-effort quote anchor) ──────────────────
+            # ── Market data + feed-loss policy ─────────────────────────
             - name: MarketMaker__MarketData__WsUrl
-              value: {{ .Values.marketData.wsUrl | quote }}
+              value: {{ dig "wsUrl" "" $marketData | quote }}
+            - name: MarketMaker__MarketData__FeedLossPolicy
+              value: {{ dig "feedLossPolicy" "StaticRefPrice" $marketData | quote }}
+            - name: MarketMaker__MarketData__MaxReferenceAge
+              value: {{ dig "maxReferenceAge" "00:00:30" $marketData | quote }}
             # ── Behaviour ────────────────────────────────────────────────
             - name: MarketMaker__StateDirectory
               value: /var/lib/b3-market-maker-bot
             - name: MarketMaker__ReconcileInterval
-              value: {{ .Values.behaviour.reconcileInterval | quote }}
+              value: {{ dig "reconcileInterval" "00:00:05" $behaviour | quote }}
+            - name: MarketMaker__CancelAckTimeout
+              value: {{ dig "cancelAckTimeout" "00:00:10" $behaviour | quote }}
+            - name: MarketMaker__StartupCleanupEnabled
+              value: {{ dig "startupCleanupEnabled" false $behaviour | quote }}
+            - name: MarketMaker__StartupCleanupTimeout
+              value: {{ dig "startupCleanupTimeout" "00:05:00" $behaviour | quote }}
+            # ── Position/P&L observability ────────────────────────────────
+            - name: MarketMaker__Telemetry__SnapshotInterval
+              value: {{ .Values.observability.snapshotInterval | quote }}
+            - name: MarketMaker__Telemetry__MarkMaxAge
+              value: {{ .Values.observability.markMaxAge | quote }}
+            {{- if .Values.observability.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlpEndpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.observability.otlpProtocol | quote }}
+            {{- end }}
             # ── Instruments (must match matching's instruments-eqt.json) ─
             {{- range $i, $instrument := .Values.instruments }}
+            {{- $inventorySkew := default (dict) $instrument.inventorySkew }}
+            {{- $volatilitySpread := default (dict) $instrument.volatilitySpread }}
             - name: {{ printf "MarketMaker__Instruments__%d__Symbol" $i }}
               value: {{ $instrument.symbol | quote }}
             - name: {{ printf "MarketMaker__Instruments__%d__SecurityId" $i }}
@@ -85,6 +110,24 @@ spec:
               value: {{ $instrument.quoteLots | quote }}
             - name: {{ printf "MarketMaker__Instruments__%d__SpreadTicks" $i }}
               value: {{ $instrument.spreadTicks | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__Enabled" $i }}
+              value: {{ dig "enabled" false $inventorySkew | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__FullSkewAtLots" $i }}
+              value: {{ dig "fullSkewAtLots" 10 $inventorySkew | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__InventorySkew__MaxSkewTicks" $i }}
+              value: {{ dig "maxSkewTicks" 5 $inventorySkew | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__VolatilitySpread__Enabled" $i }}
+              value: {{ dig "enabled" false $volatilitySpread | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__VolatilitySpread__Window" $i }}
+              value: {{ dig "window" "00:01:00" $volatilitySpread | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__VolatilitySpread__MaxSamples" $i }}
+              value: {{ dig "maxSamples" 120 $volatilitySpread | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__VolatilitySpread__MinSamples" $i }}
+              value: {{ dig "minSamples" 10 $volatilitySpread | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__VolatilitySpread__Multiplier" $i }}
+              value: {{ dig "multiplier" 1.0 $volatilitySpread | quote }}
+            - name: {{ printf "MarketMaker__Instruments__%d__VolatilitySpread__MaxAdditionalSpreadTicks" $i }}
+              value: {{ dig "maxAdditionalSpreadTicks" 20 $volatilitySpread | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
