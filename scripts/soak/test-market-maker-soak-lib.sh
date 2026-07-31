@@ -82,12 +82,19 @@ if soak_primary_reference_fallback_allowed stale; then
 fi
 
 mock_status_curl() {
+    local header request_body
+    header="$(cat <&3)"
+    request_body="$(cat <&4)"
+    [[ "$header" == "Authorization: Bearer status-test-token" ]]
+    [[ "$request_body" == '{"symbol":"PETR4"}' ]]
     printf '%s\n' '{"status":"Rejected","code":"cash_limit","token":"must-redact"}' 422
     return 22
 }
+status_test_token='status-test-token'
+status_test_body='{"symbol":"PETR4"}'
 status_envelope="$(SOAK_CURL_BIN=mock_status_curl \
     soak_curl_json_request_with_status POST https://example.invalid \
-        absent_token absent_body)"
+        status_test_token status_test_body)"
 [[ "$(jq -r '.curlExit' <<<"$status_envelope")" == "22" ]]
 [[ "$(jq -r '.httpStatus' <<<"$status_envelope")" == "422" ]]
 status_body=""

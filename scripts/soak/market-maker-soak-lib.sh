@@ -56,7 +56,7 @@ soak_curl_json_request_with_status() {
         local curl_output curl_exit=0 http_status response_body
         local -a arguments=(-sS --max-time 10 --request "$method")
         if [[ -n "$token" ]]; then
-            exec 3<<<"Authorization: ******"
+            exec 3<<<"Authorization: Bearer $token"
             arguments+=(--header @/dev/fd/3)
         fi
         if [[ -n "$body" ]]; then
