@@ -1365,7 +1365,7 @@ async function handleSubmitOrder(payload) {
     // WebSocket order row arrives and advances the same toast.
     ui.showPlatformAcceptedOrder(resp.clOrdId);
     markFirstOrderAccepted(resp.clOrdId);
-    ui.clearTicket();
+    ui.resetTicketAfterSubmit();
   } catch (err) {
     if (err.status === 401) { logout(); return; }
     ui.setTicketFeedback(err.message || "submit failed", "error");
