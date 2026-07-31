@@ -124,16 +124,19 @@ The helper reuses the same real-stack sandbox seam as
 4. submit one-lot PETR4 marketable limits through `POST /api/orders`;
 5. wait for each order to fill against the bot before sending the next.
 
-When a fresh live reference is available, the primary workload derives each
-actual order limit immediately before submission from that reference plus one
-configured half-spread, the target symbol's worst-case inventory skew, and
-`SOAK_MARKETABLE_PRICE_EXTRA_TICKS` of extra crossing margin. It validates the
-result against the effective percent/absolute collar returned by
+The primary workload derives each actual order limit immediately before
+submission from a raw live reference whose `updatedUtc` age is strictly less
+than `MM_SOAK_MAX_REFERENCE_AGE`. The offset covers the configured half-spread,
+the target symbol's worst-case inventory skew, the configured maximum
+volatility additional half-spread when enabled, and
+`SOAK_MARKETABLE_PRICE_EXTRA_TICKS` of crossing margin. It validates the result
+against the effective percent/absolute collar returned by
 `/api/admin/risk/limits` and fails rather than submitting a non-marketable
-collar-bound order. `SOAK_MARKETABLE_BUY_PRICE` and
-`SOAK_MARKETABLE_SELL_PRICE` are fallback prices only when no live reference
-is available. Buy derivation crosses only the predicted ask side; sell
-derivation crosses only the predicted bid side.
+collar-bound order. It also fails explicitly when no fresh live reference is
+available. `SOAK_MARKETABLE_BUY_PRICE` and `SOAK_MARKETABLE_SELL_PRICE` remain
+diagnostic context only; they do not bypass freshness. Buy derivation crosses
+only the predicted ask side; sell derivation crosses only the predicted bid
+side.
 Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
@@ -261,9 +264,9 @@ Useful controls:
 | `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
-| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Buy fallback used only when no fresh live reference is available |
-| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Sell fallback used only when no fresh live reference is available |
-| `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Extra live-reference crossing margin beyond spread + worst-case skew |
+| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Diagnostic legacy buy value; fresh live pricing is required |
+| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Diagnostic legacy sell value; fresh live pricing is required |
+| `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Crossing margin beyond configured/adaptive half-spread + worst-case skew |
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |
 | `SOAK_COUNTERPARTY_DEPOSIT_AMOUNT` | same as trading user (`100000.00`) | Counterparty sandbox deposit for alternating refresh ownership |

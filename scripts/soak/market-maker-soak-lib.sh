@@ -113,8 +113,8 @@ soak_validate_strict_refresh_timing() {
 
 soak_resolve_marketable_limit() {
     local side="$1" reference="$2" tick="$3" spread_ticks="$4"
-    local skew_ticks="$5" extra_ticks="$6" collar_percent="$7"
-    local collar_absolute="$8"
+    local skew_ticks="$5" volatility_ticks="$6" extra_ticks="$7"
+    local collar_percent="$8" collar_absolute="$9"
 
     awk \
         -v side="$side" \
@@ -122,6 +122,7 @@ soak_resolve_marketable_limit() {
         -v tick="$tick" \
         -v spread="$spread_ticks" \
         -v skew="$skew_ticks" \
+        -v volatility="$volatility_ticks" \
         -v extra="$extra_ticks" \
         -v collar_percent="$collar_percent" \
         -v collar_absolute="$collar_absolute" '
@@ -145,7 +146,7 @@ soak_resolve_marketable_limit() {
               if (absolute_upper < upper) upper = absolute_upper
             }
 
-            offset = tick * (spread + skew + extra)
+            offset = tick * (spread + skew + volatility + extra)
             required = side == "Buy" ? reference + offset : reference - offset
             if ((side == "Buy" && required > upper) ||
                 (side == "Sell" && required < lower))
@@ -160,6 +161,16 @@ soak_resolve_marketable_limit() {
             printf "%.8f\n", resolved
           }
         '
+}
+
+soak_reference_timestamp_is_fresh() {
+    local updated_epoch_ms="$1" now_epoch_ms="$2" max_age_seconds="$3"
+    [[ "$updated_epoch_ms" =~ ^[0-9]+$ &&
+       "$now_epoch_ms" =~ ^[0-9]+$ &&
+       "$max_age_seconds" =~ ^[0-9]+$ ]] || return 1
+    ((max_age_seconds > 0)) || return 1
+    ((updated_epoch_ms <= now_epoch_ms)) || return 1
+    ((now_epoch_ms - updated_epoch_ms < max_age_seconds * 1000))
 }
 
 soak_evaluate_strict_freshness() {

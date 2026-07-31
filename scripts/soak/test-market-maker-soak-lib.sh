@@ -38,16 +38,30 @@ if soak_validate_strict_refresh_timing 12 6 6 6; then
     exit 1
 fi
 
-[[ "$(soak_resolve_marketable_limit Buy 32.70 0.01 5 5 1 10 "")" == "32.81000000" ]]
-[[ "$(soak_resolve_marketable_limit Sell 32.70 0.01 5 5 1 10 "")" == "32.59000000" ]]
-[[ "$(soak_resolve_marketable_limit Buy 100 1 4 0 1 5 "")" == "105.00000000" ]]
-[[ "$(soak_resolve_marketable_limit Sell 100 1 4 0 1 5 "")" == "95.00000000" ]]
-if soak_resolve_marketable_limit Buy 100 1 5 0 1 5 "" >/dev/null 2>&1; then
+[[ "$(soak_resolve_marketable_limit Buy 32.70 0.01 5 5 0 1 10 "")" == "32.81000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 32.70 0.01 5 5 0 1 10 "")" == "32.59000000" ]]
+# Volatility widening is an additional half-spread: reserve its configured cap
+# so a current adaptive value larger than crossingExtraTicks still crosses.
+[[ "$(soak_resolve_marketable_limit Buy 32.70 0.01 5 0 20 1 10 "")" == "32.96000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 32.70 0.01 5 0 20 1 10 "")" == "32.44000000" ]]
+[[ "$(soak_resolve_marketable_limit Buy 100 1 2 0 2 1 5 "")" == "105.00000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 100 1 2 0 2 1 5 "")" == "95.00000000" ]]
+if soak_resolve_marketable_limit Buy 100 1 2 0 3 1 5 "" >/dev/null 2>&1; then
     echo "ERROR: buy outside the configured collar was accepted" >&2
     exit 1
 fi
-if soak_resolve_marketable_limit Sell 100 1 5 0 1 5 "" >/dev/null 2>&1; then
+if soak_resolve_marketable_limit Sell 100 1 2 0 3 1 5 "" >/dev/null 2>&1; then
     echo "ERROR: sell outside the configured collar was accepted" >&2
+    exit 1
+fi
+
+soak_reference_timestamp_is_fresh 970001 1000000 30
+if soak_reference_timestamp_is_fresh 970000 1000000 30; then
+    echo "ERROR: reference exactly at MaxReferenceAge was accepted" >&2
+    exit 1
+fi
+if soak_reference_timestamp_is_fresh 1000001 1000000 30; then
+    echo "ERROR: future live-reference timestamp was accepted" >&2
     exit 1
 fi
 

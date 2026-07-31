@@ -446,6 +446,12 @@ configured_instruments_json="$(jq --arg targetSymbol "$symbol" --argjson targetP
       else 0
       end
     ),
+    maxVolatilityAdditionalSpreadTicks: (
+      if $config["MarketMaker__Instruments__" + ($index | tostring) + "__VolatilitySpread__Enabled"] == "true"
+      then ($config["MarketMaker__Instruments__" + ($index | tostring) + "__VolatilitySpread__MaxAdditionalSpreadTicks"] | tonumber)
+      else 0
+      end
+    ),
     referencePrice: (
       if $symbol == $targetSymbol then $targetPrice
       else ($config["MarketMaker__Instruments__" + ($index | tostring) + "__RefPrice"] | tonumber)
@@ -455,7 +461,13 @@ configured_instruments_json="$(jq --arg targetSymbol "$symbol" --argjson targetP
 ' <<<"$sanitized_rendered_config")"
 if [[ "${#configured_symbols[@]}" -ne 3 ]] ||
     ! jq -e --arg symbol "$symbol" '
-      all(.tickSize > 0 and .spreadTicks > 1) and any(.symbol == $symbol)
+      all(
+        .tickSize > 0 and
+        .spreadTicks > 1 and
+        .maxSkewTicks >= 0 and
+        .maxVolatilityAdditionalSpreadTicks >= 0
+      ) and
+      any(.symbol == $symbol)
     ' >/dev/null <<<"$configured_instruments_json"; then
     echo "ERROR: rendered profile must contain PETR4/target plus exactly three configured symbols" >&2
     exit 3
@@ -1384,7 +1396,8 @@ strict_primary_reference_baseline=
 strict_primary_reference_direction=
 
 read_live_refresh_price_into() {
-    local output_variable="$1" refresh_symbol="$2" empty_request_body="" response live_row updated_nanoseconds price
+    local output_variable="$1" refresh_symbol="$2" empty_request_body="" response live_row
+    local updated_epoch_ms now_epoch_ms price last_rejection="missing"
     local started=$SECONDS
     while ((SECONDS - started < max_reference_age_seconds)); do
         authed_json_request_into response \
@@ -1400,25 +1413,35 @@ read_live_refresh_price_into() {
               select(.price != null and .updatedUtc != null)
             ' <<<"$response" 2>/dev/null || true)"
         if [[ -n "$live_row" ]]; then
-            updated_nanoseconds="$(date -u -d "$(jq -r '.updatedUtc' <<<"$live_row")" +%s%N)" ||
+            updated_epoch_ms="$(date -u -d "$(jq -r '.updatedUtc' <<<"$live_row")" +%s%3N)" || {
+                log "ERROR: live reference for '$refresh_symbol' has an invalid updatedUtc"
                 return 1
+            }
+            now_epoch_ms="$(date -u +%s%3N)" || return 1
+            if ! soak_reference_timestamp_is_fresh \
+                "$updated_epoch_ms" "$now_epoch_ms" "$max_reference_age_seconds"; then
+                last_rejection="stale updatedUtc=$(jq -r '.updatedUtc' <<<"$live_row") ageMs=$((now_epoch_ms - updated_epoch_ms))"
+                sleep 0.25
+                continue
+            fi
             price="$(jq -er '.price' <<<"$live_row")" || return 1
             printf -v "$output_variable" '%s' "$price"
             return
         fi
         sleep 0.25
     done
-    log "ERROR: no live reference is available for strict refresh symbol '$refresh_symbol'"
+    log "ERROR: no fresh live reference is available for '$refresh_symbol' within ${max_reference_age_seconds}s (${last_rejection})"
     return 1
 }
 
 resolve_primary_order_price_into() {
     local output_variable="$1" side="$2" configured_price="$3" phase="$4"
-    local live_reference tick_size spread_ticks max_skew_ticks resolved_price
+    local live_reference tick_size spread_ticks max_skew_ticks
+    local max_volatility_additional_spread_ticks resolved_price
 
-    if ! read_live_refresh_price_into live_reference "$symbol" 2>/dev/null; then
-        printf -v "$output_variable" '%s' "$configured_price"
-        return 0
+    if ! read_live_refresh_price_into live_reference "$symbol"; then
+        log "ERROR: refusing to derive the ${side,,} price for ${phase} without a fresh live reference (configured fallback=${configured_price})"
+        return 1
     fi
 
     tick_size="$(jq -er \
@@ -1433,6 +1456,10 @@ resolve_primary_order_price_into() {
         --arg symbol "$symbol" \
         '.[] | select(.symbol == $symbol) | .maxSkewTicks' \
         <<<"$configured_instruments_json")" || return 1
+    max_volatility_additional_spread_ticks="$(jq -er \
+        --arg symbol "$symbol" \
+        '.[] | select(.symbol == $symbol) | .maxVolatilityAdditionalSpreadTicks' \
+        <<<"$configured_instruments_json")" || return 1
 
     resolved_price="$(soak_resolve_marketable_limit \
         "$side" \
@@ -1440,14 +1467,15 @@ resolve_primary_order_price_into() {
         "$tick_size" \
         "$spread_ticks" \
         "$max_skew_ticks" \
+        "$max_volatility_additional_spread_ticks" \
         "$marketable_price_extra_ticks" \
         "$primary_price_collar_percent" \
         "$primary_price_collar_absolute")" || {
-        log "ERROR: the fresh ${side,,} marketable limit is outside the configured price collar for ${phase} (reference=${live_reference}, spreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, extraTicks=${marketable_price_extra_ticks}, collarPercent=${primary_price_collar_percent:-unset}, collarAbsolute=${primary_price_collar_absolute:-unset})"
+        log "ERROR: the fresh ${side,,} marketable limit is outside the configured price collar for ${phase} (reference=${live_reference}, configuredHalfSpreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, maxVolatilityAdditionalHalfSpreadTicks=${max_volatility_additional_spread_ticks}, crossingExtraTicks=${marketable_price_extra_ticks}, collarPercent=${primary_price_collar_percent:-unset}, collarAbsolute=${primary_price_collar_absolute:-unset})"
         return 1
     }
 
-    log "derived fresh ${side,,} limit ${resolved_price} for ${phase} from liveReference=${live_reference}, spreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, extraTicks=${marketable_price_extra_ticks}, collarPercent=${primary_price_collar_percent:-unset}, collarAbsolute=${primary_price_collar_absolute:-unset}, fallback=${configured_price}"
+    log "derived fresh ${side,,} limit ${resolved_price} for ${phase} from liveReference=${live_reference}, configuredHalfSpreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, maxVolatilityAdditionalHalfSpreadTicks=${max_volatility_additional_spread_ticks}, crossingExtraTicks=${marketable_price_extra_ticks}, collarPercent=${primary_price_collar_percent:-unset}, collarAbsolute=${primary_price_collar_absolute:-unset}, unusedFallback=${configured_price}"
 
     printf -v "$output_variable" '%s' "$resolved_price"
 }
