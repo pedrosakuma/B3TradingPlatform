@@ -52,12 +52,19 @@ done
 [[ "$(soak_resolve_sandbox_max_deposit 1500000.00 1250000.00)" == "1500000.00" ]]
 [[ "$(soak_resolve_sandbox_max_deposit 1250000.01 1250000.02)" == "1250000.02" ]]
 [[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1750000.00)" == "1750000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00)" == "9223372036854775808.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1.00 9223372036854775808.00)" == "9223372036854775808.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00 9223372036854775808.00)" == "9223372036854775808.00" ]]
 if soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1499999.99 >/dev/null; then
     echo "ERROR: explicit sandbox cap below the counterparty deposit was accepted" >&2
     exit 1
 fi
 if soak_resolve_sandbox_max_deposit 1500000.00 1250000.00 1499999.99 >/dev/null; then
     echo "ERROR: explicit sandbox cap below the primary deposit was accepted" >&2
+    exit 1
+fi
+if soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00 9223372036854775807.99 >/dev/null; then
+    echo "ERROR: explicit sandbox cap below a large primary deposit was accepted" >&2
     exit 1
 fi
 

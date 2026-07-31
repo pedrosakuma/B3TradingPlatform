@@ -23,6 +23,17 @@ soak_normalize_brl_amount() {
     printf '%s.%s\n' "$integer" "$fraction"
 }
 
+soak_brl_amount_greater_than() {
+    local left_integer="${1%%.*}" right_integer="${2%%.*}"
+    if [[ "${#left_integer}" != "${#right_integer}" ]]; then
+        [[ "${#left_integer}" -gt "${#right_integer}" ]]
+    elif [[ "$left_integer" != "$right_integer" ]]; then
+        [[ "$left_integer" > "$right_integer" ]]
+    else
+        [[ "${1#*.}" > "${2#*.}" ]]
+    fi
+}
+
 soak_resolve_sandbox_max_deposit() {
     local primary_deposit counterparty_deposit explicit_max="" required
     primary_deposit="$(soak_normalize_brl_amount "$1")" || return 2
@@ -32,15 +43,11 @@ soak_resolve_sandbox_max_deposit() {
     fi
 
     required="$primary_deposit"
-    if [[ "${counterparty_deposit%%.*}" -gt "${primary_deposit%%.*}" ]] ||
-        { [[ "${counterparty_deposit%%.*}" == "${primary_deposit%%.*}" ]] &&
-          [[ "${counterparty_deposit#*.}" > "${primary_deposit#*.}" ]]; }; then
+    if soak_brl_amount_greater_than "$counterparty_deposit" "$primary_deposit"; then
         required="$counterparty_deposit"
     fi
     if [[ -n "$explicit_max" ]]; then
-        if [[ "${explicit_max%%.*}" -lt "${required%%.*}" ]] ||
-            { [[ "${explicit_max%%.*}" == "${required%%.*}" ]] &&
-              [[ "${explicit_max#*.}" < "${required#*.}" ]]; }; then
+        if soak_brl_amount_greater_than "$required" "$explicit_max"; then
             return 3
         fi
         printf '%s\n' "$explicit_max"
