@@ -3,23 +3,50 @@
 readonly SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT="1250000.00"
 readonly SOAK_ACCEPTANCE_FUNDING_HEADROOM_PERCENT="25"
 
+soak_normalize_brl_amount() {
+    local value="$1" integer fraction
+    [[ "$value" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || return 2
+    integer="${value%%.*}"
+    if [[ "$value" == *.* ]]; then
+        fraction="${value#*.}"
+    else
+        fraction=""
+    fi
+    while [[ "${#integer}" -gt 1 && "$integer" == 0* ]]; do
+        integer="${integer#0}"
+    done
+    case "${#fraction}" in
+        0) fraction="00" ;;
+        1) fraction="${fraction}0" ;;
+    esac
+    [[ "$integer" != "0" || "$fraction" != "00" ]] || return 2
+    printf '%s.%s\n' "$integer" "$fraction"
+}
+
 soak_resolve_sandbox_max_deposit() {
-    local primary_deposit="$1" counterparty_deposit="$2" explicit_max="${3:-}"
-    awk \
-        -v primary="$primary_deposit" \
-        -v counterparty="$counterparty_deposit" \
-        -v explicit_max="$explicit_max" '
-          BEGIN {
-            if (primary <= 0 || counterparty <= 0) exit 2
-            required = primary > counterparty ? primary : counterparty
-            if (explicit_max != "") {
-              if (explicit_max <= 0 || explicit_max < required) exit 3
-              printf "%s\n", explicit_max
-            } else {
-              printf "%.2f\n", required
-            }
-          }
-        '
+    local primary_deposit counterparty_deposit explicit_max="" required
+    primary_deposit="$(soak_normalize_brl_amount "$1")" || return 2
+    counterparty_deposit="$(soak_normalize_brl_amount "$2")" || return 2
+    if [[ -n "${3:-}" ]]; then
+        explicit_max="$(soak_normalize_brl_amount "$3")" || return 2
+    fi
+
+    required="$primary_deposit"
+    if [[ "${counterparty_deposit%%.*}" -gt "${primary_deposit%%.*}" ]] ||
+        { [[ "${counterparty_deposit%%.*}" == "${primary_deposit%%.*}" ]] &&
+          [[ "${counterparty_deposit#*.}" > "${primary_deposit#*.}" ]]; }; then
+        required="$counterparty_deposit"
+    fi
+    if [[ -n "$explicit_max" ]]; then
+        if [[ "${explicit_max%%.*}" -lt "${required%%.*}" ]] ||
+            { [[ "${explicit_max%%.*}" == "${required%%.*}" ]] &&
+              [[ "${explicit_max#*.}" < "${required#*.}" ]]; }; then
+            return 3
+        fi
+        printf '%s\n' "$explicit_max"
+    else
+        printf '%s\n' "$required"
+    fi
 }
 
 soak_conservative_profile_funding_bound() {

@@ -38,9 +38,19 @@ if soak_validate_strict_refresh_timing 12 6 6 6; then
     exit 1
 fi
 
-[[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1250000.00)" == "1250000.00" ]]
+[[ "$(soak_normalize_brl_amount 1250000)" == "1250000.00" ]]
+[[ "$(soak_normalize_brl_amount 1250000.5)" == "1250000.50" ]]
+[[ "$(soak_normalize_brl_amount 1250000.50)" == "1250000.50" ]]
+for invalid_amount in 1.234 malformed 1e3 -1 0 0.00; do
+    if soak_normalize_brl_amount "$invalid_amount" >/dev/null; then
+        echo "ERROR: invalid BRL amount '$invalid_amount' was accepted" >&2
+        exit 1
+    fi
+done
+[[ "$(soak_resolve_sandbox_max_deposit 1250000 1250000.0)" == "1250000.00" ]]
 [[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1500000.00)" == "1500000.00" ]]
 [[ "$(soak_resolve_sandbox_max_deposit 1500000.00 1250000.00)" == "1500000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1250000.01 1250000.02)" == "1250000.02" ]]
 [[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1750000.00)" == "1750000.00" ]]
 if soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1499999.99 >/dev/null; then
     echo "ERROR: explicit sandbox cap below the counterparty deposit was accepted" >&2

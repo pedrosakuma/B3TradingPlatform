@@ -157,11 +157,29 @@ readonly marketable_buy_price="${SOAK_MARKETABLE_BUY_PRICE:-32.80}"
 readonly marketable_sell_price="${SOAK_MARKETABLE_SELL_PRICE:-29.30}"
 readonly marketable_price_extra_ticks="${SOAK_MARKETABLE_PRICE_EXTRA_TICKS:-1}"
 readonly reference_cross_price="${SOAK_REFERENCE_CROSS_PRICE:-30.00}"
-readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT}"
-readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-$deposit_amount}"
+deposit_amount="$(soak_normalize_brl_amount \
+    "${SOAK_DEPOSIT_AMOUNT:-$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT}")" || {
+    echo "ERROR: SOAK_DEPOSIT_AMOUNT must be a positive BRL decimal with at most 2 fractional digits" >&2
+    exit 3
+}
+readonly deposit_amount
+counterparty_deposit_amount="$(soak_normalize_brl_amount \
+    "${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-$deposit_amount}")" || {
+    echo "ERROR: SOAK_COUNTERPARTY_DEPOSIT_AMOUNT must be a positive BRL decimal with at most 2 fractional digits" >&2
+    exit 3
+}
+readonly counterparty_deposit_amount
+explicit_sandbox_max_deposit_amount=""
+if [[ -n "${SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT:-}" ]]; then
+    explicit_sandbox_max_deposit_amount="$(soak_normalize_brl_amount \
+        "$SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT")" || {
+        echo "ERROR: SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT must be a positive BRL decimal with at most 2 fractional digits" >&2
+        exit 3
+    }
+fi
 sandbox_max_deposit_amount="$(soak_resolve_sandbox_max_deposit \
     "$deposit_amount" "$counterparty_deposit_amount" \
-    "${SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT:-}")" || {
+    "$explicit_sandbox_max_deposit_amount")" || {
     echo "ERROR: SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT must cover both SOAK_DEPOSIT_AMOUNT and SOAK_COUNTERPARTY_DEPOSIT_AMOUNT" >&2
     exit 3
 }
