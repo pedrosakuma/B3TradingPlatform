@@ -1,8 +1,10 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using B3.Trading.Application;
+using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
@@ -232,6 +234,138 @@ public class ConnectSessionRollReactorTests
             book, "FIRM_X", 1, 2, NullLogger.Instance);
 
         Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void OnSessionRolled_ReclassifiesStuckOutboundCancelMutation_ViaOutboundLedger()
+    {
+        var protector = new AeadOutboundCommandProtector(
+            Microsoft.Extensions.Options.Options.Create(
+                new OutboundCommandProtectionOptions
+                {
+                    ActiveKeyId = "key-a",
+                    ActiveKeyVersion = 1,
+                    StableReferenceKeyId = "key-a",
+                    StableReferenceKeyVersion = 1,
+                    Keys =
+                    [
+                        new OutboundCommandProtectionKeyOptions
+                        {
+                            KeyId = "key-a",
+                            Version = 1,
+                            KeyBase64 = Convert.ToBase64String(Enumerable.Repeat((byte)1, 32).ToArray()),
+                        },
+                    ],
+                }),
+            new CryptographicOutboundNonceSource());
+        var ledger = new OutboundMutationLedger(protector);
+        var mutationId = new OutboundMutationId(Guid.Parse(
+            "10000000-1111-2222-3333-444444444444"));
+        var attemptId = new OutboundAttemptId(Guid.Parse(
+            "10000000-aaaa-bbbb-cccc-dddddddddddd"));
+        const ulong originalClOrdId = 777UL;
+        const ulong cancelClOrdId = 778UL;
+        var sensitive = new SensitiveOutboundCommand
+        {
+            Account = "ACC-749-SECRET",
+            InvestorId = "INVESTOR-749-SECRET",
+            EndClientId = "CUSTOMER-749-SECRET",
+            CustomerIdentifier = "DOCUMENT-749-SECRET",
+            TradingSubAccount = "SUBACCOUNT-749-SECRET",
+        };
+        var command = new OutboundCanonicalCommand
+        {
+            ClOrdId = cancelClOrdId,
+            SecurityId = 123,
+            Symbol = "PETR4",
+            Side = "Buy",
+            OrderType = "Limit",
+            Quantity = 100,
+            Price = 30m,
+        };
+        var approval = OutboundApprovalFactory.Create(
+            mutationId,
+            "FIRM_A",
+            command,
+            sensitive,
+            [
+                OutboundSensitiveFieldRef.Account,
+                OutboundSensitiveFieldRef.InvestorId,
+                OutboundSensitiveFieldRef.EndClientId,
+                OutboundSensitiveFieldRef.CustomerIdentifier,
+                OutboundSensitiveFieldRef.TradingSubAccount,
+            ],
+            protector,
+            DateTimeOffset.UtcNow,
+            riskDecisionRef: "risk-749",
+            marginReservationRef: "margin-749");
+        ledger.Apply(new OutboundApprovedEvent
+        {
+            MutationId = mutationId,
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = originalClOrdId,
+            FirmId = "FIRM_A",
+            EndClientRef = protector.CreateStableEndClientRef("FIRM_A", sensitive.EndClientId),
+            Origin = OutboundMutationOrigin.Rest,
+            PrimaryClOrdId = cancelClOrdId,
+            RecordedAtUtc = DateTimeOffset.UtcNow,
+            Approval = approval,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        });
+        ledger.Apply(new OutboundAttemptIntentPreparedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            AttemptNo = 1,
+            ClOrdId = cancelClOrdId,
+            ProcessEpochId = ProcessEpochId.New(),
+            IntentPreparedAtUtc = DateTimeOffset.UtcNow,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        });
+        // Frame committed + write flushed on the pre-roll session (verId 7) —
+        // the mid-disconnect ambiguous cancel dispatch (#749). No execution
+        // report will ever arrive for it once the session rolls.
+        ledger.Apply(new OutboundFramePreparedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            FirmId = "FIRM_A",
+            SessionId = 11,
+            SessionVerId = 7,
+            OutboundSeqNum = 3,
+            EncodedFrameSha256 = new string('f', 64),
+            PreparedAtUtc = DateTimeOffset.UtcNow,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        });
+        ledger.Apply(new OutboundTransportWriteCompletedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            CompletedAtUtc = DateTimeOffset.UtcNow,
+            GatewayReceiptVersion = 1,
+            TimestampUtc = DateTimeOffset.UtcNow,
+        });
+
+        Assert.True(ledger.TryGetActiveForOriginal("FIRM_A", originalClOrdId, out _));
+
+        var book = new WorkingOrderBook();
+        var reactor = new PendingNewReapingConnectRollReactor(
+            book,
+            Dispatcher(),
+            NullLogger<PendingNewReapingConnectRollReactor>.Instance,
+            staleness: null,
+            clock: null,
+            outboundLedger: ledger);
+
+        reactor.OnSessionRolled("FIRM_A", fromVerId: 7, toVerId: 8);
+
+        var mutation = ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        // Still "active" — this only surfaces the mutation for
+        // operator/reconciliation tooling; it does not bypass the dedup
+        // guard, which stays intentionally blocking until resolved.
+        Assert.True(ledger.TryGetActiveForOriginal("FIRM_A", originalClOrdId, out _));
     }
 
     private sealed class ThrowingEventStore : IEventStore

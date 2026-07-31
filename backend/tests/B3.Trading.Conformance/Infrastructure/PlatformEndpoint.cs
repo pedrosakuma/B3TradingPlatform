@@ -37,6 +37,7 @@ public sealed record PlatformEndpoint(
     public const string EnvErInjection = "B3T_ER_INJECTION";
     public const string EnvRealStackConformance = "B3T_REAL_STACK_CONFORMANCE";
     public const string EnvMarketMakerSandbox = "B3T_MARKET_MAKER_SANDBOX";
+    public const string EnvSampleBotSandbox = "B3T_SAMPLE_BOT_SANDBOX";
     public const string EnvDockerControl = "B3T_DOCKER_CONTROL";
     public const string EnvAuthSigningKey = "B3T_AUTH_SIGNING_KEY";
     public const string EnvAuthIssuer = "B3T_AUTH_ISSUER";
@@ -145,6 +146,25 @@ public sealed record PlatformEndpoint(
     }
 
     /// <summary>
+    /// True when the operator declared the target is the dedicated
+    /// docker-compose real-stack sandbox WITH the market-maker overlay AND
+    /// the sample-bot overlay stacked on top (env var
+    /// <c>B3T_SAMPLE_BOT_SANDBOX=true</c>, #722). Gates
+    /// <c>Spec_HTTP_SampleBot/SampleBotSmokeSpecTests.cs</c>, which asserts
+    /// the one-shot <c>B3.Trading.SampleBot</c> container reached a
+    /// terminal order state and left no Working/PartiallyFilled order
+    /// behind. Kept distinct from <see cref="IsMarketMakerSandboxEnabled"/>
+    /// so CI can run the sample-bot smoke in its own job without implying
+    /// every market-maker-sandbox run also expects a sample-bot container
+    /// to have executed first.
+    /// </summary>
+    public static bool IsSampleBotSandboxEnabled()
+    {
+        var v = Environment.GetEnvironmentVariable(EnvSampleBotSandbox);
+        return string.Equals(v, "true", StringComparison.OrdinalIgnoreCase) || v == "1";
+    }
+
+    /// <summary>
     /// True when the operator declared the test process may actively control
     /// the dockerized real-stack transport (env var
     /// <c>B3T_DOCKER_CONTROL=true</c>). Used by destructive session-roll
@@ -197,6 +217,9 @@ public sealed record PlatformEndpoint(
 
     public const string MarketMakerSandboxSkipReason =
         "Market-maker scenario skipped: B3T_MARKET_MAKER_SANDBOX=true not set (target does not have the market-maker-bot overlay + self-cash-deposit stacked on).";
+
+    public const string SampleBotSandboxSkipReason =
+        "Sample-bot scenario skipped: B3T_SAMPLE_BOT_SANDBOX=true not set (target does not have the sample-bot overlay stacked on, or the one-shot sample-bot container has not been run yet).";
 
     public const string DockerControlSkipReason =
         "Docker-control scenario skipped: B3T_DOCKER_CONTROL=true not set (test process cannot sever/reconnect the matching-platform transport).";

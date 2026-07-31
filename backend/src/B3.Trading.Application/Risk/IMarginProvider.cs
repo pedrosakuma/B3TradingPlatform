@@ -1,3 +1,5 @@
+using B3.Trading.Domain;
+
 namespace B3.Trading.Application.Risk;
 
 /// <summary>
@@ -50,6 +52,19 @@ public interface IMarginProvider
     /// Default: no-op.
     /// </summary>
     void ReleaseReservation(ulong clOrdId) { }
+
+    /// <summary>
+    /// Releases every reservation held for (<paramref name="firmId"/>,
+    /// <paramref name="owner"/>) — active and suspended alike — and zeroes
+    /// the account's aggregate reserved notional. Used by the admin
+    /// account-reset flow (#671 / RFC #753) so a reset never leaves stale
+    /// margin holds behind after cash/positions are zeroed; relying on an
+    /// implicit release from a zeroed base capacity would be fragile and
+    /// harder to audit. Idempotent — calling this on an account with no
+    /// reservations, or calling it twice in a row, is a harmless no-op.
+    /// Default: no-op.
+    /// </summary>
+    void ReleaseAllReservationsForAccount(string firmId, EndClientId owner) { }
 }
 
 public sealed class NoOpMarginProvider : IMarginProvider

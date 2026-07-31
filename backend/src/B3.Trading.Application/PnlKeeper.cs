@@ -96,6 +96,37 @@ public sealed class PnlKeeper
 
     public sealed record AvgCostState(long NetQuantity, decimal AvgPrice);
 
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3, code-review addendum
+    /// #4). Discriminates which of <see cref="_avgCost"/> /
+    /// <see cref="_unknownBasisQty"/> a <see cref="PnlSymbolBasisSnapshot"/>
+    /// was captured from, so <see cref="RestoreSymbolBasis"/> writes
+    /// back to the correct dictionary instead of collapsing an
+    /// unknown-basis leg into a known one (or vice versa).
+    /// </summary>
+    public enum PnlBasisKind
+    {
+        /// <summary>No row in either dictionary — never traded, or flat with no legacy leg.</summary>
+        Absent,
+        /// <summary>A known avg-cost basis row in <see cref="_avgCost"/>.</summary>
+        Known,
+        /// <summary>An unknown-basis leftover quantity row in <see cref="_unknownBasisQty"/>.</summary>
+        UnknownQty,
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3, code-review addendum
+    /// #4). Point-in-time capture of one (firm, endClient, symbol)
+    /// basis cell, produced by <see cref="CaptureSymbolBasis"/> and
+    /// consumed by <see cref="RestoreSymbolBasis"/>. <see cref="AvgPrice"/>
+    /// is always <c>0m</c> for <see cref="PnlBasisKind.UnknownQty"/> and
+    /// <see cref="PnlBasisKind.Absent"/> (there is no price to carry).
+    /// </summary>
+    public readonly record struct PnlSymbolBasisSnapshot(PnlBasisKind Kind, long NetQuantity, decimal AvgPrice)
+    {
+        public static readonly PnlSymbolBasisSnapshot Absent = new(PnlBasisKind.Absent, 0L, 0m);
+    }
+
     // --- Firm-aware public surface (PR #316 P1) ----------------------
 
     public decimal GetDayRealized(string firmId, string endClient, string symbol, DateOnly day) =>
@@ -325,6 +356,132 @@ public sealed class PnlKeeper
         }
         if (newQty == 0) newAvg = 0m;
         return new AvgCostState(newQty, newAvg);
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC PR 1, code-review addendum). Companion to
+    /// <see cref="PositionKeeper.SetAbsolute"/>: replaces the tracked
+    /// avg-cost basis for (<paramref name="firmId"/>,
+    /// <paramref name="endClient"/>, <paramref name="symbol"/>) with an
+    /// ABSOLUTE (<paramref name="netQuantity"/>,
+    /// <paramref name="averageEntryPrice"/>) pair outright, discarding
+    /// any prior accumulated basis — known (<see cref="_avgCost"/>) or
+    /// unknown (<see cref="_unknownBasisQty"/>) — so the two keepers
+    /// never drift out of lockstep after an admin position adjustment.
+    /// A zero <paramref name="netQuantity"/> CLEARS the basis entirely
+    /// (a flat position carries no cost basis) rather than leaving a
+    /// stale <c>(0, 0m)</c> entry behind.
+    ///
+    /// <para>
+    /// Does not touch <see cref="_realizedByDay"/>: an absolute
+    /// position overwrite resets the basis going forward, it does not
+    /// retroactively realize or unwind P&amp;L already booked against
+    /// the prior basis (that stays exactly as recorded).
+    /// </para>
+    ///
+    /// <para>
+    /// Must be invoked in the SAME dispatcher-serialised apply as
+    /// <see cref="PositionKeeper.SetAbsolute"/> (see
+    /// <c>AdminEndpoints.HandlePositionAdjustment</c> and the
+    /// <c>PositionAdjustmentEvent</c> replay case in
+    /// <c>EventReplayer.Apply</c>) so the two keepers' state transitions
+    /// for a given adjustment are never observed interleaved with a
+    /// concurrent mutation of either keeper alone.
+    /// </para>
+    ///
+    /// <para>
+    /// Invariant re-checked here as defense-in-depth (mirrors
+    /// <see cref="PositionKeeper.SetAbsolute"/> exactly): zero
+    /// <paramref name="netQuantity"/> requires zero
+    /// <paramref name="averageEntryPrice"/>; non-zero requires a
+    /// strictly positive average entry price.
+    /// </para>
+    /// </summary>
+    public void SetAbsoluteAvgCost(string endClient, string symbol, long netQuantity, decimal averageEntryPrice) =>
+        SetAbsoluteAvgCost(DefaultFirmId, endClient, symbol, netQuantity, averageEntryPrice);
+
+    public void SetAbsoluteAvgCost(string firmId, string endClient, string symbol, long netQuantity, decimal averageEntryPrice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (netQuantity == 0 && averageEntryPrice != 0m)
+            throw new ArgumentException("averageEntryPrice must be 0 when netQuantity is 0", nameof(averageEntryPrice));
+        if (netQuantity != 0 && averageEntryPrice <= 0m)
+            throw new ArgumentException("averageEntryPrice must be > 0 when netQuantity is non-zero", nameof(averageEntryPrice));
+
+        var key = (Norm(firmId), endClient, symbol);
+        // An absolute overwrite always establishes (or clears) a KNOWN
+        // basis — drop any stale unknown-basis leg unconditionally.
+        _unknownBasisQty.TryRemove(key, out _);
+        if (netQuantity == 0)
+        {
+            _avgCost.TryRemove(key, out _);
+            return;
+        }
+        _avgCost[key] = new AvgCostState(netQuantity, averageEntryPrice);
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3, code-review addendum
+    /// #4). Precise, discriminated capture of a single (firm,
+    /// endClient, symbol) basis cell across the THREE mutually
+    /// exclusive states this keeper represents: a KNOWN avg-cost basis
+    /// (<see cref="_avgCost"/>), an UNKNOWN-basis leftover quantity
+    /// (<see cref="_unknownBasisQty"/> — see its class-level remarks),
+    /// or true ABSENCE (never traded, or already flat with no legacy
+    /// leg). <see cref="GetAvgCost(string, string, string)"/> alone
+    /// cannot distinguish the latter two — both read back <c>null</c>
+    /// — which is exactly the gap that made a naive
+    /// <c>SetAbsoluteAvgCost(before?.NetQuantity ?? 0, ...)</c>
+    /// rollback silently wipe a legacy unknown-basis leg to true zero
+    /// instead of restoring it. Exclusively for rollback-precision use
+    /// by the admin reset endpoint; paired with
+    /// <see cref="RestoreSymbolBasis"/>.
+    /// </summary>
+    public PnlSymbolBasisSnapshot CaptureSymbolBasis(string firmId, string endClient, string symbol)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        var key = (Norm(firmId), endClient, symbol);
+        if (_avgCost.TryGetValue(key, out var known))
+            return new PnlSymbolBasisSnapshot(PnlBasisKind.Known, known.NetQuantity, known.AvgPrice);
+        if (_unknownBasisQty.TryGetValue(key, out var unknownQty) && unknownQty != 0)
+            return new PnlSymbolBasisSnapshot(PnlBasisKind.UnknownQty, unknownQty, 0m);
+        return PnlSymbolBasisSnapshot.Absent;
+    }
+
+    /// <summary>
+    /// Rollback companion to <see cref="CaptureSymbolBasis"/>: restores
+    /// EXACTLY the captured state, never routing through
+    /// <see cref="SetAbsoluteAvgCost(string, string, string, long, decimal)"/>
+    /// (which unconditionally treats "no known basis" as "clear the
+    /// unknown-basis leg too" — correct for a genuine reset, wrong for
+    /// a rollback that must undo one). Each branch below writes to
+    /// exactly the one dictionary the captured
+    /// <see cref="PnlSymbolBasisSnapshot.Kind"/> belongs in and removes
+    /// any stale entry from the other, preserving the two dictionaries'
+    /// mutual-exclusivity invariant.
+    /// </summary>
+    public void RestoreSymbolBasis(string firmId, string endClient, string symbol, PnlSymbolBasisSnapshot snapshot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        var key = (Norm(firmId), endClient, symbol);
+        switch (snapshot.Kind)
+        {
+            case PnlBasisKind.Known:
+                _unknownBasisQty.TryRemove(key, out _);
+                _avgCost[key] = new AvgCostState(snapshot.NetQuantity, snapshot.AvgPrice);
+                break;
+            case PnlBasisKind.UnknownQty:
+                _avgCost.TryRemove(key, out _);
+                _unknownBasisQty[key] = snapshot.NetQuantity;
+                break;
+            default:
+                _avgCost.TryRemove(key, out _);
+                _unknownBasisQty.TryRemove(key, out _);
+                break;
+        }
     }
 
     /// <summary>

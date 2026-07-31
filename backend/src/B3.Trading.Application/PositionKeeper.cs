@@ -85,6 +85,75 @@ public sealed class PositionKeeper
     }
 
     /// <summary>
+    /// #671/#753 (RFC: admin account reset + runtime position adjustment,
+    /// PR 1). Overwrites the tracked position for
+    /// <paramref name="firmId"/>/<paramref name="owner"/>/<paramref name="symbol"/>
+    /// with an ABSOLUTE (<paramref name="netQuantity"/>,
+    /// <paramref name="averageEntryPrice"/>) pair, replacing any existing
+    /// accumulated state outright. Used exclusively by the admin
+    /// position-adjustment endpoint (<c>POST /api/admin/positions</c>)
+    /// and its <c>PositionAdjustmentEvent</c> WAL replay — the regular
+    /// trading flow only ever calls <see cref="ApplyFill"/>. Overwrite
+    /// (never merge/accumulate) semantics are required so replaying the
+    /// same event any number of times, or replaying it interleaved with
+    /// other events, always converges on the identical end state.
+    ///
+    /// <para>
+    /// Invariants (RFC #753): a flat (zero) position carries a zero
+    /// average entry price; a non-flat position requires a strictly
+    /// positive average entry price. This mirrors
+    /// <see cref="Domain.Position.ApplyFill"/>'s own zero-on-flat
+    /// behaviour and rejects a non-sensical cost basis on a non-flat
+    /// row. The admin endpoint validates this exact rule before
+    /// dispatch — the check here is defense-in-depth (also guards
+    /// direct callers and WAL replay of a corrupted segment), not the
+    /// primary 400 gate.
+    /// </para>
+    /// </summary>
+    public void SetAbsolute(EndClientId owner, string symbol, long netQuantity, decimal averageEntryPrice) =>
+        SetAbsolute(DefaultFirmId, owner, symbol, netQuantity, averageEntryPrice);
+
+    public void SetAbsolute(string firmId, EndClientId owner, string symbol, long netQuantity, decimal averageEntryPrice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (netQuantity == 0 && averageEntryPrice != 0m)
+            throw new ArgumentException("averageEntryPrice must be 0 when netQuantity is 0", nameof(averageEntryPrice));
+        if (netQuantity != 0 && averageEntryPrice <= 0m)
+            throw new ArgumentException("averageEntryPrice must be > 0 when netQuantity is non-zero", nameof(averageEntryPrice));
+
+        _positions[(NormalizeFirmId(firmId), owner, symbol)] =
+            Position.Hydrate(owner, symbol, netQuantity, averageEntryPrice);
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3, code-review final
+    /// finding). Removes the tracked row entirely for
+    /// (<paramref name="firmId"/>, <paramref name="owner"/>,
+    /// <paramref name="symbol"/>) — unlike <see cref="SetAbsolute(string, EndClientId, string, long, decimal)"/>,
+    /// which ALWAYS materialises a row (even a flat (0, 0m) one), this
+    /// restores true absence. Used EXCLUSIVELY by the admin account-
+    /// reset endpoint's post-append apply-failure rollback, to put a
+    /// symbol that had NO tracked row before the reset back to true
+    /// absence rather than leaving a spurious flat row that
+    /// <c>SetAbsolute(..., 0, 0m)</c> would otherwise create. The live
+    /// (successful) reset path never needs this: it only ever calls
+    /// <see cref="SetAbsolute(string, EndClientId, string, long, decimal)"/>
+    /// for symbols that are EITHER already non-flat (hence already
+    /// present) OR carry a configured <c>PositionSeedOptions</c> seed
+    /// (a deliberate materialisation) — see
+    /// <c>AccountResetPayloadResolver.Resolve</c>. Returns <c>true</c>
+    /// when a row was actually removed, <c>false</c> if the row was
+    /// already absent (idempotent).
+    /// </summary>
+    public bool TryRemove(string firmId, EndClientId owner, string symbol)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        return _positions.TryRemove((NormalizeFirmId(firmId), owner, symbol), out _);
+    }
+
+    /// <summary>
     /// Returns positions for <paramref name="owner"/> across ALL firms.
     /// Preserved as legacy behaviour for callers we haven't migrated to
     /// the firm-aware API; owner-scoped REST/WS read paths MUST use

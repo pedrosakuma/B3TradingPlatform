@@ -662,7 +662,8 @@ public sealed record PendingReplacementSnapshot(
     bool AmbiguousMarginHeld,
     DateTimeOffset? AmbiguousAtUtc,
     decimal NewRemainingNotional,
-    bool ReleasedForVenueAbsent = false);
+    bool ReleasedForVenueAbsent = false,
+    bool IsPeggedRepeg = false);
 
 public sealed record PendingCancelSnapshot(
     ulong OriginalClOrdId,

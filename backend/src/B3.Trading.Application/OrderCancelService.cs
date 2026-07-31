@@ -311,6 +311,8 @@ public sealed class OrderCancelService
         {
             if (_outboundLedger is null || _approvalFactory is null)
                 return FailResolutionForReconciliation(
+                    mutationId,
+                    order.FirmId,
                     cancelClOrdId,
                     "outbound_cancel_composition_invalid",
                     new InvalidOperationException("Cancel outbound coordinator composition is incomplete."));
@@ -354,6 +356,8 @@ public sealed class OrderCancelService
                     or OutboundCommandEnvelopeException)
             {
                 return FailResolutionForReconciliation(
+                    mutationId,
+                    order.FirmId,
                     cancelClOrdId,
                     "outbound_cancel_approval_not_committed",
                     ex);
@@ -418,6 +422,8 @@ public sealed class OrderCancelService
             catch (Exception resolutionEx)
             {
                 return FailResolutionForReconciliation(
+                    mutationId,
+                    order.FirmId,
                     cancelClOrdId, "pre_send_cancel_resolution_not_durable", resolutionEx);
             }
             if (!resolution.Durable)
@@ -428,6 +434,8 @@ public sealed class OrderCancelService
                         ResolvePreSendFailure(cancelClOrdId));
                 }
                 return FailResolutionForReconciliation(
+                    mutationId,
+                    order.FirmId,
                     cancelClOrdId, "pre_send_cancel_resolution_not_durable",
                     resolution.Failure!);
             }
@@ -458,6 +466,8 @@ public sealed class OrderCancelService
     }
 
     private OrderCancelResult FailResolutionForReconciliation(
+        OutboundMutationId mutationId,
+        string firmId,
         ulong cancelClOrdId,
         string reason,
         Exception exception)
@@ -469,9 +479,9 @@ public sealed class OrderCancelService
         }
         _reconciliationDrain?.BeginDrain("wal_cancel_resolution_reconciliation_required");
         _logger.LogCritical(exception,
-            "Cancel resolution {Reason} for ClOrdID {CancelClOrdId}; ingress is draining and operator reconciliation is required.",
-            reason, cancelClOrdId);
-        return OrderCancelResult.ReconciliationRequired(cancelClOrdId, reason, exception);
+            "Cancel resolution {Reason} for mutation {MutationId} (firm {FirmId}, ClOrdID {CancelClOrdId}); ingress is draining and operator reconciliation is required.",
+            reason, mutationId, firmId, cancelClOrdId);
+        return OrderCancelResult.ReconciliationRequired(cancelClOrdId, reason, exception, mutationId);
     }
 
 }

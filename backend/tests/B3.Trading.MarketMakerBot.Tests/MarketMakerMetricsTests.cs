@@ -65,6 +65,7 @@ public class MarketMakerMetricsTests
             Assert.Contains(("bot.pnl.total", 0d, symbol), doubles);
         }
         Assert.Contains(("bot.pnl.fills_unknown_order", 0L, "unknown"), longs);
+        Assert.Contains(("bot.pnl.reconciliation_required", 0L, string.Empty), longs);
     }
 
     [Fact]

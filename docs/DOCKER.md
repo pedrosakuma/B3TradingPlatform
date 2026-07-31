@@ -304,6 +304,10 @@ Those versions emit `OrderMassActionReport(ACCEPTED)` before dispatcher
 execution, so neither that report nor a FIXP `Sequence` heartbeat is an
 execution barrier.
 
+If persisted state identifies a prior session that requires cleanup, the bot
+fails startup while this option is `false`; it never bypasses the compatibility
+opt-in or submits replacement quotes over potentially restored venue orders.
+
 Set `StartupCleanupEnabled=true` only after deploying a matching-platform
 release containing #569. Under that minimum contract, the solicited
 `MassActionExecuted(ACCEPTED)` correlated by the request `ClOrdID` is terminal:
@@ -421,6 +425,148 @@ this scenario in its own job (`market-maker-conformance` in
 `docker-compose.market-maker.yml` + `docker-compose.conformance.yml` +
 `docker-compose.market-maker-conformance.yml`, so it never shares an
 order book with the `real-stack-conformance` job.
+
+## Sample-bot overlay (opt-in, authenticated end-client smoke, #722)
+
+```bash
+cp docker/.env.example docker/.env
+# edit docker/.env — TRADING_AUTH_SIGNING_KEY is mandatory (>= 32 bytes)
+
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.market-maker.yml \
+    -f docker/docker-compose.sample-bot.yml \
+    up -d --build --wait trading-host market-maker-bot
+docker compose \
+    -f docker/docker-compose.yml \
+    -f docker/docker-compose.market-maker.yml \
+    -f docker/docker-compose.sample-bot.yml \
+    run --rm --no-deps --build sample-bot
+```
+
+The counterpart to the Demo and Market-maker overlays above, but for
+proving the platform's **consumer-facing** contract instead of a
+privileged/simulated one:
+[`backend/tools/B3.Trading.SampleBot`](../backend/tools/B3.Trading.SampleBot)
+is a small one-shot .NET console that behaves exactly like an ordinary
+end-client — it authenticates through `POST /api/auth/login` (or
+`/api/auth/exchange` / a supplied internal token, see below), opens the
+same authenticated `/ws` a browser opens, subscribes to
+`B3MarketDataPlatform`'s public feed for one symbol, submits at most one
+bounded REST limit order, observes it over its own private WebSocket
+channels, and reconciles over REST before exiting. `sample-bot` never
+receives a `matching-platform` endpoint or FIXP credential — enforced
+at the option-validation layer (`SampleBotOptionsValidator` rejects a
+`BaseUrl`/`MarketData:WsUrl` host of `matching-platform`), not just by
+convention.
+
+This overlay stacks on top of the Market-maker overlay so the sample
+bot observes a fresh, continuously-refreshed public reference price
+(`TradingReferencePrice`) instead of racing a possibly-empty order book
+on a freshly booted stack — it does **not** rely on crossing the
+market-maker's resting quotes for a fill. `SampleBotWorkflow.ComputePassiveLimitPrice`
+deliberately prices the default Buy below the observed reference, so
+the expected, deterministic journey on a clean checkout is: submit ->
+observe `Working` over the private feed -> `DemoOrder:OrderTimeout`
+elapses -> best-effort cancel -> `Cancelled`, confirmed by
+`GET /api/orders` showing no `Working`/`PartiallyFilled` order. An
+unexpected `Filled` (a third party crossing the resting order first) is
+not a failure — only a leaked working order is.
+
+| Service | What it does |
+|---|---|
+| `trading-host` | stays `Mode=Real` (base default); seeds a dedicated ordinary `sample-bot` FIRM01 user (`Trading__Auth__Users__9`) + cash, isolated from every other seed |
+| `sample-bot` | one-shot; authenticates, subscribes `/ws` + market data, submits/observes/cancels one order, exits (`restart: "no"`) |
+
+### Safety
+
+- **No exchange-side capability, ever.** `sample-bot` only ever talks to
+  the participant REST/WS surface and the public market-data WS —
+  never `matching-platform:9876`, never a FIXP session, never an
+  `EnteringFirm`/`AccessKey`. This is the opposite trust boundary from
+  the Market-maker overlay's co-located FIXP client.
+- The committed `sample-bot`/`samplebotpass` credential (PBKDF2 hash +
+  salt in `docker-compose.sample-bot.yml`) is public in this repo, same
+  posture as the Demo overlay's bot credentials — override
+  `SAMPLE_BOT_USER`/`SAMPLE_BOT_PASSWORD`/`SAMPLE_BOT_PASSWORD_HASH`/`SAMPLE_BOT_PASSWORD_SALT`
+  before running this anywhere beyond a laptop/CI job.
+- Trading is only ever enabled by the explicit
+  `SampleBot__DemoOrder__Enabled=true` flag this overlay sets. Running
+  the sample bot with that flag unset (or omitting the overlay
+  entirely and using `dotnet run` against a host of your choosing)
+  only authenticates and observes — it never submits an order.
+- `stop_grace_period: 30s` on the `sample-bot` service bounds cleanup:
+  the workflow's own best-effort cancel
+  (`DemoOrder:CancellationAttemptTimeout`, default 10s) plus
+  `DemoOrder:PostWorkflowWait` (3s) always completes well inside that
+  window before the container is asked to stop, so shutdown never
+  SIGKILLs an in-flight cancel.
+
+### Auth mode operation
+
+| Mode | What happens | When to use |
+|---|---|---|
+| `LocalPassword` (**required default**) | `POST /api/auth/login` with `SampleBot:Auth:Username`/`Password` | The smoke above; any `Local`/`Hybrid`-mode host with local login enabled |
+| `ExternalExchange` | An externally-acquired Entra access token (`SampleBot:Auth:ExternalAccessToken`) is exchanged via `POST /api/auth/exchange` | `Hybrid`/`Entra` hosts, once you have a real Entra test tenant/token — never simulate this with a token that bypasses `/api/auth/exchange` |
+| `InternalToken` | An already-issued internal trading JWT (`SampleBot:Auth:InternalTradingToken`) is used directly, no login round-trip | Wiring the sample against a token minted by another process (e.g. a CI harness) |
+
+The compose overlay only wires `LocalPassword` — it is the one mode
+every deployment topology (`Local`, `Hybrid`) supports out of the box.
+See [`backend/tools/B3.Trading.SampleBot/README.md`](../backend/tools/B3.Trading.SampleBot/README.md)
+for exact environment variable names for the other two modes.
+
+### Optional sub-account
+
+`SampleBot:SubAccountId` stays unset by default — it is validated
+(`GET /api/sub-accounts`, must exist and be active) but never required.
+To exercise it, an **admin** must pre-create the sub-account first
+(sub-account lifecycle is admin-only, there is no config-based seed):
+
+```bash
+curl -s -XPOST http://localhost:5000/api/sub-accounts \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"id":"tradingdesk","displayName":"Sample desk"}'
+```
+
+then set `SampleBot__SubAccountId=tradingdesk` on the `sample-bot`
+service before running it.
+
+### Conformance coverage (#722)
+
+`backend/tests/B3.Trading.Conformance/Spec_HTTP_SampleBot/SampleBotSmokeSpecTests.cs`
+logs in as the dedicated `sample-bot` end-client and asserts, purely
+over REST, that the one-shot container's run produced at least one
+successful terminal order (`Cancelled` or an unexpected-but-valid
+`Filled`) and left no `Working`/`PartiallyFilled` order behind. The
+verifier never cancels a straggler, because doing so would hide the
+cleanup regression this smoke is intended to detect; the isolated stack
+teardown handles cleanup after the assertion. It's gated on
+`RequiresSampleBotSandbox` (operator/CI sets
+`B3T_SAMPLE_BOT_SANDBOX=true` + `B3T_SAMPLE_BOT_USER`/`B3T_SAMPLE_BOT_PASS`)
+— a flag deliberately separate from `RequiresMarketMakerSandbox`, since
+this spec's assertions are scoped to the sample-bot's own end-client
+and don't depend on (or interfere with) the market-maker liquidity
+spec's crosses. The spec does **not** start the sample-bot container
+itself — CI (`sample-bot-conformance` job) runs
+`docker compose run --rm --no-deps sample-bot` to completion first,
+without reconciling/recreating the already-running stack, then runs
+this verifier against `docker-compose.yml` + `docker-compose.real.yml`
++ `docker-compose.market-maker.yml` + `docker-compose.conformance.yml`
++ `docker-compose.market-maker-conformance.yml` +
+`docker-compose.sample-bot.yml` + `docker-compose.sample-bot-conformance.yml`.
+This job is **not** part of the release gate/promote pipeline — it
+validates the sample and its docs stay in sync with the real stack,
+it does not gate shipping `trading-host`/`frontend`/`market-maker-bot`.
+
+### Distinctions from the other bots/consumers
+
+| | Trust boundary | Lifecycle | Purpose |
+|---|---|---|---|
+| **`sample-bot`** (this overlay) | Participant REST/WS + public market-data WS only — same as any external consumer | One-shot; exits after one bounded order lifecycle | Documented, reproducible proof of the ordinary end-client journey |
+| [`DemoDriver`](#demo-overlay-opt-in-laptop-only) | In-process `Mode=Mock` + `AllowErInjection` — a same-process shortcut, not a real wire | Long-running; continuous submit + synthetic-fill injection loops | Make the trader UI look alive for a laptop demo, no real matching |
+| [`MarketMakerBot`](#market-maker-overlay-opt-in-real-market-sandbox-demo) | Co-located FIXP client with its own matching-platform session/credentials | Long-running; continuously re-quotes | Provide real two-sided liquidity so *other* end-clients have a market |
+| [External FIXP user-bot listener](operations/fixp-listener.md) | Native FIXP/SBE over `Trading:EntryPointListener`, self-service credentials | Operator/bot-owned; independent of this repo's tooling | Let *third-party* bots connect over the wire protocol directly, bypassing REST/WS entirely |
 
 ## Honest no-broker mode
 

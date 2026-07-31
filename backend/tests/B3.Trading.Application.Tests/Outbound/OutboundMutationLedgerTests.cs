@@ -126,6 +126,65 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void RecoveredWriteWithoutFrame_IsQuarantinedButLiveTransitionStillRejects()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.Apply(fixture.Write));
+
+        fixture.Ledger.ApplyRecovered(fixture.Write);
+        fixture.Ledger.ApplyRecovered(fixture.Write);
+
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(1, fixture.Ledger.ReadinessBlockingCount);
+        var attempt = Assert.Single(mutation.Attempts);
+        Assert.Null(attempt.FramePrepared);
+        Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(fixture.Write.GatewayReceiptVersion, attempt.GatewayReceiptVersion);
+        Assert.Equal(
+            OutboundAmbiguityReason.MissingFramePreparedEvidence,
+            attempt.AmbiguityReason);
+        Assert.All(
+            fixture.Ledger.SnapshotCorrelations(),
+            correlation => Assert.False(correlation.Terminal));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.ApplyRecovered(fixture.Write with
+            {
+                GatewayReceiptVersion = fixture.Write.GatewayReceiptVersion + 1,
+            }));
+
+        var restored = RestoreLedger(fixture);
+        var restoredMutation = Assert.Single(restored.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.Ambiguous, restoredMutation.State);
+        Assert.True(restoredMutation.RequiresReconciliation);
+        Assert.Equal(
+            OutboundAmbiguityReason.MissingFramePreparedEvidence,
+            Assert.Single(restoredMutation.Attempts).AmbiguityReason);
+    }
+
+    [Fact]
+    public void RecoveredWriteWithoutFrame_RejectsConflictWithProvenUnsentEvidence()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Unsent);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            fixture.Ledger.ApplyRecovered(fixture.Write));
+
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.ProvenUnsent, mutation.State);
+        Assert.Null(Assert.Single(mutation.Attempts).TransportWriteCompletedAtUtc);
+    }
+
+    [Fact]
     public void Recovery_IntentOnlyIsProvenUnsent_FrameAndWriteAreAmbiguous()
     {
         var intentOnly = Fixture.Create();
@@ -155,6 +214,188 @@ public sealed class OutboundMutationLedgerTests
         Assert.Equal(1, intentOnly.Ledger.ReadinessBlockingCount);
         Assert.Equal(1, frame.Ledger.ReadinessBlockingCount);
         Assert.Equal(1, write.Ledger.ReadinessBlockingCount);
+    }
+
+    [Fact]
+    public void SessionRolled_ReclassifiesStuckCancelWriteAsAmbiguous_AndBlocksFurtherReclassifyOnAlreadyResolved()
+    {
+        var fixture = Fixture.Create();
+        var cancel = fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = 999,
+        };
+        fixture.Ledger.Apply(cancel);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame); // SessionVerId = 2 (pre-roll session)
+        fixture.Ledger.Apply(fixture.Write); // stuck at TransportWriteCompleted, no ER will ever arrive
+
+        var mutationBeforeRoll = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.TransportWriteCompleted, mutationBeforeRoll.State);
+        Assert.False(mutationBeforeRoll.RequiresReconciliation);
+        Assert.True(fixture.Ledger.TryGetActiveForOriginal("F1", 999, out _));
+
+        var reclassified = fixture.Ledger.ClassifySessionRolledAttempts(
+            "F1", currentSessionVerId: 3, T0.AddMinutes(1));
+
+        Assert.Equal(1, reclassified);
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledTransportWriteCompleted,
+            mutation.Attempts.Single().AmbiguityReason);
+
+        // Ambiguity is a defense-in-depth signal, not an automatic dedup
+        // release: the active-mutation guard for the original order must
+        // stay intact until an operator resolves it with venue evidence.
+        Assert.True(fixture.Ledger.TryGetActiveForOriginal("F1", 999, out var active));
+        Assert.Equal(mutation.MutationId, active!.MutationId);
+
+        // Re-running for a later roll on an already-reclassified mutation is
+        // a no-op (idempotent), not a conflicting-transition throw.
+        Assert.Equal(
+            0,
+            fixture.Ledger.ClassifySessionRolledAttempts("F1", currentSessionVerId: 4, T0.AddMinutes(2)));
+    }
+
+    [Fact]
+    public void SessionRolled_ReclassifiesFramePreparedOnlyAttemptAsAmbiguous()
+    {
+        var fixture = Fixture.Create(clOrdId: 501);
+        var cancel = fixture.Approved with
+        {
+            MutationKind = OutboundMutationKind.Cancel,
+            OriginalClOrdId = 998,
+        };
+        fixture.Ledger.Apply(cancel);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame); // frame prepared, write never completed
+
+        var reclassified = fixture.Ledger.ClassifySessionRolledAttempts(
+            "F1", currentSessionVerId: 3, T0.AddMinutes(1));
+
+        Assert.Equal(1, reclassified);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledFramePrepared,
+            fixture.Ledger.SnapshotMutations().Single().Attempts.Single().AmbiguityReason);
+    }
+
+    [Fact]
+    public void LateTransportWriteCompleted_AfterSessionRolledFramePreparedReclassification_IsAcceptedNotRejected()
+    {
+        // Regression test for the #719 soak-evidence race: a coordinator can
+        // still be genuinely in flight on the venue transport (write not yet
+        // completed) at the exact moment its session rolls. Phase 3
+        // (ClassifySessionRolledAttempts) speculatively reclassifies that
+        // still-FramePrepared attempt Ambiguous without knowing the write is
+        // about to legitimately complete. When the coordinator's own
+        // OutboundTransportWriteCompletedEvent arrives moments later, Apply
+        // must accept it as real evidence instead of throwing
+        // "Transport-write completion is out of order." (which previously
+        // escaped uncaught up through the ledger, into the coordinator's
+        // catch-all, and forced a fail-closed drain of all future order
+        // flow — reproduced live under the #719 baseline soak run).
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame); // frame prepared on SessionVerId = 2
+
+        Assert.Equal(
+            1,
+            fixture.Ledger.ClassifySessionRolledAttempts(
+                "F1", currentSessionVerId: 3, T0.AddMinutes(1)));
+        var reclassified = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, reclassified.State);
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledFramePrepared,
+            reclassified.Attempts.Single().AmbiguityReason);
+
+        // The coordinator's own in-flight write completes right after —
+        // this must not throw.
+        var landedAsCompleted = fixture.Ledger.Apply(fixture.Write);
+
+        Assert.False(landedAsCompleted);
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+        Assert.True(mutation.RequiresReconciliation);
+        var attempt = mutation.Attempts.Single();
+        Assert.Equal(
+            OutboundAmbiguityReason.SessionRolledTransportWriteCompleted,
+            attempt.AmbiguityReason);
+        Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(fixture.Write.GatewayReceiptVersion, attempt.GatewayReceiptVersion);
+
+        // Idempotent replay of the same completion evidence must not throw
+        // either, and must report the same (non-clean) outcome.
+        Assert.False(fixture.Ledger.Apply(fixture.Write));
+    }
+
+    [Fact]
+    public void LateTransportWriteCompleted_AfterVenueAcknowledgement_IsRecordedWithoutReplacingTerminalState()
+    {
+        var fixture = Fixture.Create();
+        fixture.Ledger.Apply(fixture.Approved);
+        fixture.Ledger.Apply(fixture.Intent);
+        fixture.Ledger.Apply(fixture.Frame);
+
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            fixture.Ledger.ApplyVenueAcknowledgement(
+                Acknowledgement(fixture, "F1", sessionId: 11, sessionVerId: 2) with
+                {
+                    TimestampUtc = T0.AddMilliseconds(3500),
+                }).Status);
+        var acknowledged = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, acknowledged.State);
+        var resolution = Assert.IsType<OutboundResolutionSnapshot>(acknowledged.Resolution);
+        var acknowledgedAt = acknowledged.StateChangedAtUtc;
+
+        Assert.True(fixture.Ledger.Apply(fixture.Write));
+
+        var mutation = fixture.Ledger.SnapshotMutations().Single();
+        Assert.Equal(OutboundMutationState.VenueAcknowledged, mutation.State);
+        Assert.Equal(acknowledgedAt, mutation.StateChangedAtUtc);
+        Assert.Equal(resolution, mutation.Resolution);
+        Assert.False(mutation.RequiresReconciliation);
+        var attempt = Assert.Single(mutation.Attempts);
+        Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+        Assert.Equal(fixture.Write.GatewayReceiptVersion, attempt.GatewayReceiptVersion);
+
+        Assert.True(fixture.Ledger.Apply(fixture.Write));
+        Assert.True(fixture.Ledger.ApplyRecovered(fixture.Write));
+    }
+
+    [Fact]
+    public void SessionRolled_IgnoresAttemptsFromCurrentOrLaterSession_AndOtherFirms()
+    {
+        var currentSession = Fixture.Create(); // Frame.SessionVerId == 2
+        currentSession.Ledger.Apply(currentSession.Approved);
+        currentSession.Ledger.Apply(currentSession.Intent);
+        currentSession.Ledger.Apply(currentSession.Frame);
+        currentSession.Ledger.Apply(currentSession.Write);
+
+        // toVerId == 2 means the attempt's own session is the current one,
+        // not a superseded one: it must not be touched.
+        Assert.Equal(
+            0,
+            currentSession.Ledger.ClassifySessionRolledAttempts("F1", currentSessionVerId: 2, T0.AddMinutes(1)));
+        Assert.Equal(
+            OutboundMutationState.TransportWriteCompleted,
+            currentSession.Ledger.SnapshotMutations().Single().State);
+
+        var otherFirm = Fixture.Create(clOrdId: 502);
+        otherFirm.Ledger.Apply(otherFirm.Approved with { FirmId = "F2" });
+        otherFirm.Ledger.Apply(otherFirm.Intent);
+        otherFirm.Ledger.Apply(otherFirm.Frame with { FirmId = "F2" });
+        otherFirm.Ledger.Apply(otherFirm.Write);
+
+        Assert.Equal(
+            0,
+            otherFirm.Ledger.ClassifySessionRolledAttempts("F1", currentSessionVerId: 5, T0.AddMinutes(1)));
+        Assert.Equal(
+            OutboundMutationState.TransportWriteCompleted,
+            otherFirm.Ledger.SnapshotMutations().Single().State);
     }
 
     [Fact]
@@ -1474,6 +1715,107 @@ public sealed class OutboundMutationLedgerTests
         Assert.Equal(OutboundMutationState.OperatorResolved, mutation!.State);
         Assert.Equal(2, mutation.OperatorEvidence.Count);
         Assert.NotNull(mutation.Resolution);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReplayedOperatorResolution_AfterEphemeralClassification_AcceptsLastDurableState(
+        bool transportWriteCompleted)
+    {
+        var writer = Fixture.Create();
+        writer.Ledger.Apply(writer.Approved);
+        writer.Ledger.Apply(writer.Intent);
+        writer.Ledger.Apply(writer.Frame);
+        if (transportWriteCompleted)
+            writer.Ledger.Apply(writer.Write);
+        writer.Ledger.ClassifySessionRolledAttempts(
+            "F1", currentSessionVerId: 3, T0.AddMinutes(1));
+        var resolved = new OutboundOperatorResolvedEvent
+        {
+            MutationId = writer.MutationId,
+            Decision = OutboundOperatorDecision.VenueAbsent,
+            EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+            EvidenceDigest = new string('d', 64),
+            EvidenceReference = $"official-extract:{new string('d', 64)}",
+            ReasonCode = "official_extract_attested",
+            OperatorRef = "operator-17",
+            ReleaseCapacity = true,
+            ResolvedAtUtc = T0.AddMinutes(2),
+            TimestampUtc = T0.AddMinutes(2),
+        };
+        writer.Ledger.Apply(resolved);
+
+        var replayed = new OutboundMutationLedger(writer.Protector);
+        var replayer = NewReplayer(replayed, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Frame);
+        if (transportWriteCompleted)
+            replayer.Apply(writer.Write);
+
+        Assert.Throws<InvalidOperationException>(() => replayed.Apply(resolved));
+        replayer.Apply(resolved);
+
+        var mutation = Assert.Single(replayed.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation.State);
+        Assert.False(mutation.RequiresReconciliation);
+        Assert.Equal(
+            OutboundOperatorDecision.VenueAbsent,
+            Assert.Single(mutation.OperatorEvidence).Decision);
+        Assert.NotNull(mutation.Resolution);
+    }
+
+    [Fact]
+    public void ReplayedOperatorProposal_AfterEphemeralClassification_AllowsMakerCheckerResolution()
+    {
+        var writer = Fixture.Create();
+        var proposalId = new OutboundResolutionProposalId(Guid.Parse(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        var proposed = new OutboundOperatorResolutionProposedEvent
+        {
+            MutationId = writer.MutationId,
+            ProposalId = proposalId,
+            Decision = OutboundOperatorDecision.VenueAbsent,
+            EvidenceType = OutboundOperatorEvidenceType.OfficialExtract,
+            EvidenceReference = $"official-extract:{new string('e', 64)}",
+            EvidenceDigest = new string('e', 64),
+            ReasonCode = "official_extract_attested",
+            MakerRef = "maker-17",
+            ProposedAtUtc = T0.AddMinutes(2),
+            TimestampUtc = T0.AddMinutes(2),
+        };
+        var resolved = new OutboundOperatorResolvedEvent
+        {
+            MutationId = writer.MutationId,
+            Decision = proposed.Decision,
+            EvidenceType = proposed.EvidenceType,
+            EvidenceReference = proposed.EvidenceReference,
+            EvidenceDigest = proposed.EvidenceDigest,
+            ReasonCode = proposed.ReasonCode,
+            OperatorRef = "checker-18",
+            MakerRef = proposed.MakerRef,
+            CheckerRef = "checker-18",
+            ProposalId = proposalId,
+            ReleaseCapacity = true,
+            ResolvedAtUtc = T0.AddMinutes(3),
+            TimestampUtc = T0.AddMinutes(3),
+        };
+        var replayed = new OutboundMutationLedger(writer.Protector);
+        var replayer = NewReplayer(replayed, new ClOrdIdPrefixRegistry());
+        replayer.Apply(writer.Approved);
+        replayer.Apply(writer.Intent);
+        replayer.Apply(writer.Frame);
+
+        Assert.Throws<InvalidOperationException>(() => replayed.Apply(proposed));
+        replayer.Apply(proposed);
+        replayer.Apply(resolved);
+
+        var mutation = Assert.Single(replayed.SnapshotMutations());
+        Assert.Equal(OutboundMutationState.OperatorResolved, mutation.State);
+        var proposal = Assert.Single(mutation.ResolutionProposals);
+        Assert.Equal("checker-18", proposal.CheckerRef);
+        Assert.Equal(resolved.ResolvedAtUtc, proposal.ApprovedAtUtc);
     }
 
     [Fact]
@@ -3409,6 +3751,75 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public async Task PersistenceRecovery_WriteWithoutFrame_RequiresReconciliation()
+    {
+        var fixture = Fixture.Create();
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "outbound-missing-frame-restart",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var options = new PersistenceOptions
+        {
+            DataDirectory = root,
+            FirmId = "test",
+            ChannelCapacity = 16,
+            GroupCommitMaxRecords = 1,
+            GroupCommitWindow = TimeSpan.Zero,
+            SegmentMaxBytes = 4096,
+            IndexEveryNRecords = 1,
+            IndexEveryNBytes = 128,
+            FsyncOnFlush = false,
+            LegacyWalStartupMode = LegacyWalStartupMode.ControlledCleanShutdown,
+        };
+        try
+        {
+            await using (var store = new FileEventStore(
+                options, NullLogger<FileEventStore>.Instance))
+            {
+                store.Append(fixture.Approved);
+                store.Append(fixture.Intent);
+                var writeSeq = store.Append(fixture.Write);
+                await store.FlushThroughAsync(writeSeq);
+            }
+
+            var ledger = new OutboundMutationLedger(fixture.Protector);
+            var clOrdIds = new ClOrdIdPrefixRegistry();
+            var snapshotter = NewSnapshotter(
+                ledger,
+                clOrdIds,
+                new PendingReplacementRegistry(),
+                new PendingCancelRegistry());
+            var replayer = NewReplayer(ledger, clOrdIds);
+            await using var reopened = new FileEventStore(
+                options, NullLogger<FileEventStore>.Instance);
+            var recovery = new PersistenceRecovery(
+                reopened,
+                snapshotter,
+                replayer,
+                new SnapshotStore(root, "test"),
+                NullLogger<PersistenceRecovery>.Instance);
+
+            await recovery.RunAsync();
+
+            var mutation = Assert.Single(ledger.SnapshotMutations());
+            Assert.Equal(OutboundMutationState.Ambiguous, mutation.State);
+            Assert.True(mutation.RequiresReconciliation);
+            Assert.Equal(1, ledger.ReadinessBlockingCount);
+            var attempt = Assert.Single(mutation.Attempts);
+            Assert.Null(attempt.FramePrepared);
+            Assert.Equal(fixture.Write.CompletedAtUtc, attempt.TransportWriteCompletedAtUtc);
+            Assert.Equal(
+                OutboundAmbiguityReason.MissingFramePreparedEvidence,
+                attempt.AmbiguityReason);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void ApprovalReplay_WithMissingHistoricalKey_BlocksReadiness()
     {
         var writer = Fixture.Create();
@@ -4437,6 +4848,264 @@ public sealed class OutboundMutationLedgerTests
         Assert.True(restored.HasBlockingAlgoMutation(
             fixture.Approved.FirmId,
             origin.ParentAlgoId));
+    }
+
+    // ----- HasNonTerminalMutationForEndClientRef (#671 / RFC #753 PR2) -----
+    //
+    // These construct minimal OutboundMutationSnapshot rows directly and
+    // load them via Restore (Approval left null so Restore's
+    // Approval-integrity/derived-reconciliation recompute — exercised
+    // elsewhere in this file — is skipped and the constructed State /
+    // RequiresReconciliation values are used verbatim). This keeps the
+    // guard-query tests focused on the query's own predicate rather than
+    // re-deriving the full approve/attempt/ack event chain.
+
+    private const string AliceRef = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    private const string BobRef = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+
+    private static OutboundMutationSnapshot NonTerminalGuardSnapshot(
+        string firmId,
+        string endClientRef,
+        ulong clOrdId,
+        OutboundMutationState state,
+        bool requiresReconciliation = false) => new()
+        {
+            MutationId = new OutboundMutationId(Guid.Parse(
+            $"{clOrdId:x8}-5555-6666-7777-888888888888")),
+            Kind = OutboundMutationKind.New,
+            FirmId = firmId,
+            EndClientRef = endClientRef,
+            Origin = OutboundMutationOrigin.Rest,
+            PrimaryClOrdId = clOrdId,
+            RecordedAtUtc = T0,
+            State = state,
+            StateChangedAtUtc = T0,
+            RequiresReconciliation = requiresReconciliation,
+            ExplicitlyRequiresReconciliation = requiresReconciliation,
+        };
+
+    private static OutboundMutationLedger GuardLedger(
+        params OutboundMutationSnapshot[] mutations)
+    {
+        var ledger = new OutboundMutationLedger();
+        ledger.Restore(
+            mutations,
+            Array.Empty<OutboundCorrelationTombstone>(),
+            Array.Empty<InboundVenueEvidenceSnapshot>());
+        return ledger;
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_NonTerminalState_Blocks()
+    {
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", AliceRef, 1, OutboundMutationState.ApprovedToSend));
+
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_TerminalReconciled_DoesNotBlock()
+    {
+        // Terminal (VenueAcknowledged) AND RequiresReconciliation=false:
+        // the venue outcome is authoritative, nothing blocks a reset.
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged,
+            requiresReconciliation: false));
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_TerminalRequiringReconciliation_StillBlocks()
+    {
+        // Terminal but RequiresReconciliation=true: the venue outcome is
+        // not yet authoritative (e.g. conflicting evidence pending
+        // operator resolution) — must still fail-close a reset.
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged,
+            requiresReconciliation: true));
+
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_FirmIsolation_OnlyMatchingFirmBlocks()
+    {
+        // Same end-client reference, two different firms: a non-terminal
+        // mutation at F2 must not block a query for F1.
+        var ledger = GuardLedger(
+            NonTerminalGuardSnapshot("F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged),
+            NonTerminalGuardSnapshot("F2", AliceRef, 2, OutboundMutationState.ApprovedToSend));
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F2", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_ClientIsolation_OnlyMatchingEndClientBlocks()
+    {
+        // Same firm, two different end-clients: bob's non-terminal
+        // mutation must not block a query for alice.
+        var ledger = GuardLedger(
+            NonTerminalGuardSnapshot("F1", AliceRef, 1, OutboundMutationState.VenueAcknowledged),
+            NonTerminalGuardSnapshot("F1", BobRef, 2, OutboundMutationState.ApprovedToSend));
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", BobRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_NoMutations_DoesNotBlock()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_RejectsMissingFirmId()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef(" ", AliceRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_RejectsMalformedEndClientRef()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef("F1", "not-a-pseudonymized-ref"));
+    }
+
+    // ----- Candidate-set overload: stable-reference key rotation
+    // (#671 / RFC #753 PR2 review follow-up) -----
+    //
+    // A mutation's EndClientRef is fixed at the digest computed under
+    // whichever key was ActiveStableReferenceKey at the time it was
+    // recorded. If StableReferenceKeyId/Version is later repointed at a
+    // different (still-loaded) key, CreateStableEndClientRef starts
+    // returning a different digest for the same firm/end-client. The
+    // single-ref overload above would then silently miss that older,
+    // still-open mutation; these tests exercise the fix — checking
+    // against every candidate produced by
+    // CreateStableEndClientRefCandidates, which spans the whole key ring.
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_ActiveRefOnly_MissesMutationRecordedUnderRotatedOutKey()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        // Stable-reference key itself rotates from "old" to "new" (not
+        // just the encryption key) — the pathological case this guard
+        // must be robust to.
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        var newRef = afterRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+
+        Assert.NotEqual(oldRef, newRef);
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", newRef));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_DetectsMutationRecordedUnderHistoricalKey()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        var candidates = afterRotation.CreateStableEndClientRefCandidates(
+            "F1", "alice-end-client-id");
+
+        Assert.Contains(oldRef, candidates);
+        Assert.True(ledger.HasNonTerminalMutationForEndClientRef("F1", candidates));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_FirmIsolation()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        var candidates = afterRotation.CreateStableEndClientRefCandidates(
+            "F1", "alice-end-client-id");
+
+        // Same candidate digests, but a different firm — the mutation
+        // lives under "F1" and must not leak into an "F2" guard query.
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F2", candidates));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_ClientIsolation()
+    {
+        var beforeRotation = Protector(("old", 1, Key(1)), active: ("old", 1));
+        var oldRef = beforeRotation.CreateStableEndClientRef("F1", "alice-end-client-id");
+        var ledger = GuardLedger(NonTerminalGuardSnapshot(
+            "F1", oldRef, 1, OutboundMutationState.ApprovedToSend));
+
+        var afterRotation = Protector(
+            ("old", 1, Key(1)),
+            ("new", 2, Key(2)),
+            active: ("new", 2),
+            stableReference: ("new", 2));
+        // Same firm and key ring, but a different end-client's candidate
+        // set must not match alice's mutation.
+        var bobCandidates = afterRotation.CreateStableEndClientRefCandidates(
+            "F1", "bob-end-client-id");
+
+        Assert.DoesNotContain(oldRef, bobCandidates);
+        Assert.False(ledger.HasNonTerminalMutationForEndClientRef("F1", bobCandidates));
+    }
+
+    [Fact]
+    public void CreateStableEndClientRefCandidates_SingleKeyRing_ReturnsOneCandidateMatchingActiveRef()
+    {
+        var protector = Protector(("only", 1, Key(1)), active: ("only", 1));
+        var activeRef = protector.CreateStableEndClientRef("F1", "alice-end-client-id");
+
+        var candidates = protector.CreateStableEndClientRefCandidates("F1", "alice-end-client-id");
+
+        Assert.Equal(new[] { activeRef }, candidates);
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_RejectsEmptyCollection()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef("F1", Array.Empty<string>()));
+    }
+
+    [Fact]
+    public void HasNonTerminalMutationForEndClientRef_CandidateSet_RejectsMalformedCandidate()
+    {
+        var ledger = new OutboundMutationLedger();
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.HasNonTerminalMutationForEndClientRef("F1", new[] { AliceRef, "not-hex" }));
     }
 
     private sealed class SimulatedCrashException : Exception;

@@ -1070,6 +1070,7 @@ public sealed class B3EntryPointClientGateway : IExchangeGateway, IEntryPointCli
         {
             ClOrdID = new UpModels.ClOrdID(canonical.ClOrdId),
             OrigClOrdID = new UpModels.ClOrdID(originalClOrdId),
+            OrderId = command.VenueOrderId,
             SecurityId = canonical.SecurityId,
             Side = Enum.Parse<OrderSide>(canonical.Side, ignoreCase: true) == OrderSide.Buy
                 ? UpModels.Side.Buy

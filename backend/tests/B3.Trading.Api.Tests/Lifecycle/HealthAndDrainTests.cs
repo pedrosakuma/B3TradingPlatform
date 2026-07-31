@@ -99,6 +99,48 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
     }
 
     [Fact]
+    public void OnlyOutboundReconciliationDrain_CanResume()
+    {
+        var drain = new DrainState();
+        drain.BeginDrain("outbound_cancel_replace_reconciliation_required");
+
+        Assert.True(drain.TryEndOutboundReconciliationDrain());
+        Assert.False(drain.IsDraining);
+
+        drain.BeginDrain("host_stopping");
+        Assert.False(drain.TryEndOutboundReconciliationDrain());
+        Assert.True(drain.IsDraining);
+
+        var overlapping = new DrainState();
+        overlapping.BeginDrain("outbound_new_order_reconciliation_required");
+        overlapping.BeginDrain("wal_execution_report_rejected");
+        Assert.False(overlapping.TryEndOutboundReconciliationDrain());
+        Assert.True(overlapping.IsDraining);
+        Assert.Equal("wal_execution_report_rejected", overlapping.Reason);
+    }
+
+    [Fact]
+    public void OnlyColdStartLifecycleIntentsDrain_CanResume()
+    {
+        var drain = new DrainState();
+        drain.BeginDrain("cold_start_unresolved_lifecycle_intents");
+
+        Assert.True(drain.TryEndColdStartLifecycleIntentsDrain());
+        Assert.False(drain.IsDraining);
+
+        drain.BeginDrain("host_stopping");
+        Assert.False(drain.TryEndColdStartLifecycleIntentsDrain());
+        Assert.True(drain.IsDraining);
+
+        var overlapping = new DrainState();
+        overlapping.BeginDrain("cold_start_unresolved_lifecycle_intents");
+        overlapping.BeginDrain("wal_execution_report_rejected");
+        Assert.False(overlapping.TryEndColdStartLifecycleIntentsDrain());
+        Assert.True(overlapping.IsDraining);
+        Assert.Equal("wal_execution_report_rejected", overlapping.Reason);
+    }
+
+    [Fact]
     public async Task WalFault_Causes_Ready503_While_LiveRemainsOk()
     {
         using var factory = TestAppFactory.WithOverrides(
@@ -124,6 +166,49 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
         var persistence = doc.RootElement.GetProperty("persistence");
         Assert.False(persistence.GetProperty("healthy").GetBoolean());
         Assert.Equal(nameof(IOException), persistence.GetProperty("terminalFault").GetString());
+        Assert.Equal("disk full", persistence.GetProperty("terminalFaultMessage").GetString());
+        Assert.Equal(
+            "wal_io_fault",
+            persistence.GetProperty("terminalFaultDetails").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task LegacyWalMigrationRequired_IsSurfacedWithRecoveryGuidance()
+    {
+        using var factory = TestAppFactory.WithOverrides(
+            new Dictionary<string, string?>
+            {
+                ["Trading:Persistence:Enabled"] = "true",
+                ["Trading:Persistence:DataDirectory"] = Path.Combine(
+                    Directory.GetCurrentDirectory(),
+                    "TestResults",
+                    "HealthAndDrainTests",
+                    Guid.NewGuid().ToString("N")),
+                ["Trading:Persistence:FirmId"] = "FIRM01",
+            },
+            services =>
+            {
+                services.RemoveAll<IEventStoreHealth>();
+                services.AddSingleton<IEventStoreHealth>(
+                    new FaultedEventStoreHealth(new WalLegacyMigrationRequiredException(
+                        "Non-empty legacy WAL has no commit marker.")));
+            });
+        using var client = factory.CreateClient();
+
+        var health = await client.GetAsync("/health");
+        health.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await health.Content.ReadAsStringAsync());
+        var persistence = doc.RootElement.GetProperty("persistence");
+        var details = persistence.GetProperty("terminalFaultDetails");
+        Assert.Equal(
+            "legacy_wal_migration_required",
+            details.GetProperty("code").GetString());
+        Assert.Contains(
+            "recover-legacy-wal",
+            details.GetProperty("recommendedAction").GetString());
+        Assert.Contains(
+            "--firm-id FIRM01",
+            details.GetProperty("recommendedAction").GetString());
     }
 
     [Fact]

@@ -101,7 +101,7 @@ checks pass.
    --since 30m > incident-<ts>.log`).
 2. Check `dmesg` / kubelet events for OOM-kill (most common cause).
 3. The WAL may have a torn tail. This is **expected** under ungraceful
-   exit — the recovery code is designed for it (see §2.4 below and
+   exit — the recovery code is designed for it (see §2.5 below and
    `SegmentReader.LastValidEnd` in
    [`backend/src/B3.Trading.Infrastructure/Persistence/SegmentReader.cs`](../../backend/src/B3.Trading.Infrastructure/Persistence/SegmentReader.cs)).
 
@@ -112,7 +112,7 @@ checks pass.
   snapshot and replays only the tail.
 - **Do not** delete or truncate WAL files unless `PersistenceRecovery`
   itself throws on startup — torn-tail truncation is automatic and
-  safe. Go to §2.4 only if recovery throws.
+  safe. Go to §2.5 only if recovery throws.
 
 **Verify.**
 - Same checks as §1.1.
@@ -195,7 +195,7 @@ checks pass.
 - EOD files older than your firm's regulatory retention can be
   archived off-volume.
 - **Do not** delete `.log` / `.idx` files in `wal/` while the host is
-  running. If you must, stop the host first; see §2.4 (WAL repair).
+  running. If you must, stop the host first; see §2.5 (WAL repair).
 
 **Verify.**
 - `df` shows free space > 20%.
@@ -642,7 +642,48 @@ re-derives them from the WAL `ExecutionReportReceivedEvent` stream.
 With snapshot-only recovery, expect `GET /api/fills/{id}/touch` to return
 404 for pre-snapshot fills.
 
-### 2.4 WAL repair: truncated / torn-write detection & manual recovery
+### 2.4 Legacy-WAL fail-closed startup (missing `commit.marker`)
+
+When startup reports `WalLegacyMigrationRequiredException`, the host is
+deliberately refusing to promote a non-empty markerless WAL after an unknown
+shutdown. Do **not** flip `Trading:Persistence:LegacyWalStartupMode` on the
+StatefulSet and forget to revert it later; use the one-shot offline recovery
+CLI instead.
+
+1. **Scale the writer down to 0** so no process holds the active-host fence for
+   the PVC.
+2. **Capture a full persistence backup** before doing anything destructive.
+3. **Run the same-image maintenance CLI against the mounted PVC**:
+   ```bash
+   dotnet /app/tools/identity-maintenance/B3.Trading.IdentityMaintenance.dll recover-legacy-wal \
+     --data-directory /var/lib/b3trading \
+     --firm-id FIRM01 \
+     --operator <operator> \
+     --change-ticket <ticket> \
+     --reason "post-crash legacy WAL marker recovery" \
+     --i-understand-this-promotes-a-legacy-wal-without-proving-the-tail-was-durable
+   ```
+4. **Read the JSON result**:
+   - `Status=no_action_needed` means a marker already exists or the WAL is
+     empty; no repair was performed.
+   - `Status=recovered` means the tool published the marker and wrote an audit
+     record under `data/{firm}/maintenance/legacy-wal-recovery/`.
+   - A non-zero exit means the tool refused because the latest snapshot is
+     ahead of the recoverable WAL prefix, the WAL is corrupt, or another
+     process still holds the active-host fence.
+5. **Restart the host with the default**
+   `Trading:Persistence:LegacyWalStartupMode=RejectUnknownShutdown`. The
+   recovery action is one-shot; there is nothing to revert in config.
+6. **Verify `/health`**. The persistence block now surfaces
+   `terminalFaultDetails.code=legacy_wal_migration_required` with the same CLI
+   guidance when the host is still blocked.
+
+This tool is intentionally bounded: it reuses the controlled-clean-shutdown
+marker publication path, but it does **not** try to infer whether an unknown
+shutdown tail was truly durable. If the WAL or snapshot boundary is ambiguous,
+stop and reconcile manually.
+
+### 2.5 WAL repair: truncated / torn-write detection & manual recovery
 
 > **No `wal-tool` binary ships today.** A future `B3.Trading.Tools.Wal`
 > project is on the roadmap (tracking ticket TBD). The procedure

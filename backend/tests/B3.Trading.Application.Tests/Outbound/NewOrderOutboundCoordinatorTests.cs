@@ -5,6 +5,7 @@ using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace B3.Trading.Application.Tests.Outbound;
@@ -47,6 +48,27 @@ public sealed class NewOrderOutboundCoordinatorTests
         Assert.Equal(0, margin.ReleaseCount);
         Assert.True(fixture.Drain.IsDraining);
         Assert.Equal(OrderStatus.PendingNew, fixture.Order.Status);
+    }
+
+    // #768. The critical reconciliation-required log is the one signal an
+    // operator has to correlate a lost HTTP response back to the WAL
+    // mutation; it must carry MutationId/FirmId/ClOrdId in structured
+    // form so a product-log search on any one of them finds the failure.
+    [Fact]
+    public async Task ReconciliationRequired_LogsMutationFirmAndClOrdId()
+    {
+        var logger = new CapturingLogger<NewOrderOutboundCoordinator>();
+        var fixture = CreateFixture(new ThrowAfterFrameGateway(), logger: logger);
+
+        var result = await fixture.Coordinator.EnqueueAsync(
+            fixture.MutationId,
+            CancellationToken.None);
+
+        Assert.Equal(NewOrderDispatchOutcome.ReconciliationRequired, result.Outcome);
+        var entry = Assert.Single(logger.Entries, e => e.Level == LogLevel.Critical);
+        Assert.Contains(fixture.MutationId.ToString(), entry.Message);
+        Assert.Contains(fixture.Order.FirmId, entry.Message);
+        Assert.Contains(fixture.Order.ClOrdId.ToString(), entry.Message);
     }
 
     [Fact]
@@ -450,7 +472,8 @@ public sealed class NewOrderOutboundCoordinatorTests
         RecordingMarginProvider? margin = null,
         RecordingCommittedStore? store = null,
         IOutboundGatewayReadiness? readiness = null,
-        INewOrderOutboundFaultInjector? faultInjector = null)
+        INewOrderOutboundFaultInjector? faultInjector = null,
+        ILogger<NewOrderOutboundCoordinator>? logger = null)
     {
         var protector = CreateProtector();
         var ledger = new OutboundMutationLedger(protector);
@@ -517,7 +540,7 @@ public sealed class NewOrderOutboundCoordinatorTests
             book,
             margin ?? new RecordingMarginProvider(),
             drain,
-            NullLogger<NewOrderOutboundCoordinator>.Instance,
+            logger ?? NullLogger<NewOrderOutboundCoordinator>.Instance,
             gatewayReadiness: readiness,
             faultInjector: faultInjector);
         return new Fixture(
@@ -980,4 +1003,18 @@ public sealed class NewOrderOutboundCoordinatorTests
     private sealed class SimulatedNewOrderCrashException(
         NewOrderOutboundFaultPoint point)
         : Exception($"Simulated new-order crash at {point}.");
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+    }
 }

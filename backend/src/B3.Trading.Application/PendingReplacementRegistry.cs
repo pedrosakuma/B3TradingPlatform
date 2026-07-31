@@ -252,6 +252,25 @@ public sealed class PendingReplacementRegistry
     }
 
     /// <summary>
+    /// Peeks at the intent keyed by an original ClOrdID without consuming
+    /// either registry index.
+    /// </summary>
+    public bool TryGetByOriginal(
+        ulong originalClOrdId,
+        out OrderReplacementIntent? intent)
+    {
+        if (_byOriginalClOrdId.TryGetValue(originalClOrdId, out var newClOrdId)
+            && newClOrdId != 0
+            && _byNewClOrdId.TryGetValue(newClOrdId, out var found))
+        {
+            intent = found.Intent;
+            return true;
+        }
+        intent = null;
+        return false;
+    }
+
+    /// <summary>
     /// Slice 4 of #122: in-flight guard for the modify endpoint.
     /// Returns <c>true</c> when there's already a pending modify for
     /// <paramref name="originalClOrdId"/> — the endpoint rejects with
@@ -498,7 +517,8 @@ public sealed record OrderReplacementIntent(
     // or the original, as decided by the modify request.
     TimeInForce? RequestedTimeInForce = null,
     decimal? RequestedStopPrice = null,
-    DateTimeOffset? RequestedGoodTillDate = null);
+    DateTimeOffset? RequestedGoodTillDate = null,
+    bool IsPeggedRepeg = false);
 
 /// <summary>
 /// Pass-6 review (#299) P1. Lock-side projection of one

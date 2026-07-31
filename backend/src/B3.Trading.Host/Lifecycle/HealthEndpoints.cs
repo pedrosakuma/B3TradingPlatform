@@ -72,6 +72,7 @@ public static class HealthEndpoints
             var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
             var reconciliation = outboundLedger.GetReconciliationHealth(DateTimeOffset.UtcNow);
             var recoveryFirms = recovery.Snapshot();
+            var faultDetails = PersistenceFaultDiagnostics.Describe(wal.TerminalFault, p);
 
             // FIXP listener status
             var listenerOpts = ctx.RequestServices.GetService<IOptions<EntryPointListenerOptions>>()?.Value;
@@ -109,6 +110,13 @@ public static class HealthEndpoints
                     snapshotInterval = p.SnapshotInterval,
                     healthy = wal.IsHealthy,
                     terminalFault = wal.TerminalFault?.GetType().Name,
+                    terminalFaultMessage = wal.TerminalFault?.Message,
+                    terminalFaultDetails = faultDetails is null ? null : new
+                    {
+                        faultDetails.Code,
+                        faultDetails.Message,
+                        faultDetails.RecommendedAction,
+                    },
                     walGeneration = wal.WalGeneration,
                     lastAdmittedSeq = wal.LastAdmittedSeq,
                     lastAppendedSeq = wal.LastAppendedSeq,

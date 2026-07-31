@@ -65,6 +65,15 @@ public sealed class ConformanceFactAttribute : FactAttribute
     public bool RequiresMarketMakerSandbox { get; init; }
 
     /// <summary>
+    /// When true, the scenario requires the dedicated sample-bot sandbox
+    /// stack — real matching + market data + the one-shot
+    /// <c>B3.Trading.SampleBot</c> overlay already having run (operator
+    /// opts in via <c>B3T_SAMPLE_BOT_SANDBOX=true</c>, #722). See
+    /// <see cref="PlatformEndpoint.IsSampleBotSandboxEnabled"/>.
+    /// </summary>
+    public bool RequiresSampleBotSandbox { get; init; }
+
+    /// <summary>
     /// When true, the scenario needs the host's HS256 JWT signing key
     /// (env <c>B3T_AUTH_SIGNING_KEY</c>) so it can mint authentically
     /// signed tokens with custom claims/expiry. Skipped at discovery
@@ -138,6 +147,8 @@ public sealed class ConformanceFactAttribute : FactAttribute
                 return PlatformEndpoint.RealStackConformanceSkipReason;
             if (RequiresMarketMakerSandbox && !PlatformEndpoint.IsMarketMakerSandboxEnabled())
                 return PlatformEndpoint.MarketMakerSandboxSkipReason;
+            if (RequiresSampleBotSandbox && !PlatformEndpoint.IsSampleBotSandboxEnabled())
+                return PlatformEndpoint.SampleBotSandboxSkipReason;
             if (RequiresDockerControl && !PlatformEndpoint.IsDockerControlEnabled())
                 return PlatformEndpoint.DockerControlSkipReason;
             if (RequiresAuthSigningKey && !PlatformEndpoint.IsAuthSigningKeyConfigured())

@@ -399,6 +399,26 @@ everything:
   — they flood the trace stream and never carry useful diagnostic
   signal.
 
+## Correlating a failed mutation with logs, not metrics (#768)
+
+Metric tags in this document are deliberately low-cardinality (`firmId`,
+`symbol`, `kind`, `reason`, ...); `MutationId`, `ClOrdId`/`OrigClOrdId`, and
+per-request trace IDs are **never** added as metric labels — doing so would
+turn a bounded set of time series into an unbounded one per mutation/order.
+Instead, those high-cardinality identifiers are only ever emitted in
+structured product logs on the failure paths that need them: the new-order
+and cancel-replace outbound coordinators' reconciliation-required/ambiguous
+terminal logs, the order submission/cancel/modify services' non-success
+dispatch and legacy gateway-catch logs, and the shared REST mutation-failure
+log emitted for every non-`Accepted` (including replayed-idempotency) result
+from `POST /api/orders`, `PUT /api/orders/{clOrdId}`, and
+`DELETE /api/orders/{clOrdId}` (which also includes
+`HttpContext.TraceIdentifier`). See
+[`docs/RUNBOOK.md` §0.1](./RUNBOOK.md#01-outbound-mutation-reconciliation-647)
+"Correlating a failed mutation from product logs (#768)" for the operator
+flow from a trace/request ID or ClOrdID to the MutationId to
+`GET /api/admin/outbound-mutations/{mutationId}`.
+
 ## Prometheus naming
 
 We export OTLP, **not** the Prometheus exposition format. The PR 7-2c

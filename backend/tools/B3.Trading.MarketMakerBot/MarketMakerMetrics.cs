@@ -104,6 +104,9 @@ public sealed class MarketMakerMetrics : IDisposable
         InitializeCounterSeries();
 
         _meter.CreateObservableGauge("bot.position.net_quantity", ObservePositions);
+        _meter.CreateObservableGauge(
+            "bot.pnl.reconciliation_required",
+            () => _ledger.ReconciliationRequired ? 1L : 0L);
         _meter.CreateObservableGauge("bot.position.average_entry_price", ObserveAverageCosts);
         _meter.CreateObservableGauge("bot.orders.open", ObserveOpenOrders);
         _meter.CreateObservableGauge(

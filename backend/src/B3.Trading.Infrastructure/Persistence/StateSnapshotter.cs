@@ -264,7 +264,8 @@ public sealed class StateSnapshotter
                     AmbiguousMarginHeld: s.AmbiguousMarginHeld,
                     AmbiguousAtUtc: s.AmbiguousAt,
                     NewRemainingNotional: s.NewRemainingNotional,
-                    ReleasedForVenueAbsent: s.ReleasedForVenueAbsent))
+                    ReleasedForVenueAbsent: s.ReleasedForVenueAbsent,
+                    IsPeggedRepeg: s.Intent.IsPeggedRepeg))
                 .ToArray(),
             PendingCancels = _pendingCancels is null
             ? Array.Empty<PendingCancelRaw>()
@@ -532,7 +533,8 @@ public sealed class StateSnapshotter
                 AmbiguousMarginHeld: r.AmbiguousMarginHeld,
                 AmbiguousAtUtc: r.AmbiguousAtUtc,
                 NewRemainingNotional: r.NewRemainingNotional,
-                ReleasedForVenueAbsent: r.ReleasedForVenueAbsent));
+                ReleasedForVenueAbsent: r.ReleasedForVenueAbsent,
+                IsPeggedRepeg: r.IsPeggedRepeg));
         }
         pendingReplacements.Sort(static (a, b) => a.NewClOrdId.CompareTo(b.NewClOrdId));
 
@@ -735,6 +737,27 @@ public sealed class StateSnapshotter
             var entries = new List<PendingReplacementEntrySnapshot>(snap.PendingReplacements.Count);
             foreach (var p in snap.PendingReplacements)
             {
+                var isPeggedRepeg = p.IsPeggedRepeg
+                    || (_outboundLedger?.TryGetByClOrdId(
+                            p.NewClOrdId,
+                            out var restoredMutation) == true
+                        && restoredMutation?.AlgoOriginIdentity is
+                        {
+                            ParentAlgoId: var restoredParentAlgoId,
+                            ActionKind: AlgoOutboundActionKind.Repeg,
+                        }
+                        && restoredParentAlgoId == p.ParentAlgoId);
+                if (isPeggedRepeg
+                    && _orders.TryGet(p.OriginalClOrdId, out var restoredOriginal)
+                    && restoredOriginal?.Status == OrderStatus.Filled)
+                {
+                    // A pre-#548 snapshot can capture the old Fill-applied →
+                    // algo-resolver window. The restored outbound ledger is
+                    // already available here, so suppress that proven repeg
+                    // intent before a late Replaced ER can hydrate it.
+                    continue;
+                }
+
                 var intent = new OrderReplacementIntent(
                     OriginalClOrdId: p.OriginalClOrdId,
                     NewClOrdId: p.NewClOrdId,
@@ -752,7 +775,8 @@ public sealed class StateSnapshotter
                         ? Enum.Parse<TimeInForce>(tif, ignoreCase: true)
                         : (TimeInForce?)null,
                     RequestedStopPrice: p.RequestedStopPrice,
-                    RequestedGoodTillDate: p.RequestedGoodTillDate);
+                    RequestedGoodTillDate: p.RequestedGoodTillDate,
+                    IsPeggedRepeg: isPeggedRepeg);
                 entries.Add(new PendingReplacementEntrySnapshot(
                     Intent: intent,
                     CreatedAt: p.CreatedAtUtc,
@@ -764,6 +788,7 @@ public sealed class StateSnapshotter
             _replacements.Restore(entries);
             foreach (var p in snap.PendingReplacements)
             {
+                if (!_replacements.TryGet(p.NewClOrdId, out _)) continue;
                 // Snapshot restore runs BEFORE WAL replay, but the
                 // ownership map was already restored above from
                 // snap.Ownership. The orig SHOULD be present
@@ -1049,6 +1074,28 @@ public sealed class EventReplayer
     /// <see cref="CashLedger"/> keep working unchanged.
     /// </summary>
     private readonly CashLedger? _cash;
+    /// <summary>
+    /// #671/#753 (PR 1). Optional. When wired, replay of
+    /// <see cref="PositionAdjustmentEvent"/> overwrites the tracked
+    /// position via <see cref="PositionKeeper.SetAbsolute"/> — mirrors
+    /// the live path in <c>AdminEndpoints.HandlePositionAdjustment</c>.
+    /// Nullable so pre-existing test compositions that construct
+    /// <see cref="EventReplayer"/> without a <see cref="PositionKeeper"/>
+    /// keep working unchanged; production composition always wires the
+    /// same singleton <see cref="PositionKeeper"/> instance used by
+    /// <see cref="ExecutionReportProcessor"/> for fill-driven updates.
+    /// Code-review addendum: replay of <see cref="PositionAdjustmentEvent"/>
+    /// also calls <see cref="PnlKeeper.SetAbsoluteAvgCost"/> on the
+    /// pre-existing <see cref="_pnlKeeper"/> field so the avg-cost basis
+    /// is projectively replaced alongside this keeper — never left one
+    /// step behind after a cold/snapshot+tail recovery.
+    /// Code-review addendum #2: replay also calls
+    /// <see cref="SubAccountPnlKeeper.SetAbsoluteMasterBucketAvgCost"/>
+    /// on the pre-existing <see cref="_subAccountPnl"/> field, MASTER
+    /// bucket only — v1 adjustment never fabricates or alters a named
+    /// sub-account bucket, live or on replay.
+    /// </summary>
+    private readonly PositionKeeper? _positions;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -1092,7 +1139,8 @@ public sealed class EventReplayer
         OutboundMutationLedger? outboundLedger = null,
         RestOrderIdempotencyStore? restOrderIdempotency = null,
         IMarginProvider? marginProvider = null,
-        CashLedger? cash = null)
+        CashLedger? cash = null,
+        PositionKeeper? positions = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -1124,6 +1172,7 @@ public sealed class EventReplayer
         _restOrderIdempotency = restOrderIdempotency;
         _marginProvider = marginProvider;
         _cash = cash;
+        _positions = positions;
     }
 
     /// <summary>
@@ -1303,7 +1352,8 @@ public sealed class EventReplayer
                             ? Enum.Parse<TimeInForce>(rrTif, ignoreCase: true)
                             : (TimeInForce?)null,
                         RequestedStopPrice: rr.RequestedStopPrice,
-                        RequestedGoodTillDate: rr.RequestedGoodTillDate);
+                        RequestedGoodTillDate: rr.RequestedGoodTillDate,
+                        IsPeggedRepeg: rr.IsPeggedRepeg);
                     _replacements.TryAdd(intent);
                     _ownership.RegisterReplaceLink(rr.OriginalClOrdId, rr.NewClOrdId);
                 }
@@ -1392,6 +1442,32 @@ public sealed class EventReplayer
                 if (_outboundLedger is not null)
                 {
                     _outboundLedger.Apply(approved);
+                    if (approved.AlgoOriginIdentity is
+                        {
+                            ActionKind: AlgoOutboundActionKind.Repeg,
+                            ParentAlgoId: var approvedParentAlgoId,
+                        }
+                        && approved.OriginalClOrdId is { } approvedOriginalClOrdId
+                        && _orders.TryGet(approvedOriginalClOrdId, out var approvedOriginal)
+                        && approvedOriginal is
+                        {
+                            Status: OrderStatus.Filled,
+                            ParentAlgoId: var originalParentAlgoId,
+                        }
+                        && originalParentAlgoId == approvedParentAlgoId
+                        && _replacements?.TryConsumeByOriginal(
+                            approvedOriginalClOrdId,
+                            out var legacyRepegIntent,
+                            out _) == true
+                        && legacyRepegIntent is not null)
+                    {
+                        // Upgrade compatibility for a pre-#548 WAL ordering
+                        // OrderReplaceRequested → Fill → OutboundApproved.
+                        // The old requested event has no repeg discriminator;
+                        // retire it as soon as the later durable approval
+                        // proves its identity, before a Replaced ER can hydrate.
+                        _replaceMargin?.AbortReplace(legacyRepegIntent.NewClOrdId);
+                    }
                     if (_outboundLedger.TryResolveWatermarkOwner(
                             approved.MutationId, out var approvalOwner)
                         && approvalOwner is not null)
@@ -1411,7 +1487,7 @@ public sealed class EventReplayer
                 _outboundLedger?.Apply(frame);
                 break;
             case OutboundTransportWriteCompletedEvent write:
-                _outboundLedger?.Apply(write);
+                _outboundLedger?.ApplyRecovered(write);
                 break;
             case OutboundProvenUnsentEvent unsent:
                 _outboundLedger?.Apply(unsent);
@@ -1420,25 +1496,41 @@ public sealed class EventReplayer
                 _outboundLedger?.Apply(authoritativeEvidence);
                 break;
             case OutboundOperatorResolutionProposedEvent proposed:
-                _outboundLedger?.Apply(proposed);
+                _outboundLedger?.ApplyRecovered(proposed);
                 break;
             case OutboundReconciliationRequiredEvent reconciliationRequired:
                 _outboundLedger?.Apply(reconciliationRequired);
                 break;
             case OutboundOperatorResolvedEvent resolved:
-                _outboundLedger?.Apply(resolved);
-                if (resolved.ReleaseCapacity
-                    && _outboundLedger?.TryGet(resolved.MutationId, out var resolvedMutation) == true
-                    && resolvedMutation is not null)
+                _outboundLedger?.ApplyRecovered(resolved);
+                if (_outboundLedger?.TryGet(
+                        resolved.MutationId,
+                        out var resolvedMutation) == true &&
+                    resolvedMutation is not null)
                 {
-                    if (resolvedMutation.Kind == OutboundMutationKind.New)
+                    if (resolved.ReleaseCapacity &&
+                        resolvedMutation.Kind == OutboundMutationKind.New)
                     {
                         _marginProvider?.ReleaseReservation(resolvedMutation.PrimaryClOrdId);
                     }
-                    else if (resolvedMutation.Kind == OutboundMutationKind.Replace)
+                    else if (resolved.ReleaseCapacity &&
+                             resolvedMutation.Kind == OutboundMutationKind.Replace)
                     {
                         _replacements?.ReleaseForVenueAbsent(resolvedMutation.PrimaryClOrdId);
                         _replaceMargin?.AbortReplace(resolvedMutation.PrimaryClOrdId);
+                    }
+                    else if (resolved.Decision == OutboundOperatorDecision.VenueAbsent &&
+                             resolvedMutation.Kind == OutboundMutationKind.Cancel)
+                    {
+                        foreach (var cancelClOrdId in resolvedMutation.Attempts
+                                     .Select(attempt => attempt.ClOrdId)
+                                     .Append(resolvedMutation.PrimaryClOrdId)
+                                     .Distinct())
+                        {
+                            _pendingCancels?.TryConsumeByCancel(cancelClOrdId, out _);
+                            _ownership.RemoveCancelLink(cancelClOrdId);
+                            _userBotMappings?.ReapCancel(cancelClOrdId);
+                        }
                     }
                 }
                 break;
@@ -1634,6 +1726,80 @@ public sealed class EventReplayer
                 {
                     _cash?.ApplyWithdrawal(cle.FirmId, new EndClientId(cle.EndClientId), cle.Amount);
                 }
+                break;
+            case PositionAdjustmentEvent pae:
+                // #671/#753 PR 1. Absolute overwrite — replay must not
+                // accumulate. Mirrors AdminEndpoints.HandlePositionAdjustment's
+                // live-path calls to PositionKeeper.SetAbsolute,
+                // PnlKeeper.SetAbsoluteAvgCost, AND
+                // SubAccountPnlKeeper.SetAbsoluteMasterBucketAvgCost
+                // exactly, in the same order, so a cold/snapshot+tail
+                // replay converges on the identical (position, avg-cost
+                // basis, master-bucket basis) triple the live path would
+                // have produced. Null-tolerant for compositions/tests
+                // that don't wire a PositionKeeper, PnlKeeper, and/or
+                // SubAccountPnlKeeper into the replayer. Code-review
+                // addendum #3: only the MASTER bucket is ever touched
+                // here — v1 adjustment is account-wide/master-only and
+                // must never fabricate or alter a named sub-account
+                // bucket during replay either.
+                _positions?.SetAbsolute(
+                    pae.FirmId,
+                    new EndClientId(pae.EndClientId),
+                    pae.Symbol,
+                    pae.NetQuantity,
+                    pae.AverageEntryPrice);
+                _pnlKeeper?.SetAbsoluteAvgCost(
+                    pae.FirmId,
+                    pae.EndClientId,
+                    pae.Symbol,
+                    pae.NetQuantity,
+                    pae.AverageEntryPrice);
+                _subAccountPnl?.SetAbsoluteMasterBucketAvgCost(
+                    pae.FirmId,
+                    pae.EndClientId,
+                    pae.Symbol,
+                    pae.NetQuantity,
+                    pae.AverageEntryPrice);
+                break;
+            case AccountResetEvent are:
+                // #671/#753 (RFC PR 3). Deterministic, single-event
+                // whole-account reset replay. Mirrors
+                // AdminEndpoints.HandleAccountReset's live-path mutate
+                // sequence EXACTLY (release margin -> clear every
+                // sub-account bucket + every named sub-account POSITION
+                // row -> per-symbol absolute position + avg-cost +
+                // master-bucket basis -> absolute cash) so a
+                // cold/snapshot+tail replay converges on the identical
+                // post-reset state the live path produced — using ONLY
+                // the payload persisted on this event, never re-reading
+                // CashSeedOptions/PositionSeedOptions (those may have
+                // changed since the live reset ran). Null-tolerant for
+                // compositions/tests that don't wire every keeper.
+                //
+                // Code-review addendum #2: whole-account reset must
+                // also clear SubAccountPositionKeeper rows (named
+                // sub-account positions), not just the PnL buckets —
+                // otherwise a named sub-account position row would
+                // survive with a NetQuantity that the reset never
+                // reconciled against, leaving risk-visible state (e.g.
+                // GET /api/positions per-sub-account breakdown) stale
+                // post-reset.
+                var resetOwner = new EndClientId(are.EndClientId);
+                _marginProvider?.ReleaseAllReservationsForAccount(are.FirmId, resetOwner);
+                _subAccountPnl?.ClearAllBucketsForAccount(are.FirmId, are.EndClientId);
+                _subAccountPositions?.ClearAllForAccount(are.FirmId, resetOwner);
+                foreach (var entry in are.Positions)
+                {
+                    _positions?.SetAbsolute(
+                        are.FirmId, resetOwner, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                    _pnlKeeper?.SetAbsoluteAvgCost(
+                        are.FirmId, are.EndClientId, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                    _subAccountPnl?.SetAbsoluteMasterBucketAvgCost(
+                        are.FirmId, are.EndClientId, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                }
+                _cashKeeper?.SetAbsolute(are.FirmId, resetOwner, are.CashAvailable);
+                _cash?.SetAbsolute(are.FirmId, resetOwner, are.CashAvailable);
                 break;
             case FeeAccruedEvent fae:
                 // Q2.3 (#270). Forward the accrual to FeeKeeper. The

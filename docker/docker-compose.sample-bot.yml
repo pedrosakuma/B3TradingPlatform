@@ -1,0 +1,169 @@
+# Sample-bot overlay (#722, depends on #723/#724). Opt-in real-stack
+# smoke for `B3.Trading.SampleBot` — a small authenticated .NET console
+# that proves an *ordinary end-client* journey end-to-end: login →
+# authenticated `/ws` subscription → fresh public market data →
+# one bounded REST order → private-WS observation → timeout/cancel →
+# REST reconciliation. It never receives a matching-platform endpoint
+# or FIXP credential (see SampleBotOptionsValidator) — everything it
+# does goes through the same participant API a browser or external
+# integrator would use.
+#
+# Reuses the real stack + market data already brought up by
+# docker-compose.yml, plus the market-maker overlay for a fresh,
+# continuously re-quoted public feed (so "receipt of fresh public
+# market data" is deterministic instead of racing a one-shot
+# InfoSnapshot). It does NOT need or use the market-maker's resting
+# quotes for a fill: SampleBotWorkflow.ComputePassiveLimitPrice moves
+# the default Buy away from the reference price on purpose, so the
+# expected deterministic outcome is submit -> observe Working over the
+# private feed -> OrderTimeout -> best-effort cancel -> REST shows no
+# working/partially-filled sample-bot order. Treat an unexpected fill
+# as a market-data/spread coincidence, not a journey failure — the
+# smoke only asserts the terminal state is reached and no order is
+# left resting.
+#
+# Usage (clean checkout):
+#
+#   cp docker/.env.example docker/.env
+#   # edit docker/.env: TRADING_AUTH_SIGNING_KEY (required),
+#   # TRADING_SEED_PASSWORD_HASH/_SALT (required, see .env.example)
+#
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.market-maker.yml \
+#       -f docker/docker-compose.sample-bot.yml \
+#       up -d --build --wait trading-host market-maker-bot
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.market-maker.yml \
+#       -f docker/docker-compose.sample-bot.yml \
+#       run --rm --no-deps --build sample-bot
+#
+# `sample-bot` is a one-shot job (SampleBotWorker calls
+# IHostApplicationLifetime.StopApplication once the single-order
+# workflow completes), so `run --rm` blocks until it exits and streams
+# its logs inline — no separate `logs -f` needed. `--no-deps` is
+# required: the stack is already running, and allowing `compose run`
+# to reconcile dependencies can recreate trading-host underneath the
+# connected market-maker session. `--wait` on the first command blocks
+# until trading-host is healthy AND market-maker-bot has started, so
+# the sample-bot's market-data wait (TryBuildReadyOrder loops until a
+# live TradingReferencePrice/LastTradePrice arrives, see
+# SampleBotWorkflow) resolves quickly instead of racing the bot's FIXP
+# negotiate + first quote. Tear down with:
+#
+#   docker compose \
+#       -f docker/docker-compose.yml \
+#       -f docker/docker-compose.market-maker.yml \
+#       -f docker/docker-compose.sample-bot.yml \
+#       down -v
+#
+# See docs/DOCKER.md "Sample-bot overlay" for LocalPassword / Hybrid /
+# InternalToken operation, safety boundaries, and how this differs from
+# the Demo overlay (docker-compose.demo.yml, Mock+ER-injection) and the
+# Market-maker overlay (docker-compose.market-maker.yml, a privileged
+# co-located FIXP liquidity provider) and the external FIXP user-bot
+# listener (docs/operations/fixp-listener.md).
+
+services:
+  trading-host:
+    environment:
+      # A distinct ordinary FIRM01 user — never reused by any other
+      # overlay/spec — so the sample-bot's single working order and
+      # its terminal-state assertions never share book/position state
+      # with alice/bob or the conformance admin/checker seeds. Slot 9
+      # is the next free Auth__Users index (0=alice, 1-3=demo bots,
+      # 4=carol/admin, 5=bob, 6=bob-firm02, 7=charlie-firm03,
+      # 8=dave/checker — see docker-compose.yml and
+      # docker-compose.conformance.yml).
+      #
+      # Hash/salt below are PBKDF2-HMAC-SHA256 (600k iterations) of the
+      # literal password "samplebotpass" — public in this repo, exactly
+      # like the demo overlay's bot-clientA/B credentials. Anyone
+      # reading this file can log in as sample-bot: fine for a
+      # sandbox-only, non-production overlay; override every
+      # SAMPLE_BOT_* var below when rotating credentials or running
+      # anywhere beyond a laptop/CI job.
+      Trading__Auth__Users__9__Username: ${SAMPLE_BOT_USER:-sample-bot}
+      Trading__Auth__Users__9__PasswordHash: ${SAMPLE_BOT_PASSWORD_HASH:-td9/LApq9SaDgp+87KmYFlI+Rm8KvOTvZfHXFM/3AVQ=}
+      Trading__Auth__Users__9__Salt: ${SAMPLE_BOT_PASSWORD_SALT:-oGdbv7SMH21rF7EZcD6DtQ==}
+      Trading__Auth__Users__9__Iterations: "600000"
+      Trading__Auth__Users__9__Role: user
+      Trading__Auth__Users__9__Firm: FIRM01
+
+      # #416 margin enforcement default-on. Fund the sample-bot's
+      # single Buy (100 * ~<=32.50 BRL notional, see DemoOrder defaults
+      # in appsettings.json) with clear headroom, isolated from every
+      # other seed's cash slot (0-1 base, 2 conformance, 3-4 demo).
+      Trading__Cash__Seeds__5__EndClientId: ${SAMPLE_BOT_USER:-sample-bot}
+      Trading__Cash__Seeds__5__FirmId: FIRM01
+      Trading__Cash__Seeds__5__InitialAvailable: "10000.00"
+
+  sample-bot:
+    build:
+      context: ..
+      dockerfile: backend/tools/B3.Trading.SampleBot/Dockerfile
+    image: ${SAMPLE_BOT_IMAGE:-b3-sample-bot:dev}
+    container_name: b3-sample-bot
+    # One-shot: the process exits on its own once the workflow (or, if
+    # DemoOrder is disabled, an external stop signal) completes. Never
+    # auto-restart a completed sample run.
+    restart: "no"
+    networks:
+      - b3-net
+    depends_on:
+      trading-host:
+        condition: service_healthy
+      marketdata:
+        condition: service_started
+    environment:
+      SampleBot__BaseUrl: http://trading-host:5000
+      SampleBot__MarketData__WsUrl: ws://marketdata:8080/ws
+      SampleBot__MarketData__MaxAge: "00:00:05"
+      SampleBot__InitialSnapshotTimeout: "00:00:15"
+
+      # LocalPassword is the required default smoke mode (#722): the
+      # sample authenticates through the same POST /api/auth/login a
+      # browser uses, never a pre-minted/bypassing token. Switch to
+      # ExternalExchange (SampleBot__Auth__ExternalAccessToken) or
+      # InternalToken (SampleBot__Auth__InternalTradingToken) only when
+      # documenting the Hybrid/Entra or supplied-token variants — see
+      # docs/DOCKER.md "Sample-bot overlay" for both.
+      SampleBot__Auth__Mode: LocalPassword
+      SampleBot__Auth__Username: ${SAMPLE_BOT_USER:-sample-bot}
+      SampleBot__Auth__Password: ${SAMPLE_BOT_PASSWORD:-samplebotpass}
+
+      # Optional sub-account: intentionally UNSET by default. A
+      # sub-account id must be pre-created by an admin
+      # (POST /api/sub-accounts) before it can be validated here — see
+      # docs/DOCKER.md for the one-line admin curl. The default smoke
+      # keeps this optional exactly as the acceptance criteria require.
+      # SampleBot__SubAccountId: tradingdesk
+
+      # Explicit trading enabled + one-shot bounded lifecycle. Timeout
+      # and cancellation-attempt windows are generous enough to absorb
+      # normal container/network scheduling jitter while keeping the
+      # whole run bounded (well under this service's shutdown grace).
+      SampleBot__DemoOrder__Enabled: "true"
+      SampleBot__DemoOrder__Symbol: PETR4
+      SampleBot__DemoOrder__Side: Buy
+      SampleBot__DemoOrder__Quantity: "100"
+      SampleBot__DemoOrder__TickSize: "0.01"
+      SampleBot__DemoOrder__PriceOffsetTicks: "1"
+      SampleBot__DemoOrder__MaxNotional: "5000.00"
+      SampleBot__DemoOrder__OrderTimeout: "00:00:15"
+      SampleBot__DemoOrder__CancellationAttemptTimeout: "00:00:10"
+      # The standalone matching/market-data sandbox currently exposes no
+      # authoritative phase signal through the participant websocket, so its
+      # snapshot is intentionally Unknown. The image default remains fail-safe
+      # (`true`) for real deployments; this explicit sandbox override lets the
+      # documented smoke trade against the known-open local matching engine.
+      SampleBot__DemoOrder__RequireOpenPhase: "false"
+      SampleBot__DemoOrder__PostWorkflowWait: "00:00:03"
+      SampleBot__DemoOrder__IdempotencyKeyPrefix: samplebot-overlay
+    # Bounded cleanup: SampleBotWorker's ExecuteAsync awaits the
+    # workflow's best-effort cancel (CancellationAttemptTimeout, default
+    # 10s) plus PostWorkflowWait (3s) before stopping itself. Give
+    # `docker stop`/compose a grace window comfortably above that sum so
+    # an in-flight cancel is never SIGKILLed mid-flight.
+    stop_grace_period: 30s

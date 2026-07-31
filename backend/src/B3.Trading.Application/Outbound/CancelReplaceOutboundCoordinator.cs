@@ -19,6 +19,7 @@ public sealed class CancelReplaceApprovalFactory
     private readonly IVenueAccountResolver? _accounts;
     private readonly IInvestorIdResolver? _investors;
     private readonly IRoutingInstructionResolver? _routing;
+    private readonly OutboundMutationLedger? _outboundLedger;
 
     public CancelReplaceApprovalFactory(
         IOutboundCommandProtector protector,
@@ -26,7 +27,8 @@ public sealed class CancelReplaceApprovalFactory
         ISubAccountWireIdMapper? subAccounts = null,
         IVenueAccountResolver? accounts = null,
         IInvestorIdResolver? investors = null,
-        IRoutingInstructionResolver? routing = null)
+        IRoutingInstructionResolver? routing = null,
+        OutboundMutationLedger? outboundLedger = null)
     {
         _protector = protector;
         _riskOptions = riskOptions;
@@ -34,6 +36,7 @@ public sealed class CancelReplaceApprovalFactory
         _accounts = accounts;
         _investors = investors;
         _routing = routing;
+        _outboundLedger = outboundLedger;
     }
 
     public (string EndClientRef, OutboundApprovalSnapshot Approval) CreateCancel(
@@ -63,7 +66,21 @@ public sealed class CancelReplaceApprovalFactory
             approvedAtUtc,
             marginReservationRef: null,
             marginAmount: null,
-            marginBasis: null);
+            marginBasis: null,
+            venueOrderId: ResolveVenueOrderId(original));
+
+    private ulong? ResolveVenueOrderId(Order original)
+    {
+        if (_outboundLedger?.TryGetByClOrdId(original.ClOrdId, out var mutation) != true ||
+            mutation is null ||
+            mutation.Kind is not (OutboundMutationKind.New or OutboundMutationKind.Replace) ||
+            !string.Equals(mutation.FirmId, original.FirmId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return mutation.Resolution?.VenueOrderId;
+    }
 
     public (string EndClientRef, OutboundApprovalSnapshot Approval) CreateReplace(
         OutboundMutationId mutationId,
@@ -102,7 +119,8 @@ public sealed class CancelReplaceApprovalFactory
             approvedAtUtc,
             marginReservationRef: $"replace:{mutationId}",
             marginAmount: newRemainingNotional,
-            marginBasis: "worst-case-original-plus-replacement-delta");
+            marginBasis: "worst-case-original-plus-replacement-delta",
+            venueOrderId: null);
 
     private (string EndClientRef, OutboundApprovalSnapshot Approval) Create(
         OutboundMutationId mutationId,
@@ -111,7 +129,8 @@ public sealed class CancelReplaceApprovalFactory
         DateTimeOffset approvedAtUtc,
         string? marginReservationRef,
         decimal? marginAmount,
-        string? marginBasis)
+        string? marginBasis,
+        ulong? venueOrderId)
     {
         var stp = _riskOptions is null
             ? SelfTradePreventionMode.None
@@ -141,19 +160,23 @@ public sealed class CancelReplaceApprovalFactory
         if (account is not null) refs.Add(OutboundSensitiveFieldRef.Account);
         if (investor is not null) refs.Add(OutboundSensitiveFieldRef.InvestorId);
         if (tradingSubAccount is not null) refs.Add(OutboundSensitiveFieldRef.TradingSubAccount);
+        var approval = OutboundApprovalFactory.Create(
+            mutationId,
+            original.FirmId,
+            command,
+            sensitive,
+            refs,
+            _protector,
+            approvedAtUtc,
+            marginReservationRef: marginReservationRef,
+            marginAmount: marginAmount,
+            marginBasis: marginBasis) with
+        {
+            VenueOrderId = venueOrderId,
+        };
         return (
             _protector.CreateStableEndClientRef(original.FirmId, original.Owner.Value),
-            OutboundApprovalFactory.Create(
-                mutationId,
-                original.FirmId,
-                command,
-                sensitive,
-                refs,
-                _protector,
-                approvedAtUtc,
-                marginReservationRef: marginReservationRef,
-                marginAmount: marginAmount,
-                marginBasis: marginBasis));
+            approval);
     }
 }
 
@@ -335,9 +358,10 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
         string firmId,
         CancellationToken cancellationToken)
     {
+        OutboundMutationSnapshot? mutation = null;
         try
         {
-            if (!_ledger.TryGet(mutationId, out var mutation) || mutation is null)
+            if (!_ledger.TryGet(mutationId, out mutation) || mutation is null)
                 return;
             await RestoreProjectionAsync(mutation, cancellationToken).ConfigureAwait(false);
             if (mutation.State != OutboundMutationState.ApprovedToSend)
@@ -356,7 +380,13 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
         }
         catch (Exception ex)
         {
-            ReconciliationRequired("recovered cancel/replace mutation could not be restored", 0, ex);
+            // #768 follow-up. Once the mutation snapshot is loaded, log its
+            // real (active) ClOrdId instead of a hard-coded 0 so the
+            // reconciliation-required log line is actually correlatable.
+            // If the ledger lookup itself failed/returned nothing, there is
+            // no ClOrdId to report — preserve the prior 0 in that case.
+            var clOrdId = mutation is null ? 0UL : ActiveClOrdId(mutation);
+            ReconciliationRequired(mutationId, firmId, clOrdId, "recovered cancel/replace mutation could not be restored", ex);
         }
     }
 
@@ -365,23 +395,35 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
         bool allowRetry)
     {
         if (!_ledger.TryGet(mutationId, out var mutation) || mutation is null)
-            return ReconciliationRequired("outbound mutation disappeared before dispatch", 0);
+            return ReconciliationRequired(mutationId, null, 0, "outbound mutation disappeared before dispatch");
         if (mutation.Kind is not (OutboundMutationKind.Cancel or OutboundMutationKind.Replace)
             || mutation.Approval is null
             || mutation.OriginalClOrdId is null)
-            return ReconciliationRequired("outbound mutation is not a cancel/replace approval", 0);
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                ActiveClOrdId(mutation),
+                "outbound mutation is not a cancel/replace approval");
         if (mutation.State == OutboundMutationState.TransportWriteCompleted)
             return new(CancelReplaceDispatchOutcome.TransportWriteCompleted, ActiveClOrdId(mutation));
         if (mutation.State == OutboundMutationState.ProvenUnsent && !allowRetry)
             return new(CancelReplaceDispatchOutcome.ProvenUnsent, ActiveClOrdId(mutation));
         if (mutation.State is not (OutboundMutationState.ApprovedToSend
             or OutboundMutationState.ProvenUnsent))
-            return ReconciliationRequired("outbound mutation is not dispatchable", ActiveClOrdId(mutation));
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                ActiveClOrdId(mutation),
+                "outbound mutation is not dispatchable");
         if (mutation.State == OutboundMutationState.ProvenUnsent
             && mutation.Attempts.Count >= OutboundMutationLedger.MaxOutboundAttempts)
             return new(CancelReplaceDispatchOutcome.RetryNotAllowed, ActiveClOrdId(mutation));
         if (!_orders.TryGet(mutation.OriginalClOrdId.Value, out var original) || original is null)
-            return ReconciliationRequired("approved mutation has no original order", ActiveClOrdId(mutation));
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                ActiveClOrdId(mutation),
+                "approved mutation has no original order");
 
         SensitiveOutboundCommand sensitive;
         try
@@ -395,7 +437,12 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
         }
         catch (OutboundCommandEnvelopeException ex)
         {
-            return ReconciliationRequired("approved outbound command cannot be decrypted", 0, ex);
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                ActiveClOrdId(mutation),
+                "approved outbound command cannot be decrypted",
+                ex);
         }
 
         var attemptNo = mutation.Attempts.Count + 1;
@@ -434,13 +481,20 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                 return attemptNo > 1
                     ? new(CancelReplaceDispatchOutcome.RetryNotAllowed, attemptClOrdId)
                     : ReconciliationRequired(
-                        "initial attempt intent was no longer eligible",
-                        attemptClOrdId);
+                        mutationId,
+                        mutation.FirmId,
+                        attemptClOrdId,
+                        "initial attempt intent was no longer eligible");
             }
         }
         catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
         {
-            return ReconciliationRequired("attempt intent could not be committed", attemptClOrdId, ex);
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                attemptClOrdId,
+                "attempt intent could not be committed",
+                ex);
         }
 
         if (attemptNo > 1)
@@ -483,7 +537,8 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                         mutation.MutationId,
                         mutation.FirmId,
                         canonical,
-                        sensitive),
+                        sensitive,
+                        mutation.Approval.VenueOrderId),
                     OnFramePrepared,
                     CancellationToken.None).ConfigureAwait(false)
                 : await _gateway.CancelReplaceWithReceiptAsync(
@@ -510,10 +565,27 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                 GatewayReceiptVersion = receipt.Version,
                 TimestampUtc = completedAt,
             };
+            var landedAsCompleted = true;
             _dispatcher.DispatchCommitted(
                 completed,
-                () => _ledger.Apply(completed),
+                () => landedAsCompleted = _ledger.Apply(completed),
                 CancellationToken.None);
+            if (!landedAsCompleted)
+            {
+                // Raced ClassifySessionRolledAttempts: the ledger accepted
+                // this evidence but the mutation is Ambiguous
+                // (SessionRolledTransportWriteCompleted), not
+                // TransportWriteCompleted — a benign, already-reconcilable
+                // outcome (identical to what Phase 3 alone would have
+                // produced without a race), not an unknown gateway outcome,
+                // so no drain and no margin re-marking here.
+                _logger.LogWarning(
+                    "Cancel/replace outbound coordinator: transport write completed after the attempt's session had already rolled and been reclassified ambiguous; mutation {MutationId} for firm {FirmId} (ClOrdId {ClOrdId}) is Ambiguous/RequiresReconciliation.",
+                    mutation.MutationId,
+                    mutation.FirmId,
+                    attemptClOrdId);
+                return new(CancelReplaceDispatchOutcome.ReconciliationRequired, attemptClOrdId);
+            }
             return new(CancelReplaceDispatchOutcome.TransportWriteCompleted, attemptClOrdId);
         }
         catch (ExchangeGatewayAttemptException ex)
@@ -538,8 +610,10 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             catch (Exception walEx) when (walEx is WalBackpressureException or WalFaultedException)
             {
                 return ReconciliationRequired(
-                    "proven-unsent evidence could not be committed",
+                    mutationId,
+                    mutation.FirmId,
                     attemptClOrdId,
+                    "proven-unsent evidence could not be committed",
                     walEx);
             }
         }
@@ -555,8 +629,10 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                     ex);
             }
             return ReconciliationRequired(
-                "gateway failed without typed pre-frame evidence",
+                mutationId,
+                mutation.FirmId,
                 attemptClOrdId,
+                "gateway failed without typed pre-frame evidence",
                 ex);
         }
 
@@ -598,11 +674,19 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             return;
         if (mutation.State == OutboundMutationState.ProvenUnsent)
         {
-            RemoveProjection(mutation.Kind, ActiveClOrdId(mutation));
+            RemoveTerminalProjection(mutation);
+            return;
+        }
+        if (mutation.State == OutboundMutationState.OperatorResolved)
+        {
+            if (mutation.OperatorEvidence.LastOrDefault()?.Decision
+                == OutboundOperatorDecision.VenueAbsent)
+            {
+                RemoveTerminalProjection(mutation);
+            }
             return;
         }
         if (mutation.State is OutboundMutationState.VenueAcknowledged
-            or OutboundMutationState.OperatorResolved
             or OutboundMutationState.LegacyTerminal)
             return;
         var sensitive = _protector.Decrypt(
@@ -674,7 +758,7 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             cancellationToken).ConfigureAwait(false);
         if (!margin.Approved)
             return false;
-        var intent = CreateReplacementIntent(original, canonical);
+        var intent = CreateReplacementIntent(original, canonical, mutation.AlgoOriginIdentity);
         if (!_replacements.TryGet(canonical.ClOrdId, out _)
             && !_replacements.TryAdd(intent))
         {
@@ -704,7 +788,7 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
                 _clock.GetUtcNow(),
                 mutation.Approval?.MarginAmount ?? 0m);
         }
-        return ReconciliationRequired(reason, clOrdId, exception);
+        return ReconciliationRequired(mutation.MutationId, mutation.FirmId, clOrdId, reason, exception);
     }
 
     private CancelReplaceDispatchResult MarkRetryProjectionUnsent(
@@ -732,7 +816,7 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
         catch (Exception walException) when (
             walException is WalBackpressureException or WalFaultedException)
         {
-            return ReconciliationRequired(reason, clOrdId, walException);
+            return ReconciliationRequired(mutation.MutationId, mutation.FirmId, clOrdId, reason, walException);
         }
     }
 
@@ -750,15 +834,37 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
         _replaceMargin.AbortReplace(clOrdId);
     }
 
+    private void RemoveTerminalProjection(OutboundMutationSnapshot mutation)
+    {
+        if (mutation.Kind != OutboundMutationKind.Cancel)
+        {
+            RemoveProjection(mutation.Kind, ActiveClOrdId(mutation));
+            return;
+        }
+
+        foreach (var cancelClOrdId in mutation.Attempts
+                     .Select(attempt => attempt.ClOrdId)
+                     .Append(mutation.PrimaryClOrdId)
+                     .Distinct())
+        {
+            RemoveProjection(OutboundMutationKind.Cancel, cancelClOrdId);
+        }
+    }
+
     private CancelReplaceDispatchResult ReconciliationRequired(
-        string reason,
+        OutboundMutationId mutationId,
+        string? firmId,
         ulong clOrdId,
+        string reason,
         Exception? exception = null)
     {
         _drain.BeginDrain("outbound_cancel_replace_reconciliation_required");
         _logger.LogCritical(
             exception,
-            "Cancel/replace outbound coordinator requires reconciliation: {Reason}.",
+            "Cancel/replace outbound coordinator requires reconciliation for mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}): {Reason}.",
+            mutationId,
+            firmId,
+            clOrdId,
             reason);
         return new(CancelReplaceDispatchOutcome.ReconciliationRequired, clOrdId, exception);
     }
@@ -778,7 +884,8 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
 
     private static OrderReplacementIntent CreateReplacementIntent(
         Order original,
-        OutboundCanonicalCommand canonical) =>
+        OutboundCanonicalCommand canonical,
+        AlgoOutboundOriginIdentity? algoOriginIdentity) =>
         new(
             original.ClOrdId,
             canonical.ClOrdId,
@@ -794,7 +901,12 @@ public sealed class CancelReplaceOutboundCoordinator : IHostedService
             original.AlgoSliceSeq,
             Enum.Parse<TimeInForce>(canonical.TimeInForce, ignoreCase: true),
             canonical.StopPrice,
-            canonical.GoodTillDate);
+            canonical.GoodTillDate,
+            algoOriginIdentity is
+            {
+                ParentAlgoId: var parentAlgoId,
+                ActionKind: AlgoOutboundActionKind.Repeg,
+            } && parentAlgoId == original.ParentAlgoId);
 
     private static void ValidateFrame(
         OutboundMutationSnapshot mutation,

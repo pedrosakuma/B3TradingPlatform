@@ -3,6 +3,7 @@ using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -12,6 +13,29 @@ namespace B3.Trading.Application.Tests.Outbound;
 
 public sealed class CancelReplaceOutboundCoordinatorTests
 {
+    [Theory]
+    [InlineData(OutboundMutationKind.New)]
+    [InlineData(OutboundMutationKind.Replace)]
+    public void CancelApproval_CarriesCurrentOrderVenueOrderId(
+        OutboundMutationKind sourceKind)
+    {
+        var fixture = CreateFixture(
+            new RecordingGateway(),
+            new RecordingReplaceMarginCoordinator());
+        var original = OriginalOrder();
+        SeedAcceptedMutation(fixture, original, sourceKind, venueOrderId: 9001);
+
+        var frozen = fixture.ApprovalFactory.CreateCancel(
+            OutboundMutationId.New(),
+            original,
+            cancelClOrdId: 2001,
+            DateTimeOffset.UtcNow);
+
+        Assert.Equal(
+            9001UL,
+            frozen.Approval.VenueOrderId);
+    }
+
     [Fact]
     public async Task Replace_PostFrameFailure_RemainsAmbiguousAndKeepsMargin()
     {
@@ -36,6 +60,33 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         Assert.Equal(original.ClOrdId, intent!.OriginalClOrdId);
         Assert.Single(margin.Prepared);
         Assert.Empty(margin.Aborted);
+    }
+
+    // #768. Mirrors the assertion added to NewOrderOutboundCoordinatorTests:
+    // the reconciliation-required critical log is the only durable signal
+    // available to correlate a lost cancel/replace HTTP response back to
+    // the WAL mutation, so MutationId/FirmId/ClOrdId must all be present
+    // in structured form.
+    [Fact]
+    public async Task ReconciliationRequired_LogsMutationFirmAndClOrdId()
+    {
+        var gateway = new RecordingGateway(GatewayOutcome.Ambiguous);
+        var margin = new RecordingReplaceMarginCoordinator();
+        var logger = new CapturingLogger<CancelReplaceOutboundCoordinator>();
+        var fixture = CreateFixture(gateway, margin, logger);
+        var original = OriginalOrder();
+        AddOriginal(fixture, original);
+        var mutationId = Approve(fixture, original, 2001);
+
+        var result = await fixture.Coordinator.EnqueueAsync(
+            mutationId,
+            CancellationToken.None);
+
+        Assert.Equal(CancelReplaceDispatchOutcome.ReconciliationRequired, result.Outcome);
+        var entry = Assert.Single(logger.Entries, e => e.Level == LogLevel.Critical);
+        Assert.Contains(mutationId.ToString(), entry.Message);
+        Assert.Contains(original.FirmId, entry.Message);
+        Assert.Contains(result.ClOrdId.ToString(), entry.Message);
     }
 
     [Fact]
@@ -437,6 +488,69 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         await recovered.StopAsync(CancellationToken.None);
     }
 
+    // #768 follow-up. RecoverWhenOperationalAsync's catch block used to
+    // hard-code ClOrdId=0 in its reconciliation-required log regardless of
+    // whether the mutation snapshot had already been loaded. Once the
+    // mutation is loaded (state ApprovedToSend), a later failure — here,
+    // gateway readiness throwing while waiting to resume dispatch — must
+    // log the mutation's real ActiveClOrdId so the line is correlatable.
+    [Fact]
+    public async Task RecoverWhenOperationalAsync_PostLoadFailure_LogsActiveClOrdIdNotZero()
+    {
+        var gateway = new RecordingGateway(GatewayOutcome.Completed);
+        var fixture = CreateFixture(gateway, new RecordingReplaceMarginCoordinator());
+        var original = OriginalOrder();
+        AddOriginal(fixture, original);
+        var mutationId = Approve(fixture, original, 2001);
+        Assert.True(fixture.Ledger.TryGet(mutationId, out var approved));
+        Assert.Equal(OutboundMutationState.ApprovedToSend, approved!.State);
+
+        var recoveredOrders = new WorkingOrderBook();
+        Assert.True(recoveredOrders.TryAdd(original));
+        var recoveredOwnership = new OrderOwnershipMap();
+        recoveredOwnership.Register(original.ClOrdId, original.Owner);
+        var logger = new CapturingLogger<CancelReplaceOutboundCoordinator>();
+        var recovered = new CancelReplaceOutboundCoordinator(
+            fixture.Ledger,
+            new OutboundProcessEpoch(),
+            fixture.Protector,
+            new RecordingGateway(),
+            fixture.Dispatcher,
+            recoveredOrders,
+            new ClOrdIdPrefixRegistry(),
+            recoveredOwnership,
+            new PendingCancelRegistry(),
+            new PendingReplacementRegistry(),
+            new RecordingReplaceMarginCoordinator(),
+            new RecordingDrainController(),
+            logger,
+            botMappings: null,
+            clock: null,
+            gatewayReadiness: new ThrowingGatewayReadiness());
+
+        await recovered.StartAsync(CancellationToken.None);
+        var deadline = DateTime.UtcNow.AddSeconds(2);
+        while (!logger.Entries.Any(e => e.Level == LogLevel.Critical)
+               && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+        await recovered.StopAsync(CancellationToken.None);
+
+        var entry = Assert.Single(logger.Entries, e => e.Level == LogLevel.Critical);
+        Assert.Contains(mutationId.ToString(), entry.Message);
+        Assert.Contains(original.FirmId, entry.Message);
+        Assert.Contains("2001", entry.Message);
+    }
+
+    private sealed class ThrowingGatewayReadiness : IOutboundGatewayReadiness
+    {
+        public ValueTask WaitUntilOperationalAsync(
+            string firmId,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("gateway readiness check failed");
+    }
+
     [Fact]
     public void RequestedEventBeforeApproval_KeepsMutationIdentityAndUpgradesLegacyUnknown()
     {
@@ -473,7 +587,8 @@ public sealed class CancelReplaceOutboundCoordinatorTests
 
     private static Fixture CreateFixture(
         RecordingGateway gateway,
-        IReplaceMarginCoordinator margin)
+        IReplaceMarginCoordinator margin,
+        ILogger<CancelReplaceOutboundCoordinator>? logger = null)
     {
         var protector = CreateProtector();
         var ledger = new OutboundMutationLedger(protector);
@@ -485,7 +600,9 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         var clOrdIds = new ClOrdIdPrefixRegistry();
         var orders = new WorkingOrderBook();
         var ownership = new OrderOwnershipMap();
-        var approvalFactory = new CancelReplaceApprovalFactory(protector);
+        var approvalFactory = new CancelReplaceApprovalFactory(
+            protector,
+            outboundLedger: ledger);
         var coordinator = new CancelReplaceOutboundCoordinator(
             ledger,
             new OutboundProcessEpoch(),
@@ -499,7 +616,7 @@ public sealed class CancelReplaceOutboundCoordinatorTests
             replacements,
             margin,
             drain,
-            NullLogger<CancelReplaceOutboundCoordinator>.Instance);
+            logger ?? NullLogger<CancelReplaceOutboundCoordinator>.Instance);
         return new(
             coordinator,
             approvalFactory,
@@ -652,6 +769,100 @@ public sealed class CancelReplaceOutboundCoordinatorTests
     {
         Assert.True(fixture.Orders.TryAdd(original));
         fixture.Ownership.Register(original.ClOrdId, original.Owner);
+    }
+
+    private static void SeedAcceptedMutation(
+        Fixture fixture,
+        Order order,
+        OutboundMutationKind kind,
+        ulong venueOrderId)
+    {
+        var at = DateTimeOffset.UtcNow;
+        var mutationId = OutboundMutationId.New();
+        var attemptId = OutboundAttemptId.New();
+        var originalClOrdId = kind == OutboundMutationKind.Replace
+            ? order.ClOrdId - 1
+            : (ulong?)null;
+        var command = new OutboundCanonicalCommand
+        {
+            ClOrdId = order.ClOrdId,
+            OriginalClOrdId = originalClOrdId,
+            SecurityId = order.SecurityId,
+            Symbol = order.Symbol,
+            Side = order.Side.ToString(),
+            OrderType = order.Type.ToString(),
+            Quantity = order.Quantity,
+            Price = order.Price,
+        };
+        var sensitive = new SensitiveOutboundCommand
+        {
+            EndClientId = order.Owner.Value,
+        };
+        var approval = OutboundApprovalFactory.Create(
+            mutationId,
+            order.FirmId,
+            command,
+            sensitive,
+            [OutboundSensitiveFieldRef.EndClientId],
+            fixture.Protector,
+            at);
+        fixture.Ledger.Apply(new OutboundApprovedEvent
+        {
+            MutationId = mutationId,
+            MutationKind = kind,
+            FirmId = order.FirmId,
+            EndClientRef = fixture.Protector.CreateStableEndClientRef(
+                order.FirmId,
+                order.Owner.Value),
+            Origin = OutboundMutationOrigin.Rest,
+            PrimaryClOrdId = order.ClOrdId,
+            OriginalClOrdId = originalClOrdId,
+            RecordedAtUtc = at,
+            Approval = approval,
+            TimestampUtc = at,
+        });
+        fixture.Ledger.Apply(new OutboundAttemptIntentPreparedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            AttemptNo = 1,
+            ClOrdId = order.ClOrdId,
+            ProcessEpochId = ProcessEpochId.New(),
+            IntentPreparedAtUtc = at,
+            TimestampUtc = at,
+        });
+        fixture.Ledger.Apply(new OutboundFramePreparedEvent
+        {
+            MutationId = mutationId,
+            AttemptId = attemptId,
+            FirmId = order.FirmId,
+            SessionId = 42,
+            SessionVerId = 7,
+            OutboundSeqNum = 1,
+            EncodedFrameSha256 = new string('a', 64),
+            PreparedAtUtc = at,
+            TimestampUtc = at,
+        });
+        fixture.Ledger.ApplyVenueAcknowledgement(
+            new ExecutionReportReceivedEvent
+            {
+                ClOrdId = order.ClOrdId,
+                OrigClOrdId = originalClOrdId ?? 0,
+                ExecKind = kind == OutboundMutationKind.Replace
+                    ? "Replaced"
+                    : "New",
+                LeavesQuantity = order.Quantity,
+                CumulativeQuantity = 0,
+                LastQuantity = 0,
+                LastPrice = 0,
+                Synthetic = false,
+                FirmId = order.FirmId,
+                SessionId = 42,
+                SessionVerId = 7,
+                InboundSeqNum = 1,
+                VenueOrderId = venueOrderId,
+                TimestampUtc = at,
+            });
     }
 
     private static AeadOutboundCommandProtector CreateProtector() =>
@@ -813,5 +1024,19 @@ public sealed class CancelReplaceOutboundCoordinatorTests
         public T CurrentValue { get; } = value;
         public T Get(string? name) => CurrentValue;
         public IDisposable? OnChange(Action<T, string?> listener) => null;
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
     }
 }

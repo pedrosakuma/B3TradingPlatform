@@ -10,6 +10,7 @@ using B3.Trading.Domain;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Logging;
 
 namespace B3.Trading.Api;
 
@@ -40,8 +41,10 @@ public static class OrdersEndpoints
             SymbolDirectory symbols,
             SubAccountsRegistry subAccounts,
             IOutboundRecoveryGate recovery,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
+            var logger = loggerFactory.CreateLogger("B3.Trading.Api.OrdersEndpoints");
             var firm = ResolveFirm(ctx);
             if (!recovery.IsBusinessIngressOpen(firm))
                 return RecoveryUnavailable();
@@ -132,7 +135,8 @@ public static class OrdersEndpoints
                     if (resolution.Kind == RestOrderIdempotencyResolutionKind.Conflict)
                         return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
                     if (resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed)
-                        return MapReplayedSubmission(resolution.Binding!, outboundLedger, book);
+                        return MapReplayedSubmission(
+                            resolution.Binding!, outboundLedger, book, logger, ctx, firm, "POST /api/orders");
                 }
                 catch (RestOrderIdempotencyUnavailableException)
                 {
@@ -193,7 +197,10 @@ public static class OrdersEndpoints
                 return MapSubmissionResult(
                     unkeyedResult,
                     replayed: false,
-                    ResolveState(unkeyedResult.MutationId, unkeyedResult.ClOrdId, outboundLedger, book));
+                    ResolveState(unkeyedResult.MutationId, unkeyedResult.ClOrdId, outboundLedger, book),
+                    logger,
+                    ctx,
+                    firm);
             }
 
             RestOrderIdempotencyExecution<OrderSubmissionResult> execution;
@@ -221,14 +228,17 @@ public static class OrdersEndpoints
             if (execution.Kind == RestOrderIdempotencyExecutionKind.Replayed)
             {
                 var binding = execution.Binding!;
-                return MapReplayedSubmission(binding, outboundLedger, book);
+                return MapReplayedSubmission(binding, outboundLedger, book, logger, ctx, firm, "POST /api/orders");
             }
 
             var result = execution.Value!;
             return MapSubmissionResult(
                 result,
                 replayed: false,
-                ResolveState(result.MutationId, result.ClOrdId, outboundLedger, book));
+                ResolveState(result.MutationId, result.ClOrdId, outboundLedger, book),
+                logger,
+                ctx,
+                firm);
         });
 
         group.MapGet("/mutations/{mutationId:guid}", (
@@ -290,8 +300,10 @@ public static class OrdersEndpoints
             OutboundMutationLedger outboundLedger,
             WorkingOrderBook book,
             IOutboundRecoveryGate recovery,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
+            var logger = loggerFactory.CreateLogger("B3.Trading.Api.OrdersEndpoints");
             var firm = ResolveFirm(ctx);
             if (!recovery.IsBusinessIngressOpen(firm))
                 return RecoveryUnavailable();
@@ -320,7 +332,9 @@ public static class OrdersEndpoints
                     if (resolution.Kind == RestOrderIdempotencyResolutionKind.Conflict)
                         return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
                     if (resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed)
-                        return MapReplayedSubmission(resolution.Binding!, outboundLedger, book);
+                        return MapReplayedSubmission(
+                            resolution.Binding!, outboundLedger, book, logger, ctx, firm,
+                            "PUT /api/orders", origClOrdId: clOrdIdU);
                 }
                 catch (RestOrderIdempotencyUnavailableException)
                 {
@@ -356,7 +370,10 @@ public static class OrdersEndpoints
                     outboundLedger,
                     book,
                     replayed: false,
-                    legacyResponse: true);
+                    legacyResponse: true,
+                    logger,
+                    ctx,
+                    firm);
             }
 
             RestOrderIdempotencyExecution<OrderModifyResult> execution;
@@ -381,14 +398,19 @@ public static class OrdersEndpoints
             if (execution.Kind == RestOrderIdempotencyExecutionKind.Conflict)
                 return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
             if (execution.Kind == RestOrderIdempotencyExecutionKind.Replayed)
-                return MapReplayedSubmission(execution.Binding!, outboundLedger, book);
+                return MapReplayedSubmission(
+                    execution.Binding!, outboundLedger, book, logger, ctx, firm,
+                    "PUT /api/orders", origClOrdId: clOrdIdU);
             return MapModifyResult(
                 execution.Value!,
                 clOrdIdU,
                 outboundLedger,
                 book,
                 replayed: false,
-                legacyResponse: false);
+                legacyResponse: false,
+                logger,
+                ctx,
+                firm);
         });
 
         group.MapDelete("/{clOrdId}", async (
@@ -400,8 +422,10 @@ public static class OrdersEndpoints
             OutboundMutationLedger outboundLedger,
             WorkingOrderBook book,
             IOutboundRecoveryGate recovery,
+            ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
+            var logger = loggerFactory.CreateLogger("B3.Trading.Api.OrdersEndpoints");
             var firm = ResolveFirm(ctx);
             if (!recovery.IsBusinessIngressOpen(firm))
                 return RecoveryUnavailable();
@@ -430,7 +454,9 @@ public static class OrdersEndpoints
                     if (resolution.Kind == RestOrderIdempotencyResolutionKind.Conflict)
                         return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
                     if (resolution.Kind == RestOrderIdempotencyResolutionKind.Replayed)
-                        return MapReplayedSubmission(resolution.Binding!, outboundLedger, book);
+                        return MapReplayedSubmission(
+                            resolution.Binding!, outboundLedger, book, logger, ctx, firm,
+                            "DELETE /api/orders", origClOrdId: clOrdIdU);
                 }
                 catch (RestOrderIdempotencyUnavailableException)
                 {
@@ -448,10 +474,14 @@ public static class OrdersEndpoints
                 var unkeyed = await canceller.CancelAsync(owner, clOrdIdU, ct, firmId: firm);
                 return MapCancelResult(
                     unkeyed,
+                    clOrdIdU,
                     outboundLedger,
                     book,
                     replayed: false,
-                    legacyResponse: true);
+                    legacyResponse: true,
+                    logger,
+                    ctx,
+                    firm);
             }
 
             RestOrderIdempotencyExecution<OrderCancelResult> execution;
@@ -479,13 +509,19 @@ public static class OrdersEndpoints
             if (execution.Kind == RestOrderIdempotencyExecutionKind.Conflict)
                 return Results.Conflict(new { error = "idempotency_key_reused_with_different_request" });
             if (execution.Kind == RestOrderIdempotencyExecutionKind.Replayed)
-                return MapReplayedSubmission(execution.Binding!, outboundLedger, book);
+                return MapReplayedSubmission(
+                    execution.Binding!, outboundLedger, book, logger, ctx, firm,
+                    "DELETE /api/orders", origClOrdId: clOrdIdU);
             return MapCancelResult(
                 execution.Value!,
+                clOrdIdU,
                 outboundLedger,
                 book,
                 replayed: false,
-                legacyResponse: false);
+                legacyResponse: false,
+                logger,
+                ctx,
+                firm);
         });
 
         return app;
@@ -500,14 +536,82 @@ public static class OrdersEndpoints
             },
             statusCode: StatusCodes.Status503ServiceUnavailable);
 
+    /// <summary>
+    /// #768 code-review follow-up (1). Shared privacy-safe correlation
+    /// log for any non-accepted REST mutation outcome (live or replayed
+    /// POST submit / PUT replace / DELETE cancel). Correlates
+    /// <see cref="HttpContext.TraceIdentifier"/> (per-request) with
+    /// MutationId/ClOrdId(+OrigClOrdId)/FirmId (per-business-mutation) so
+    /// an operator can pivot straight to
+    /// GET /api/admin/outbound-mutations/{mutationId} from product logs
+    /// alone. Callers must only invoke this for non-accepted (and
+    /// non-accepted-replay) outcomes so normal traffic stays quiet; no
+    /// credentials, request body, or plaintext end-client identity are
+    /// logged here — only bounded, already-classified kind/code strings.
+    /// </summary>
+    private static void LogRestMutationFailure(
+        ILogger logger,
+        HttpContext ctx,
+        string endpoint,
+        OutboundMutationId mutationId,
+        string firmId,
+        ulong clOrdId,
+        ulong? origClOrdId,
+        bool replayed,
+        string kind,
+        string? code,
+        int statusCode)
+    {
+        if (origClOrdId is { } orig)
+        {
+            logger.LogWarning(
+                "{Endpoint} mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}, OrigClOrdId {OrigClOrdId}) " +
+                "did not accept: kind={Kind} code={Code} status={StatusCode} replayed={Replayed} traceId={TraceIdentifier}.",
+                endpoint, mutationId, firmId, clOrdId, orig, kind, code, statusCode, replayed, ctx.TraceIdentifier);
+        }
+        else
+        {
+            logger.LogWarning(
+                "{Endpoint} mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}) did not accept: " +
+                "kind={Kind} code={Code} status={StatusCode} replayed={Replayed} traceId={TraceIdentifier}.",
+                endpoint, mutationId, firmId, clOrdId, kind, code, statusCode, replayed, ctx.TraceIdentifier);
+        }
+    }
+
     private static IResult MapModifyResult(
         OrderModifyResult result,
         ulong originalClOrdId,
         OutboundMutationLedger ledger,
         WorkingOrderBook book,
         bool replayed,
-        bool legacyResponse) =>
-        result.Kind switch
+        bool legacyResponse,
+        ILogger logger,
+        HttpContext ctx,
+        string firmId)
+    {
+        var statusCode = result.Kind switch
+        {
+            OrderModifyResultKind.Accepted => StatusCodes.Status202Accepted,
+            OrderModifyResultKind.NotFound => StatusCodes.Status404NotFound,
+            OrderModifyResultKind.Conflict => StatusCodes.Status409Conflict,
+            OrderModifyResultKind.BadRequest => StatusCodes.Status400BadRequest,
+            OrderModifyResultKind.RiskRejected => StatusCodes.Status422UnprocessableEntity,
+            OrderModifyResultKind.GatewayFailed => StatusCodes.Status502BadGateway,
+            OrderModifyResultKind.GatewayAmbiguous => StatusCodes.Status502BadGateway,
+            OrderModifyResultKind.ReconciliationRequired => StatusCodes.Status503ServiceUnavailable,
+            OrderModifyResultKind.WalBackpressure => StatusCodes.Status503ServiceUnavailable,
+            OrderModifyResultKind.Drained => StatusCodes.Status503ServiceUnavailable,
+            OrderModifyResultKind.DuplicateClOrdId => StatusCodes.Status409Conflict,
+            _ => StatusCodes.Status500InternalServerError,
+        };
+        if (result.Kind != OrderModifyResultKind.Accepted)
+        {
+            LogRestMutationFailure(
+                logger, ctx, "PUT /api/orders", result.MutationId, firmId,
+                result.NewClOrdId, originalClOrdId, replayed,
+                result.Kind.ToString(), result.Code, statusCode);
+        }
+        return result.Kind switch
         {
             OrderModifyResultKind.Accepted => legacyResponse
                 ? Results.Accepted(
@@ -561,14 +665,42 @@ public static class OrdersEndpoints
                 Results.Conflict(new { error = result.Reason, newClOrdId = result.NewClOrdId.ToString() }),
             _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
         };
+    }
 
     private static IResult MapCancelResult(
         OrderCancelResult result,
+        ulong originalClOrdId,
         OutboundMutationLedger ledger,
         WorkingOrderBook book,
         bool replayed,
-        bool legacyResponse) =>
-        result.Kind switch
+        bool legacyResponse,
+        ILogger logger,
+        HttpContext ctx,
+        string firmId)
+    {
+        var statusCode = result.Kind switch
+        {
+            OrderCancelResultKind.Accepted => legacyResponse
+                ? StatusCodes.Status204NoContent
+                : StatusCodes.Status202Accepted,
+            OrderCancelResultKind.NotFound => StatusCodes.Status404NotFound,
+            OrderCancelResultKind.Stale => StatusCodes.Status409Conflict,
+            OrderCancelResultKind.Conflict => StatusCodes.Status409Conflict,
+            OrderCancelResultKind.WalBackpressure => StatusCodes.Status503ServiceUnavailable,
+            OrderCancelResultKind.GatewayFailed => StatusCodes.Status502BadGateway,
+            OrderCancelResultKind.ReconciliationRequired => StatusCodes.Status503ServiceUnavailable,
+            _ => StatusCodes.Status500InternalServerError,
+        };
+        if (result.Kind != OrderCancelResultKind.Accepted)
+        {
+            // OrderCancelResult carries no Code property (unlike Modify/
+            // Submission) — pass null rather than fabricate one.
+            LogRestMutationFailure(
+                logger, ctx, "DELETE /api/orders", result.MutationId, firmId,
+                result.CancelClOrdId, originalClOrdId, replayed,
+                result.Kind.ToString(), code: null, statusCode);
+        }
+        return result.Kind switch
         {
             OrderCancelResultKind.Accepted => legacyResponse
                 ? Results.NoContent()
@@ -605,6 +737,7 @@ public static class OrdersEndpoints
                     statusCode: StatusCodes.Status503ServiceUnavailable),
             _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
         };
+    }
 
     private static EndClientId ResolveOwner(HttpContext ctx, EndClientRegistry registry)
     {
@@ -623,10 +756,20 @@ public static class OrdersEndpoints
     private static IResult MapReplayedSubmission(
         RestOrderIdempotencyBindingSnapshot binding,
         OutboundMutationLedger ledger,
-        WorkingOrderBook book)
+        WorkingOrderBook book,
+        ILogger logger,
+        HttpContext ctx,
+        string firmId,
+        string endpoint,
+        ulong? origClOrdId = null)
     {
         if (binding.RejectionReason is { } rejectionReason)
         {
+            LogRestMutationFailure(
+                logger, ctx, endpoint, binding.MutationId, firmId,
+                binding.ClOrdId, origClOrdId, replayed: true,
+                kind: "Rejected", code: binding.RejectionCode,
+                statusCode: StatusCodes.Status422UnprocessableEntity);
             return Results.UnprocessableEntity(new
             {
                 error = rejectionReason,
@@ -648,25 +791,45 @@ public static class OrdersEndpoints
                 "RecordedPendingApproval" => "outbound approval is not durably committed",
                 _ => null,
             });
-        return state switch
+        var statusCode = state switch
         {
-            nameof(OutboundMutationState.ProvenUnsent) =>
-                Results.Json(response, statusCode: StatusCodes.Status502BadGateway),
+            nameof(OutboundMutationState.ProvenUnsent) => StatusCodes.Status502BadGateway,
             nameof(OutboundMutationState.Ambiguous)
                 or nameof(OutboundMutationState.AttemptIntentPrepared)
                 or nameof(OutboundMutationState.FramePrepared)
-                or nameof(OutboundMutationState.LegacyUnknown) =>
-                Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
-            "RecordedPendingApproval" =>
-                Results.Json(response, statusCode: StatusCodes.Status503ServiceUnavailable),
-            _ => Results.Accepted($"/api/orders/mutations/{binding.MutationId}", response),
+                or nameof(OutboundMutationState.LegacyUnknown) => StatusCodes.Status503ServiceUnavailable,
+            "RecordedPendingApproval" => StatusCodes.Status503ServiceUnavailable,
+            _ => StatusCodes.Status202Accepted,
+        };
+        // A resolved terminal rejection (RejectedBeforeApproval /
+        // RejectedBeforeSend) still maps to HTTP 202 above — same
+        // "accepted for async processing, ultimately rejected" contract
+        // as OrderSubmissionResultKind.Rejected in the live path — but is
+        // still a failure worth logging, matching that live-path
+        // convention.
+        var isRejectedReplay = state is "RejectedBeforeApproval" or "RejectedBeforeSend";
+        if (statusCode != StatusCodes.Status202Accepted || isRejectedReplay)
+        {
+            LogRestMutationFailure(
+                logger, ctx, endpoint, binding.MutationId, firmId,
+                binding.ClOrdId, origClOrdId, replayed: true,
+                kind: state, code: null, statusCode);
+        }
+        return statusCode switch
+        {
+            StatusCodes.Status202Accepted =>
+                Results.Accepted($"/api/orders/mutations/{binding.MutationId}", response),
+            _ => Results.Json(response, statusCode: statusCode),
         };
     }
 
     private static IResult MapSubmissionResult(
         OrderSubmissionResult result,
         bool replayed,
-        string state)
+        string state,
+        ILogger logger,
+        HttpContext ctx,
+        string firmId)
     {
         var response = MutationResponse(
             result.MutationId,
@@ -687,6 +850,33 @@ public static class OrdersEndpoints
                         : "system busy (WAL backpressure)",
                 _ => null,
             });
+        var statusCode = result.Kind switch
+        {
+            OrderSubmissionResultKind.Accepted or OrderSubmissionResultKind.Rejected =>
+                StatusCodes.Status202Accepted,
+            OrderSubmissionResultKind.GatewayFailed => StatusCodes.Status502BadGateway,
+            OrderSubmissionResultKind.WalBackpressure => StatusCodes.Status503ServiceUnavailable,
+            OrderSubmissionResultKind.Drained => StatusCodes.Status503ServiceUnavailable,
+            OrderSubmissionResultKind.BadRequest => StatusCodes.Status400BadRequest,
+            OrderSubmissionResultKind.DuplicateClOrdId => StatusCodes.Status409Conflict,
+            OrderSubmissionResultKind.ReconciliationRequired => StatusCodes.Status503ServiceUnavailable,
+            _ => StatusCodes.Status500InternalServerError,
+        };
+        // #768. Diagnose failed mutations from product logs even when the
+        // caller loses the HTTP response — correlate TraceIdentifier
+        // (per-request) with MutationId/ClOrdId (per-business-mutation) so
+        // an operator can pivot straight to
+        // GET /api/admin/outbound-mutations/{mutationId}. Deliberately
+        // skips the Accepted kind so normal traffic stays quiet; no
+        // credentials, request body, or plaintext end-client identity are
+        // logged here.
+        if (result.Kind != OrderSubmissionResultKind.Accepted)
+        {
+            LogRestMutationFailure(
+                logger, ctx, "POST /api/orders", result.MutationId, firmId,
+                result.ClOrdId, origClOrdId: null, replayed,
+                result.Kind.ToString(), result.Code, statusCode);
+        }
         return result.Kind switch
         {
             OrderSubmissionResultKind.Accepted or OrderSubmissionResultKind.Rejected =>
