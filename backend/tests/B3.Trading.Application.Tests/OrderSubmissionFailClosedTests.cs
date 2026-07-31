@@ -3,6 +3,7 @@ using B3.Trading.Application.Persistence;
 using B3.Trading.Application.Risk;
 using B3.Trading.Application.Risk.Accounting;
 using B3.Trading.Domain;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace B3.Trading.Application.Tests;
@@ -46,6 +47,49 @@ public class OrderSubmissionFailClosedTests
         Assert.IsType<OrderSubmittedEvent>(Assert.Single(store.Appended));
         Assert.True(drain.IsDraining);
         Assert.Equal("wal_synthetic_terminal_reconciliation_required", drain.Reason);
+    }
+
+    // #768. Legacy (non-durable-coordinator) gateway submit failures must
+    // carry the same MutationId/FirmId/ClOrdId identifiers as the modern
+    // dispatch path so operators can diagnose either path from product
+    // logs alone.
+    [Fact]
+    public async Task LegacyGatewayFailure_LogsMutationFirmAndClOrdId()
+    {
+        var store = new SaturatingAfterFirstAppendStore();
+        var dispatcher = new EventDispatcher(store);
+        var book = new WorkingOrderBook();
+        var sink = new RecordingSink();
+        var drain = new TestDrainController();
+        var logger = new CapturingLogger<OrderSubmissionService>();
+        var submitter = new OrderSubmissionService(
+            new ClOrdIdPrefixRegistry(),
+            new OrderOwnershipMap(),
+            book,
+            new ThrowingGateway(),
+            sink,
+            new RiskPipeline(Array.Empty<IRiskCheck>()),
+            new NoOpMarginProvider(),
+            new CompositeRiskAccountant(Array.Empty<IRiskAccountant>()),
+            dispatcher,
+            drain,
+            logger);
+
+        var result = await submitter.SubmitAsync(
+            new OrderSubmissionRequest(
+                new EndClientId("alice"), "FIRM-A", "PETR4", 4321UL,
+                OrderSide.Buy, OrderType.Limit, 100, 30m),
+            CancellationToken.None);
+
+        Assert.Equal(OrderSubmissionResultKind.ReconciliationRequired, result.Kind);
+        var gatewayError = Assert.Single(logger.Entries, e => e.Level == LogLevel.Error);
+        Assert.Contains(result.MutationId.ToString(), gatewayError.Message);
+        Assert.Contains("FIRM-A", gatewayError.Message);
+        Assert.Contains(result.ClOrdId.ToString(), gatewayError.Message);
+        var reconciliationCritical = Assert.Single(logger.Entries, e => e.Level == LogLevel.Critical);
+        Assert.Contains(result.MutationId.ToString(), reconciliationCritical.Message);
+        Assert.Contains("FIRM-A", reconciliationCritical.Message);
+        Assert.Contains(result.ClOrdId.ToString(), reconciliationCritical.Message);
     }
 
     private sealed class SaturatingAfterFirstAppendStore : IEventStore
@@ -107,5 +151,19 @@ public class OrderSubmissionFailClosedTests
             IsDraining = true;
             Reason = reason;
         }
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
     }
 }

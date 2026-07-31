@@ -1,9 +1,11 @@
 using B3.Trading.Application;
 using B3.Trading.Application.Outbound;
 using B3.Trading.Application.Persistence;
+using B3.Trading.Application.Risk;
 using B3.Trading.Application.UserBots;
 using B3.Trading.Domain;
 using B3.Trading.Infrastructure.Persistence;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace B3.Trading.Application.Tests;
@@ -207,5 +209,154 @@ public class OrderCancelServiceTests
         public async ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(
             CancellationToken cancellationToken) =>
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+    }
+
+    // ───── #768 code-review follow-up — mutationId/firmId threaded through
+    // the pre-dispatch FailResolutionForReconciliation paths ─────
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        public List<(LogLevel Level, string Message)> Records { get; } = new();
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(this);
+        public void Dispose() { }
+        private sealed class CapturingLogger : ILogger
+        {
+            private readonly CapturingLoggerProvider _owner;
+            public CapturingLogger(CapturingLoggerProvider owner) { _owner = owner; }
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+                Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                _owner.Records.Add((logLevel, formatter(state, exception)));
+            }
+        }
+    }
+
+    private sealed class NoOpReplaceMargin : IReplaceMarginCoordinator
+    {
+        public Task<RiskDecision> PrepareReplaceAsync(ulong _, ulong __, EndClientId ___, decimal ____, CancellationToken _____)
+            => Task.FromResult(RiskDecision.Approve);
+        public void CommitReplace(ulong _, ulong __, decimal ___) { }
+        public void AbortReplace(ulong _) { }
+    }
+
+    private sealed class RecordingDrainController : Lifecycle.IDrainController
+    {
+        public bool IsDraining { get; private set; }
+        public void BeginDrain(string reason) => IsDraining = true;
+    }
+
+    /// <summary>
+    /// Mirrors <c>OrderIdempotencyEndpointTests.RejectingApprovalStore</c>:
+    /// throws <see cref="WalBackpressureException"/> only when appending
+    /// the outbound approval commit, so the cancel path's "approval not
+    /// committed" branch is deterministically reachable while the earlier
+    /// <c>OrderCancelRequestedEvent</c> append still succeeds.
+    /// </summary>
+    private sealed class RejectingApprovalStore : IEventStore
+    {
+        private long _seq;
+        public long CurrentSeq => _seq;
+        public long LastCommittedSeq => _seq;
+        public long Append(WalEvent evt) => Append(evt, ReadOnlyMemory<byte>.Empty);
+        public long Append(WalEvent evt, ReadOnlyMemory<byte> preSerialisedPayload)
+        {
+            if (evt is OutboundApprovedEvent)
+                throw new WalBackpressureException("approval commit rejected");
+            return ++_seq;
+        }
+        public ValueTask FlushAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
+        public ValueTask FlushThroughAsync(long seq, CancellationToken ct = default) =>
+            ValueTask.CompletedTask;
+        public async IAsyncEnumerable<(long Seq, WalEvent Event)> ReadFromAsync(
+            long sinceSeqExclusive,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private static AeadOutboundCommandProtector CreateCancelTestProtector() =>
+        new(
+            new OutboundCommandProtectionOptions
+            {
+                ActiveKeyId = "test",
+                ActiveKeyVersion = 1,
+                Keys =
+                [
+                    new OutboundCommandProtectionKeyOptions
+                    {
+                        KeyId = "test",
+                        Version = 1,
+                        KeyBase64 = Convert.ToBase64String(
+                            System.Security.Cryptography.SHA256.HashData(
+                                System.Text.Encoding.UTF8.GetBytes(
+                                    "order-cancel-service-tests"))),
+                    },
+                ],
+            });
+
+    [Fact]
+    public async Task CancelAsync_OutboundApprovalNotCommitted_LogsMutationFirmClOrdId_PreservesMutationId()
+    {
+        // #768 code-review follow-up (3): the pre-dispatch
+        // FailResolutionForReconciliation path must carry the real
+        // mutationId/firmId into both the critical log and the
+        // returned OrderCancelResult, not defaults. Force the
+        // "approval not committed" branch via a WAL store that rejects
+        // the OutboundApprovedEvent append.
+        const string firm = "FIRM01";
+        var orig = new Order(910_001UL, Owner, "PETR4", 4321UL, OrderSide.Buy, OrderType.Limit, 100, 10m, firm);
+        var clOrdIds = new ClOrdIdPrefixRegistry();
+        var ownership = new OrderOwnershipMap();
+        var book = new WorkingOrderBook();
+        Assert.True(book.TryAdd(orig));
+        ownership.Register(orig.ClOrdId, Owner);
+
+        var gateway = new RecordingGateway();
+        var protector = CreateCancelTestProtector();
+        var ledger = new OutboundMutationLedger(protector);
+        var approvalFactory = new CancelReplaceApprovalFactory(protector, outboundLedger: ledger);
+        var rejectingStore = new RejectingApprovalStore();
+        var dispatcher = new EventDispatcher(rejectingStore);
+        var coordinator = new CancelReplaceOutboundCoordinator(
+            ledger,
+            new OutboundProcessEpoch(),
+            protector,
+            gateway,
+            dispatcher,
+            book,
+            clOrdIds,
+            ownership,
+            new PendingCancelRegistry(),
+            new PendingReplacementRegistry(),
+            new NoOpReplaceMargin(),
+            new RecordingDrainController(),
+            NullLogger<CancelReplaceOutboundCoordinator>.Instance);
+
+        var loggerProvider = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(loggerProvider));
+        var svcLogger = loggerFactory.CreateLogger<OrderCancelService>();
+
+        var sut = new OrderCancelService(
+            clOrdIds, ownership, book, gateway, dispatcher, svcLogger,
+            outboundLedger: ledger,
+            approvalFactory: approvalFactory,
+            outboundCoordinator: coordinator);
+
+        var result = await sut.CancelAsync(
+            Owner, orig.ClOrdId, CancellationToken.None, firmId: firm);
+
+        Assert.Equal(OrderCancelResultKind.ReconciliationRequired, result.Kind);
+        Assert.Equal("outbound_cancel_approval_not_committed", result.Reason);
+        Assert.NotEqual(default, result.MutationId);
+
+        var critical = Assert.Single(
+            loggerProvider.Records, r => r.Level == LogLevel.Critical);
+        Assert.Contains(result.MutationId.ToString(), critical.Message, StringComparison.Ordinal);
+        Assert.Contains(firm, critical.Message, StringComparison.Ordinal);
     }
 }

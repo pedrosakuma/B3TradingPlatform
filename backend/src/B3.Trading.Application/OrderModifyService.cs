@@ -585,6 +585,8 @@ public sealed class OrderModifyService
             if (_outboundLedger is null || _approvalFactory is null)
             {
                 return FailResolutionForReconciliation(
+                    mutationId,
+                    orig.FirmId,
                     newClOrdId,
                     "outbound_replace_composition_invalid",
                     new InvalidOperationException("Replace outbound coordinator composition is incomplete."));
@@ -628,6 +630,8 @@ public sealed class OrderModifyService
                     or OutboundCommandEnvelopeException)
             {
                 return FailResolutionForReconciliation(
+                    mutationId,
+                    orig.FirmId,
                     newClOrdId,
                     "outbound_replace_approval_not_committed",
                     ex);
@@ -718,7 +722,7 @@ public sealed class OrderModifyService
             catch (Exception resolutionEx)
             {
                 return FailResolutionForReconciliation(
-                    newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
+                    mutationId, orig.FirmId, newClOrdId, "pre_send_resolution_not_durable", resolutionEx);
             }
             if (!resolution.Durable)
             {
@@ -732,7 +736,7 @@ public sealed class OrderModifyService
                     });
                 }
                 return FailResolutionForReconciliation(
-                    newClOrdId, "pre_send_resolution_not_durable",
+                    mutationId, orig.FirmId, newClOrdId, "pre_send_resolution_not_durable",
                     resolution.Failure!);
             }
             return OrderModifyResult.GatewayFailed(newClOrdId, ex);
@@ -774,7 +778,7 @@ public sealed class OrderModifyService
             catch (Exception resolutionEx)
             {
                 return FailResolutionForReconciliation(
-                    newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
+                    mutationId, orig.FirmId, newClOrdId, "ambiguous_resolution_not_durable", resolutionEx);
             }
             if (!resolution.Durable)
             {
@@ -785,7 +789,7 @@ public sealed class OrderModifyService
                             newClOrdId, heldAt, newRemainingNotional));
                 }
                 return FailResolutionForReconciliation(
-                    newClOrdId, "ambiguous_resolution_not_durable",
+                    mutationId, orig.FirmId, newClOrdId, "ambiguous_resolution_not_durable",
                     resolution.Failure!);
             }
             return OrderModifyResult.GatewayAmbiguous(newClOrdId, ex);
@@ -800,6 +804,8 @@ public sealed class OrderModifyService
     }
 
     private OrderModifyResult FailResolutionForReconciliation(
+        OutboundMutationId mutationId,
+        string firmId,
         ulong newClOrdId,
         string reason,
         Exception exception)
@@ -811,9 +817,9 @@ public sealed class OrderModifyService
         }
         _reconciliationDrain?.BeginDrain("wal_replace_resolution_reconciliation_required");
         _logger.LogCritical(exception,
-            "Replace resolution {Reason} for new ClOrdID {NewClOrdId}; ingress is draining and operator reconciliation is required.",
-            reason, newClOrdId);
-        return OrderModifyResult.ReconciliationRequired(newClOrdId, reason, exception);
+            "Replace resolution {Reason} for mutation {MutationId} (firm {FirmId}, new ClOrdID {NewClOrdId}); ingress is draining and operator reconciliation is required.",
+            reason, mutationId, firmId, newClOrdId);
+        return OrderModifyResult.ReconciliationRequired(newClOrdId, reason, exception, mutationId);
     }
 
     /// <summary>

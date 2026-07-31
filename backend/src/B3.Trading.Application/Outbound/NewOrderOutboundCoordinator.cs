@@ -297,11 +297,13 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         catch (Exception ex)
         {
             _drain.BeginDrain("outbound_new_order_reconciliation_required");
+            _ledger.TryGet(mutationId, out var mutation);
             _logger.LogCritical(
                 ex,
-                "Recovered new-order mutation {MutationId} for firm {FirmId} could not wait for or enter its operational gateway.",
+                "Recovered new-order mutation {MutationId} for firm {FirmId} (ClOrdId {ClOrdId}) could not wait for or enter its operational gateway.",
                 mutationId,
-                firmId);
+                firmId,
+                mutation?.PrimaryClOrdId);
         }
     }
 
@@ -326,15 +328,23 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
     private async Task<NewOrderDispatchResult> ExecuteAsync(OutboundMutationId mutationId)
     {
         if (!_ledger.TryGet(mutationId, out var mutation) || mutation is null)
-            return ReconciliationRequired("outbound mutation disappeared before dispatch");
+            return ReconciliationRequired(mutationId, null, null, "outbound mutation disappeared before dispatch");
         if (mutation.State == OutboundMutationState.TransportWriteCompleted)
             return new(NewOrderDispatchOutcome.TransportWriteCompleted);
         if (mutation.State != OutboundMutationState.ApprovedToSend
             || mutation.Approval is null
             || mutation.Kind != OutboundMutationKind.New)
-            return ReconciliationRequired("outbound mutation is not dispatchable");
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                mutation.PrimaryClOrdId,
+                "outbound mutation is not dispatchable");
         if (!_orders.TryGet(mutation.PrimaryClOrdId, out var order) || order is null)
-            return ReconciliationRequired("approved outbound mutation has no pending order");
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                mutation.PrimaryClOrdId,
+                "approved outbound mutation has no pending order");
 
         SensitiveOutboundCommand sensitive;
         try
@@ -348,7 +358,12 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         }
         catch (OutboundCommandEnvelopeException ex)
         {
-            return ReconciliationRequired("approved outbound command cannot be decrypted", ex);
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                mutation.PrimaryClOrdId,
+                "approved outbound command cannot be decrypted",
+                ex);
         }
 
         var attemptId = OutboundAttemptId.New();
@@ -372,7 +387,12 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
         }
         catch (Exception ex) when (ex is WalBackpressureException or WalFaultedException)
         {
-            return ReconciliationRequired("attempt intent could not be committed", ex);
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                mutation.PrimaryClOrdId,
+                "attempt intent could not be committed",
+                ex);
         }
 
         var command = new OutboundNewOrderCommand(
@@ -437,8 +457,10 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
                 // TransportWriteCompleted — a benign, already-reconcilable
                 // outcome, not an unknown gateway outcome, so no drain here.
                 _logger.LogWarning(
-                    "New-order outbound coordinator: transport write completed after the attempt's session had already rolled and been reclassified ambiguous; mutation {MutationId} is Ambiguous/RequiresReconciliation.",
-                    mutation.MutationId);
+                    "New-order outbound coordinator: transport write completed after the attempt's session had already rolled and been reclassified ambiguous; mutation {MutationId} for firm {FirmId} (ClOrdId {ClOrdId}) is Ambiguous/RequiresReconciliation.",
+                    mutation.MutationId,
+                    mutation.FirmId,
+                    mutation.PrimaryClOrdId);
                 return new(NewOrderDispatchOutcome.ReconciliationRequired);
             }
             _gtd?.OnOrderTracked(order);
@@ -466,14 +488,24 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
             }
             catch (Exception walEx) when (walEx is WalBackpressureException or WalFaultedException)
             {
-                return ReconciliationRequired("proven-unsent evidence could not be committed", walEx);
+                return ReconciliationRequired(
+                    mutationId,
+                    mutation.FirmId,
+                    mutation.PrimaryClOrdId,
+                    "proven-unsent evidence could not be committed",
+                    walEx);
             }
         }
         catch (Exception ex)
         {
             if (committedFrame is not null)
                 return MarkAmbiguous(mutation, attemptId, "gateway outcome is unknown after frame preparation", ex);
-            return ReconciliationRequired("gateway failed without typed pre-frame evidence", ex);
+            return ReconciliationRequired(
+                mutationId,
+                mutation.FirmId,
+                mutation.PrimaryClOrdId,
+                "gateway failed without typed pre-frame evidence",
+                ex);
         }
     }
 
@@ -488,15 +520,23 @@ public sealed class NewOrderOutboundCoordinator : IHostedService
             attemptId,
             OutboundAmbiguityReason.GatewayOutcomeUnknown,
             _clock.GetUtcNow());
-        return ReconciliationRequired(reason, exception);
+        return ReconciliationRequired(mutation.MutationId, mutation.FirmId, mutation.PrimaryClOrdId, reason, exception);
     }
 
-    private NewOrderDispatchResult ReconciliationRequired(string reason, Exception? exception = null)
+    private NewOrderDispatchResult ReconciliationRequired(
+        OutboundMutationId mutationId,
+        string? firmId,
+        ulong? clOrdId,
+        string reason,
+        Exception? exception = null)
     {
         _drain.BeginDrain("outbound_new_order_reconciliation_required");
         _logger.LogCritical(
             exception,
-            "New-order outbound coordinator requires reconciliation: {Reason}.",
+            "New-order outbound coordinator requires reconciliation for mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}): {Reason}.",
+            mutationId,
+            firmId,
+            clOrdId,
             reason);
         return new(NewOrderDispatchOutcome.ReconciliationRequired, exception);
     }
