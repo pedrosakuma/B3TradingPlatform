@@ -38,6 +38,22 @@ if soak_validate_strict_refresh_timing 12 6 6 6; then
     exit 1
 fi
 
+[[ "$(soak_conservative_profile_funding_bound baseline)" == "232719" ]]
+[[ "$(soak_conservative_profile_funding_bound inventory-skew)" == "1120238" ]]
+[[ "$(soak_conservative_profile_funding_bound volatility-spread)" == "886408" ]]
+[[ "$(soak_conservative_profile_funding_bound pause-and-cancel)" == "293666" ]]
+maximum_funding_bound=0
+for funding_profile in baseline inventory-skew volatility-spread pause-and-cancel; do
+    funding_bound="$(soak_conservative_profile_funding_bound "$funding_profile")"
+    ((funding_bound <= maximum_funding_bound)) ||
+        maximum_funding_bound="$funding_bound"
+done
+awk \
+    -v deposit="$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT" \
+    -v sandbox_max="$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT" \
+    -v required="$maximum_funding_bound" \
+    'BEGIN { exit !(deposit >= required && sandbox_max >= deposit) }'
+
 [[ "$(soak_resolve_marketable_limit Buy 32.70 0.01 5 5 0 1 10 "")" == "32.81000000" ]]
 [[ "$(soak_resolve_marketable_limit Sell 32.70 0.01 5 5 0 1 10 "")" == "32.59000000" ]]
 # Volatility widening is an additional half-spread: reserve its configured cap

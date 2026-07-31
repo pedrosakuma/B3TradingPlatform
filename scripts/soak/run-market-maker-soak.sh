@@ -157,8 +157,9 @@ readonly marketable_buy_price="${SOAK_MARKETABLE_BUY_PRICE:-32.80}"
 readonly marketable_sell_price="${SOAK_MARKETABLE_SELL_PRICE:-29.30}"
 readonly marketable_price_extra_ticks="${SOAK_MARKETABLE_PRICE_EXTRA_TICKS:-1}"
 readonly reference_cross_price="${SOAK_REFERENCE_CROSS_PRICE:-30.00}"
-readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-100000.00}"
+readonly deposit_amount="${SOAK_DEPOSIT_AMOUNT:-$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT}"
 readonly counterparty_deposit_amount="${SOAK_COUNTERPARTY_DEPOSIT_AMOUNT:-$deposit_amount}"
+readonly sandbox_max_deposit_amount="${SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT:-$deposit_amount}"
 readonly auth_refresh_margin_seconds="${SOAK_AUTH_REFRESH_MARGIN_SECONDS:-300}"
 
 for identity in "$trading_user" "$counterparty_user" "$admin_user"; do
@@ -194,6 +195,11 @@ require_uint SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS "$strict_refresh_cycle_bud
 require_bool SOAK_KEEP_STACK "$keep_stack"
 require_bool SOAK_BUILD_IMAGES "$build_images"
 require_bool SOAK_WITH_GRAFANA "$with_grafana"
+awk -v deposit="$deposit_amount" -v maximum="$sandbox_max_deposit_amount" \
+    'BEGIN { exit !(deposit > 0 && maximum >= deposit) }' || {
+    echo "ERROR: SOAK_SANDBOX_MAX_DEPOSIT_AMOUNT must cover SOAK_DEPOSIT_AMOUNT" >&2
+    exit 3
+}
 (( sample_interval_seconds > 0 )) || { echo "ERROR: sample interval must be positive" >&2; exit 3; }
 (( workload_interval_seconds > 0 )) || { echo "ERROR: workload interval must be positive" >&2; exit 3; }
 (( duration_seconds > 0 )) || { echo "ERROR: duration must be positive" >&2; exit 3; }
@@ -254,6 +260,7 @@ export ALERTMANAGER_PORT="${SOAK_ALERTMANAGER_PORT:-19093}"
 export ALERT_RECEIVER_PORT="${SOAK_ALERT_RECEIVER_PORT:-18093}"
 export GRAFANA_PORT="${SOAK_GRAFANA_PORT:-13000}"
 export MM_SOAK_SUBNET="${SOAK_SUBNET:-192.168.64.0/24}"
+export MM_SOAK_MAX_DEPOSIT_AMOUNT="$sandbox_max_deposit_amount"
 export MM_SOAK_MAX_REFERENCE_AGE="$max_reference_age"
 export MM_SOAK_MARK_MAX_AGE="$max_reference_age"
 if $build_images; then
@@ -314,12 +321,14 @@ if ! jq -e \
     --arg volatilitySpread "$MM_SOAK_VOLATILITY_SPREAD_ENABLED" \
     --arg feedLossPolicy "$MM_SOAK_FEED_LOSS_POLICY" \
     --arg maxReferenceAge "$MM_SOAK_MAX_REFERENCE_AGE" \
+    --arg sandboxMaxDepositAmount "$MM_SOAK_MAX_DEPOSIT_AMOUNT" \
     --arg tradingUser "$trading_user" \
     --arg counterpartyUser "$counterparty_user" \
     --arg adminUser "$admin_user" '
       .services["trading-host"].environment as $hostEnvironment |
       .services["trading-host"].environment.Trading__Auth__Mode == "Local" and
       .services["trading-host"].environment.Trading__Auth__LocalLoginEnabled == "true" and
+      $hostEnvironment.Trading__Sandbox__MaxDepositAmount == $sandboxMaxDepositAmount and
       $hostEnvironment["Trading__Risk__PerEndClient__" + $counterpartyUser + "__AllowShortSell"] == "true" and
       ([$hostEnvironment | to_entries[] |
         select(.key | test("^Trading__Auth__Users__[0-9]+__Username$")) |
@@ -371,6 +380,10 @@ sanitized_rendered_config="$(jq --arg counterpartyUser "$counterparty_user" '
       workloadRisk: {
         counterparty: $counterpartyUser,
         allowShortSell: $hostEnvironment["Trading__Risk__PerEndClient__" + $counterpartyUser + "__AllowShortSell"]
+      },
+      sandboxCash: {
+        maxDepositAmount: $hostEnvironment.Trading__Sandbox__MaxDepositAmount,
+        maxBalanceAfterDeposit: $hostEnvironment.Trading__Sandbox__MaxBalanceAfterDeposit
       }
     },
     marketMakerBot: {
@@ -1198,6 +1211,7 @@ compatibility_json="$(jq -n \
       commonRenderedConfiguration: {
         auth: $rendered[0].services.tradingHost.auth,
         workloadRisk: $rendered[0].services.tradingHost.workloadRisk,
+        sandboxCash: $rendered[0].services.tradingHost.sandboxCash,
         networkIpam: $rendered[0].network.ipam,
         marketMakerBot: (
           $rendered[0].services.marketMakerBot.configuration

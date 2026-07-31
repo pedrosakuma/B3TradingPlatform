@@ -1,5 +1,90 @@
 #!/usr/bin/env bash
 
+readonly SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT="1250000.00"
+readonly SOAK_ACCEPTANCE_FUNDING_HEADROOM_PERCENT="25"
+
+soak_conservative_profile_funding_bound() {
+    local profile="$1"
+    awk \
+        -v profile="$profile" \
+        -v warmup=900 \
+        -v duration=7200 \
+        -v interval=1 \
+        -v quantity=100 \
+        -v bootstrap_price=32.80 \
+        -v tick=0.01 \
+        -v inventory_bias_lots=12 \
+        -v strict_refresh_interval=7 \
+        -v recovery_cross_attempts=3 \
+        -v headroom_percent="$SOAK_ACCEPTANCE_FUNDING_HEADROOM_PERCENT" '
+          function round_cent(value) {
+            return int(value * 100 + 0.500001) / 100
+          }
+          function fee(price, notional, brokerage) {
+            notional = price * quantity
+            brokerage = round_cent(notional * 5 / 10000)
+            if (brokerage < 2) brokerage = 2
+            return brokerage + round_cent(notional * 3.25 / 10000) + round_cent(notional * 2.75 / 10000)
+          }
+          function ceil(value) {
+            return value == int(value) ? value : int(value) + 1
+          }
+          BEGIN {
+            window_orders = int((warmup + duration) / interval)
+            run_buys = int((window_orders + 1) / 2)
+            run_sells = int(window_orders / 2)
+            setup_buys = 1
+            setup_sells = 1
+            net_quantity = 0
+            offset_ticks = 6
+
+            if (profile == "inventory-skew") {
+              setup_buys += inventory_bias_lots * 2
+              setup_sells += inventory_bias_lots
+              net_quantity = inventory_bias_lots * quantity
+              offset_ticks = 11
+            } else if (profile == "volatility-spread") {
+              offset_ticks = 26
+            } else if (profile != "baseline" && profile != "pause-and-cancel") {
+              exit 2
+            }
+
+            buys = setup_buys + run_buys
+            sells = setup_sells + run_sells
+            executions = buys + sells
+            offset = offset_ticks * tick
+            price = bootstrap_price
+            total_fees = 0
+            maximum_side = buys > sells ? buys : sells
+
+            # Isolated-venue upper path: every Buy advances the live price by
+            # the full marketable offset and every Sell executes at that level.
+            for (i = 0; i < maximum_side; i++) {
+              if (i < buys) {
+                if (i > 0) price += offset
+                total_fees += fee(price)
+              }
+              if (i < sells) total_fees += fee(price)
+            }
+
+            pairs = buys < sells ? buys : sells
+            pair_crossing_cost = pairs * 2 * offset * quantity
+            inventory_capital = net_quantity * price
+            subtotal = pair_crossing_cost + inventory_capital + total_fees
+
+            if (profile == "pause-and-cancel") {
+              strict_cycles = 1 + ceil((warmup + duration) / strict_refresh_interval) + recovery_cross_attempts
+              # Each end-client receives one fill per configured symbol per
+              # cycle; direction alternates but every execution pays fees.
+              subtotal += strict_cycles * (fee(price) + fee(70.00) + fee(32.00))
+            }
+
+            with_headroom = subtotal * (100 + headroom_percent) / 100
+            print ceil(with_headroom)
+          }
+        '
+}
+
 soak_environment_snapshot_is_secret_free() {
     set +x
     local snapshot_variable="$1"

@@ -225,6 +225,7 @@ export SOAK_DURATION_SECONDS=7200
 export SOAK_SAMPLE_INTERVAL_SECONDS=15
 export SOAK_WORKLOAD_INTERVAL_SECONDS=1
 export SOAK_OUTAGE_SECONDS=60
+export SOAK_DEPOSIT_AMOUNT=1250000.00
 image_tag="$(git rev-parse --short=12 HEAD)"
 suite_id="b3tp-719-${image_tag}-01"
 export SOAK_SUITE_MANIFEST="soak-artifacts/${suite_id}/suite-manifest.json"
@@ -268,6 +269,7 @@ Useful controls:
 | `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
+| `SOAK_DEPOSIT_AMOUNT` | `1250000.00` | Per-workload-user soak funding, sized for the conservative four-profile bound |
 | `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Initial bootstrap buy used only while raw `.live` is missing, never stale |
 | `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Initial bootstrap sell used only while raw `.live` is missing, never stale |
 | `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Crossing margin beyond configured/adaptive half-spread + worst-case skew |
