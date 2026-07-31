@@ -1762,6 +1762,45 @@ public sealed class EventReplayer
                     pae.NetQuantity,
                     pae.AverageEntryPrice);
                 break;
+            case AccountResetEvent are:
+                // #671/#753 (RFC PR 3). Deterministic, single-event
+                // whole-account reset replay. Mirrors
+                // AdminEndpoints.HandleAccountReset's live-path mutate
+                // sequence EXACTLY (release margin -> clear every
+                // sub-account bucket + every named sub-account POSITION
+                // row -> per-symbol absolute position + avg-cost +
+                // master-bucket basis -> absolute cash) so a
+                // cold/snapshot+tail replay converges on the identical
+                // post-reset state the live path produced — using ONLY
+                // the payload persisted on this event, never re-reading
+                // CashSeedOptions/PositionSeedOptions (those may have
+                // changed since the live reset ran). Null-tolerant for
+                // compositions/tests that don't wire every keeper.
+                //
+                // Code-review addendum #2: whole-account reset must
+                // also clear SubAccountPositionKeeper rows (named
+                // sub-account positions), not just the PnL buckets —
+                // otherwise a named sub-account position row would
+                // survive with a NetQuantity that the reset never
+                // reconciled against, leaving risk-visible state (e.g.
+                // GET /api/positions per-sub-account breakdown) stale
+                // post-reset.
+                var resetOwner = new EndClientId(are.EndClientId);
+                _marginProvider?.ReleaseAllReservationsForAccount(are.FirmId, resetOwner);
+                _subAccountPnl?.ClearAllBucketsForAccount(are.FirmId, are.EndClientId);
+                _subAccountPositions?.ClearAllForAccount(are.FirmId, resetOwner);
+                foreach (var entry in are.Positions)
+                {
+                    _positions?.SetAbsolute(
+                        are.FirmId, resetOwner, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                    _pnlKeeper?.SetAbsoluteAvgCost(
+                        are.FirmId, are.EndClientId, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                    _subAccountPnl?.SetAbsoluteMasterBucketAvgCost(
+                        are.FirmId, are.EndClientId, entry.Symbol, entry.NetQuantity, entry.AverageEntryPrice);
+                }
+                _cashKeeper?.SetAbsolute(are.FirmId, resetOwner, are.CashAvailable);
+                _cash?.SetAbsolute(are.FirmId, resetOwner, are.CashAvailable);
+                break;
             case FeeAccruedEvent fae:
                 // Q2.3 (#270). Forward the accrual to FeeKeeper. The
                 // keeper itself dedupes on ExecutionId so a snapshot

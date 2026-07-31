@@ -59,6 +59,7 @@ namespace B3.Trading.Application.Persistence;
 [JsonDerivedType(typeof(OrderExpiredEvent), "order.expired")]
 [JsonDerivedType(typeof(CashLedgerEvent), "cash.ledger")]
 [JsonDerivedType(typeof(PositionAdjustmentEvent), "position.adjustment")]
+[JsonDerivedType(typeof(AccountResetEvent), "account.reset")]
 [JsonDerivedType(typeof(FeeAccruedEvent), "fee.accrued")]
 [JsonDerivedType(typeof(RealizedPnlEvent), "pnl.realized")]
 [JsonDerivedType(typeof(SubAccountCreatedEvent), "sub-account.created")]
@@ -1219,6 +1220,87 @@ public sealed record PositionAdjustmentEvent : WalEvent
     public required string Symbol { get; init; }
     public required long NetQuantity { get; init; }
     public required decimal AverageEntryPrice { get; init; }
+    public string? Reference { get; init; }
+    public string? OperatorId { get; init; }
+}
+
+/// <summary>
+/// One symbol's absolute post-reset (master) position/basis inside an
+/// <see cref="AccountResetEvent"/> payload. Mirrors
+/// <see cref="PositionAdjustmentEvent"/>'s per-field invariant (zero
+/// <see cref="NetQuantity"/> requires zero <see cref="AverageEntryPrice"/>;
+/// non-zero requires a strictly positive average entry price), enforced
+/// by <c>AdminEndpoints.HandleAccountReset</c> before dispatch and,
+/// defense-in-depth, by <see cref="B3.Trading.Application.PositionKeeper.SetAbsolute"/> /
+/// <see cref="B3.Trading.Application.PnlKeeper.SetAbsoluteAvgCost"/> on replay.
+/// </summary>
+public sealed record AccountResetPositionEntry(string Symbol, long NetQuantity, decimal AverageEntryPrice);
+
+/// <summary>
+/// #671/#753 (RFC: admin account reset, PR 3). Durable, ATOMIC whole
+/// end-client account reset triggered by
+/// <c>POST /api/admin/accounts/{endClientId}/reset</c>. Carries the
+/// FULLY RESOLVED absolute post-reset state — <see cref="CashAvailable"/>
+/// and, for every symbol whose master position/basis must change, an
+/// absolute (NetQuantity, AverageEntryPrice) pair in
+/// <see cref="Positions"/> — resolved ONCE at request time from the
+/// live <c>PositionKeeper</c> state (which symbols are currently
+/// non-flat for this account) and the THEN-CURRENT
+/// <c>CashSeedOptions</c> / <c>PositionSeedOptions</c> configuration
+/// (see <c>AccountResetPayloadResolver</c>).
+///
+/// <para>
+/// This is deliberately a SINGLE durable event rather than a sequence
+/// of cash/position events (RFC #753 decision): splitting the reset
+/// into multiple WAL records would risk a crash exposing a half-reset
+/// account (e.g. cash zeroed but positions still stale, or vice versa)
+/// on cold-start replay. Replay MUST NOT re-resolve the seed
+/// configuration — the whole point of persisting the resolved payload
+/// is that replay stays byte-identical even if an operator edits
+/// <c>Trading:Cash:Seeds</c> / <c>Trading:Positions:Seeds</c> between
+/// the live reset and a later cold/snapshot+tail recovery. See
+/// <c>EventReplayer.Apply</c>'s <see cref="AccountResetEvent"/> case.
+/// </para>
+///
+/// <para>
+/// <see cref="FirmId"/> is ALWAYS derived from the caller's JWT firm
+/// claim at the API boundary — never accepted from the request body —
+/// mirroring <see cref="CashLedgerEvent"/> / <see cref="PositionAdjustmentEvent"/>.
+/// Sub-account reset is explicitly out of scope (RFC #753): this event
+/// always targets the WHOLE end-client account, never a single
+/// sub-account. Replay (and the live path) also clears EVERY
+/// <c>SubAccountPnlKeeper</c> bucket — master AND any named
+/// sub-account bucket — for (<see cref="FirmId"/>,
+/// <see cref="EndClientId"/>): a whole-account reset must not leave a
+/// named sub-account bucket's avg-cost basis referencing a position
+/// that no longer exists post-reset (stale risk state). Named buckets
+/// are only ever CLEARED, never fabricated/reseeded — v1 seeding
+/// targets the master bucket exclusively, matching
+/// <see cref="PositionAdjustmentEvent"/>'s existing master-only scope.
+/// See <c>SubAccountPnlKeeper.ClearAllBucketsForAccount</c>.
+/// Code-review addendum #2: for the same reason, replay (and the
+/// live path) also clears every named <c>SubAccountPositionKeeper</c>
+/// row for the account — a named sub-account POSITION row is exactly
+/// as risk-visible as a named PnL bucket (e.g. the per-sub-account
+/// breakdown in <c>GET /api/positions</c>), so leaving it behind
+/// post-reset would be the same stale-risk-state hazard under a
+/// different keeper. See <c>SubAccountPositionKeeper.ClearAllForAccount</c>.
+/// </para>
+///
+/// <para>
+/// Margin: replay (and the live path) also calls
+/// <c>IMarginProvider.ReleaseAllReservationsForAccount</c> so a reset
+/// never leaves a stale reservation behind, mirroring the guard's
+/// precondition that the account have no working orders / non-terminal
+/// outbound mutations at the moment of reset.
+/// </para>
+/// </summary>
+public sealed record AccountResetEvent : WalEvent
+{
+    public required string EndClientId { get; init; }
+    public required string FirmId { get; init; }
+    public required decimal CashAvailable { get; init; }
+    public required IReadOnlyList<AccountResetPositionEntry> Positions { get; init; }
     public string? Reference { get; init; }
     public string? OperatorId { get; init; }
 }

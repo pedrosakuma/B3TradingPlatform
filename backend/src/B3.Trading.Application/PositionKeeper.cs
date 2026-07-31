@@ -127,6 +127,33 @@ public sealed class PositionKeeper
     }
 
     /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3, code-review final
+    /// finding). Removes the tracked row entirely for
+    /// (<paramref name="firmId"/>, <paramref name="owner"/>,
+    /// <paramref name="symbol"/>) — unlike <see cref="SetAbsolute(string, EndClientId, string, long, decimal)"/>,
+    /// which ALWAYS materialises a row (even a flat (0, 0m) one), this
+    /// restores true absence. Used EXCLUSIVELY by the admin account-
+    /// reset endpoint's post-append apply-failure rollback, to put a
+    /// symbol that had NO tracked row before the reset back to true
+    /// absence rather than leaving a spurious flat row that
+    /// <c>SetAbsolute(..., 0, 0m)</c> would otherwise create. The live
+    /// (successful) reset path never needs this: it only ever calls
+    /// <see cref="SetAbsolute(string, EndClientId, string, long, decimal)"/>
+    /// for symbols that are EITHER already non-flat (hence already
+    /// present) OR carry a configured <c>PositionSeedOptions</c> seed
+    /// (a deliberate materialisation) — see
+    /// <c>AccountResetPayloadResolver.Resolve</c>. Returns <c>true</c>
+    /// when a row was actually removed, <c>false</c> if the row was
+    /// already absent (idempotent).
+    /// </summary>
+    public bool TryRemove(string firmId, EndClientId owner, string symbol)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        return _positions.TryRemove((NormalizeFirmId(firmId), owner, symbol), out _);
+    }
+
+    /// <summary>
     /// Returns positions for <paramref name="owner"/> across ALL firms.
     /// Preserved as legacy behaviour for callers we haven't migrated to
     /// the firm-aware API; owner-scoped REST/WS read paths MUST use
