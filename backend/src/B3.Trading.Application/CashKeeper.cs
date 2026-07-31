@@ -70,6 +70,29 @@ public sealed class CashKeeper
         TryWithdraw(CashLedger.DefaultFirmId, owner, amount);
 
     /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3). Overwrites the
+    /// operator-driven balance for (<paramref name="firmId"/>,
+    /// <paramref name="owner"/>) with an ABSOLUTE value, discarding
+    /// whatever was tracked there — mirrors
+    /// <see cref="PositionKeeper.SetAbsolute"/>'s overwrite (never
+    /// merge/accumulate) semantics so replaying the same
+    /// <c>AccountResetEvent</c> any number of times always converges on
+    /// the identical balance. Used exclusively by the admin
+    /// account-reset endpoint and its WAL replay — the regular
+    /// deposit/withdrawal flow only ever calls
+    /// <see cref="ApplyDeposit(string, EndClientId, decimal)"/> /
+    /// <see cref="TryWithdraw(string, EndClientId, decimal)"/>. Unlike
+    /// those, no sign/positivity constraint applies here: the resolved
+    /// reset target is whatever the configured cash seed says (or
+    /// zero when unconfigured).
+    /// </summary>
+    public void SetAbsolute(string firmId, EndClientId owner, decimal available)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        _balances[AccountKey.Create(firmId, owner)] = available;
+    }
+
+    /// <summary>
     /// Replay-time apply: mirrors the live admin path exactly. Unknown
     /// <paramref name="kind"/> strings are rejected so a malformed WAL
     /// segment fails loudly instead of silently dropping the event.

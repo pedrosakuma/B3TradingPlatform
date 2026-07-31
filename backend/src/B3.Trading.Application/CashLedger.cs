@@ -195,6 +195,25 @@ public sealed class CashLedger
         ApplyWithdrawal(DefaultFirmId, owner, amount);
 
     /// <summary>
+    /// #671/#753 (RFC: admin account reset, PR 3). Overwrites the
+    /// spendable/margin-facing balance for (<paramref name="firmId"/>,
+    /// <paramref name="owner"/>) with an ABSOLUTE value — replacing the
+    /// tracked <see cref="CashBalance"/> outright rather than folding a
+    /// delta, mirroring <see cref="CashKeeper.SetAbsolute"/> so the two
+    /// projections stay in lockstep after a reset exactly as they do
+    /// after every other cash mutation (see <c>AdminEndpoints.HandleCashLedger</c>).
+    /// Raises <see cref="BalanceChanged"/> so the WS fan-out reflects
+    /// the reset immediately.
+    /// </summary>
+    public void SetAbsolute(string firmId, EndClientId owner, decimal available)
+    {
+        var key = AccountKey.Create(firmId, owner);
+        var balance = CashBalance.Hydrate(owner, available);
+        _balances[key] = balance;
+        RaiseBalanceChanged(firmId, owner, available);
+    }
+
+    /// <summary>
     /// Read-only convenience for risk / API callers. Returns <c>0</c> for
     /// an unknown owner without materialising an entry, so probing the
     /// balance can't pollute the dictionary.
