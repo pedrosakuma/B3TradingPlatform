@@ -81,6 +81,25 @@ if soak_primary_reference_fallback_allowed stale; then
     exit 1
 fi
 
+mock_status_curl() {
+    printf '%s\n' '{"status":"Rejected","code":"cash_limit","token":"must-redact"}' 422
+}
+status_envelope="$(SOAK_CURL_BIN=mock_status_curl \
+    soak_curl_json_request_with_status POST https://example.invalid \
+        absent_token absent_body)"
+[[ "$(jq -r '.curlExit' <<<"$status_envelope")" == "0" ]]
+[[ "$(jq -r '.httpStatus' <<<"$status_envelope")" == "422" ]]
+status_body="$(jq -r '.body' <<<"$status_envelope")"
+submit_failure_file="$ROOT/soak-artifacts/submit-failure-self-test-$$.jsonl"
+submit_context='{"profile":"inventory-skew","expectedSequence":3181}'
+soak_append_submit_failure \
+    "$submit_failure_file" "2026-07-31T14:46:05Z" http-post 22 422 \
+    "$status_body" "$submit_context"
+[[ "$(jq -r '.httpStatus' "$submit_failure_file")" == "422" ]]
+[[ "$(jq -r '.responseBody.code' "$submit_failure_file")" == "cash_limit" ]]
+[[ "$(jq -r '.responseBody.token' "$submit_failure_file")" == "[REDACTED]" ]]
+rm -f "$submit_failure_file"
+
 suite_test_root="$ROOT/soak-artifacts/suite-control-flow-test-$$"
 mkdir -p "$suite_test_root"
 trap 'rm -rf "$suite_test_root"' EXIT
@@ -100,19 +119,28 @@ while (($#)); do
     fi
 done
 printf '%s:%s\n' "$profile" "$mode" >>"$SOAK_SUITE_TEST_LOG"
-[[ "$profile" != "inventory-skew" ]]
+printf 'stdout:%s\n' "$profile"
+printf 'stderr:%s\n' "$profile" >&2
+[[ "$profile" != "inventory-skew" ]] || exit 23
 EOF
 chmod +x "$suite_test_root/fake-runner.sh"
-if SOAK_SUITE_TEST_LOG="$suite_test_root/calls.log" \
+suite_status=0
+SOAK_SUITE_TEST_LOG="$suite_test_root/calls.log" \
     SOAK_SUITE_PROFILE_RUNNER="$suite_test_root/fake-runner.sh" \
     SOAK_SUITE_MANIFEST="$suite_test_root/suite/suite-manifest.json" \
     SOAK_SUITE_ID="suite-control-flow-test" \
-    "$ROOT/scripts/soak/run-market-maker-soak-suite.sh"; then
-    echo "ERROR: suite orchestrator accepted a failed profile" >&2
+    "$ROOT/scripts/soak/run-market-maker-soak-suite.sh" ||
+    suite_status=$?
+if [[ "$suite_status" != "23" ]]; then
+    echo "ERROR: suite orchestrator changed profile exit 23 to $suite_status" >&2
     exit 1
 fi
 [[ "$(cat "$suite_test_root/calls.log")" == \
     $'baseline:build\ninventory-skew:no-build' ]]
+grep -Fq 'stdout:inventory-skew' "$suite_test_root/suite/suite-run.log"
+grep -Fq 'stderr:inventory-skew' "$suite_test_root/suite/suite-run.log"
+grep -Fq 'finished profile=inventory-skew exit=23' \
+    "$suite_test_root/suite/suite-run.log"
 
 accelerated_freshness="$(jq -n '
   ["PETR4","VALE3","ITUB4"] as $symbols |

@@ -46,6 +46,91 @@ soak_curl_json_request() {
     )
 }
 
+soak_curl_json_request_with_status() {
+    local method="$1" url="$2" token_variable="$3" body_variable="$4"
+    (
+        set +x
+        local token="${!token_variable-}" body="${!body_variable-}"
+        export -n token body
+        local curl_bin="${SOAK_CURL_BIN:-curl}"
+        local curl_output curl_exit=0 http_status response_body
+        local -a arguments=(-sS --max-time 10 --request "$method")
+        if [[ -n "$token" ]]; then
+            exec 3<<<"Authorization: ******"
+            arguments+=(--header @/dev/fd/3)
+        fi
+        if [[ -n "$body" ]]; then
+            exec 4<<<"$body"
+            arguments+=(--header 'Content-Type: application/json' --data-binary @/dev/fd/4)
+        fi
+        if ! soak_child_environment_is_secret_free "$token_variable" "$body_variable"; then
+            echo "ERROR: refusing to launch curl with credentials present in its child environment" >&2
+            return 1
+        fi
+        curl_output="$("$curl_bin" "${arguments[@]}" \
+            --write-out $'\n%{http_code}' "$url")" || curl_exit=$?
+        http_status="${curl_output##*$'\n'}"
+        response_body="${curl_output%$'\n'*}"
+        [[ "$curl_output" == *$'\n'* ]] || {
+            http_status="000"
+            response_body="$curl_output"
+        }
+        jq -cn \
+            --argjson curlExit "$curl_exit" \
+            --arg httpStatus "$http_status" \
+            --arg body "$response_body" \
+            '{curlExit:$curlExit,httpStatus:$httpStatus,body:$body}'
+    )
+}
+
+soak_sanitize_response_body() {
+    local body="$1"
+    if jq -e . >/dev/null 2>&1 <<<"$body"; then
+        jq -c '
+          walk(
+            if type == "object" then
+              with_entries(
+                if (.key | test("token|password|secret|authorization"; "i"))
+                then .value = "[REDACTED]"
+                else .
+                end
+              )
+            else .
+            end
+          )
+        ' <<<"$body"
+    else
+        jq -cn --arg raw "$body" '{raw:$raw}'
+    fi
+}
+
+soak_append_submit_failure() {
+    local output_file="$1" timestamp="$2" stage="$3" command_status="$4"
+    local http_status="$5" response_body="$6" context_json="$7"
+    local sanitized_response
+    sanitized_response="$(soak_sanitize_response_body "$response_body")" || return 1
+    jq -cn \
+        --arg timestampUtc "$timestamp" \
+        --arg stage "$stage" \
+        --argjson commandStatus "$command_status" \
+        --arg httpStatus "$http_status" \
+        --argjson responseBody "$sanitized_response" \
+        --argjson requestContext "$context_json" \
+        '{
+          timestampUtc:$timestampUtc,
+          stage:$stage,
+          commandStatus:$commandStatus,
+          httpStatus:(
+            if $httpStatus == "" or $httpStatus == "000"
+            then null
+            else ($httpStatus | tonumber)
+            end
+          ),
+          responseBody:$responseBody,
+          requestContext:$requestContext
+        }' >>"$output_file"
+}
+
 soak_metric_sample() {
     jq -c '
       (.data.result // []) as $rows |

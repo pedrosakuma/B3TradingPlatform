@@ -572,6 +572,7 @@ readonly runtime_csv="${artifacts_dir}/runtime.csv"
 readonly runtime_events_jsonl="${artifacts_dir}/runtime-events.jsonl"
 readonly checks_tsv="${artifacts_dir}/checks.tsv"
 readonly cleanup_errors_file="${artifacts_dir}/cleanup-errors.json"
+readonly submit_failures_jsonl="${artifacts_dir}/submit-failures.jsonl"
 printf 'timestamp_utc,phase,accountingPeriodPresent,accountingPeriodStartedAtUtc,metric,symbol,side,reason,available,source,present,value\n' >"$samples_csv"
 printf 'timestamp_utc,phase,metric,symbol,required,present,seriesCount,value\n' >"$metric_presence_csv"
 printf 'timestamp_utc,phase,symbol,user,side,clOrdId,fillLatencySeconds\n' >"$workload_csv"
@@ -584,6 +585,7 @@ printf 'timestamp_utc,phase,service,containerId,imageId,startedAtUtc,restartCoun
 : >"$runtime_jsonl"
 : >"$runtime_events_jsonl"
 : >"$checks_tsv"
+: >"$submit_failures_jsonl"
 printf '%s\n' "$sanitized_rendered_config" >"${artifacts_dir}/rendered-config.json"
 jq -n \
     --argjson exportedNamesUnset true \
@@ -1360,6 +1362,26 @@ authed_json_request() {
     printf '%s' "$response"
 }
 
+authed_json_request_with_status_into() {
+    local response_variable="$1" status_variable="$2"
+    local method="$3" url="$4" token_variable="$5" expiry_variable="$6"
+    local user="$7" password="$8" body_variable="$9"
+    local token envelope curl_exit http_status response_body
+    refresh_session_token_if_due \
+        "$token_variable" "$expiry_variable" "$user" "$password" || return 1
+    token="${!token_variable}"
+    envelope="$(soak_curl_json_request_with_status \
+        "$method" "$url" token "$body_variable")" || return 1
+    curl_exit="$(jq -er '.curlExit' <<<"$envelope")" || return 1
+    http_status="$(jq -er '.httpStatus' <<<"$envelope")" || return 1
+    response_body="$(jq -r '.body' <<<"$envelope")" || return 1
+    printf -v "$response_variable" '%s' "$response_body"
+    printf -v "$status_variable" '%s' "$http_status"
+    ((curl_exit == 0)) || return "$curl_exit"
+    [[ "$http_status" =~ ^[0-9]{3}$ ]] || return 1
+    ((10#$http_status < 400)) || return 22
+}
+
 set_session_token trading_token trading_token_expires_at "$trading_user" "$trading_password"
 set_session_token counterparty_token counterparty_token_expires_at "$counterparty_user" "$counterparty_password"
 set_session_token admin_token admin_token_expires_at "$admin_user" "$trading_password"
@@ -1394,6 +1416,9 @@ primary_price_collar_absolute="$(jq -r '.limits.priceCollarAbsolute // empty' \
 strict_primary_reference_pending=false
 strict_primary_reference_baseline=
 strict_primary_reference_direction=
+last_resolved_primary_reference=
+last_resolved_primary_limit=
+last_resolved_primary_source=
 soak_primary_reference_bootstrap_reset
 
 read_live_refresh_price_into() {
@@ -1452,6 +1477,9 @@ resolve_primary_order_price_into() {
         live_reference "$symbol" live_reference_status; then
         if soak_primary_reference_fallback_allowed "$live_reference_status"; then
             log "WARN: no raw live reference has arrived for ${phase}; using configured bootstrap ${side,,} price ${configured_price}"
+            last_resolved_primary_reference=
+            last_resolved_primary_limit="$configured_price"
+            last_resolved_primary_source=configured-bootstrap
             printf -v "$output_variable" '%s' "$configured_price"
             return 0
         fi
@@ -1492,6 +1520,9 @@ resolve_primary_order_price_into() {
 
     log "derived fresh ${side,,} limit ${resolved_price} for ${phase} from liveReference=${live_reference}, configuredHalfSpreadTicks=${spread_ticks}, maxSkewTicks=${max_skew_ticks}, maxVolatilityAdditionalHalfSpreadTicks=${max_volatility_additional_spread_ticks}, crossingExtraTicks=${marketable_price_extra_ticks}, collarPercent=${primary_price_collar_percent:-unset}, collarAbsolute=${primary_price_collar_absolute:-unset}, unusedFallback=${configured_price}"
 
+    last_resolved_primary_reference="$live_reference"
+    last_resolved_primary_limit="$resolved_price"
+    last_resolved_primary_source=raw-live
     printf -v "$output_variable" '%s' "$resolved_price"
 }
 
@@ -1586,25 +1617,93 @@ wait_order_filled_into() {
     return 1
 }
 
+expected_workload_sequence=1
+
+record_submit_order_failure() {
+    local stage="$1" command_status="$2" http_status="$3" response_body="$4"
+    local phase="$5" side="$6" price="$7" clordid="${8:-}"
+    local context_json timestamp
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 0
+    context_json="$(jq -cn \
+        --arg profile "$profile" \
+        --arg phase "$phase" \
+        --arg side "$side" \
+        --argjson quantity "$quantity" \
+        --arg resolvedReference "$last_resolved_primary_reference" \
+        --arg resolvedLimit "$price" \
+        --arg resolvedSource "$last_resolved_primary_source" \
+        --arg collarPercent "$primary_price_collar_percent" \
+        --arg collarAbsolute "$primary_price_collar_absolute" \
+        --argjson expectedSequence "$expected_workload_sequence" \
+        --arg clOrdId "$clordid" \
+        '{
+          profile:$profile,
+          phase:$phase,
+          side:$side,
+          quantity:$quantity,
+          resolvedReference:(
+            if $resolvedReference == "" then null else ($resolvedReference | tonumber) end
+          ),
+          resolvedLimit:($resolvedLimit | tonumber),
+          resolvedSource:$resolvedSource,
+          collarPercent:(
+            if $collarPercent == "" then null else ($collarPercent | tonumber) end
+          ),
+          collarAbsolute:(
+            if $collarAbsolute == "" then null else ($collarAbsolute | tonumber) end
+          ),
+          expectedSequence:$expectedSequence,
+          clOrdId:(if $clOrdId == "" then null else $clOrdId end)
+        }')" || return 0
+    if ! soak_append_submit_failure \
+        "$submit_failures_jsonl" "$timestamp" "$stage" "$command_status" \
+        "$http_status" "$response_body" "$context_json"; then
+        log "ERROR: failed to persist submit-order diagnostics"
+    fi
+}
+
 submit_order() {
     local token_variable="$1" expiry_variable="$2" user="$3" password="$4" side="$5" price="$6" phase="$7"
-    local response clordid latency request_body reference_baseline
+    local response="" http_status="" clordid="" latency request_body reference_baseline
+    local submit_status=0
     if [[ "$profile" == "pause-and-cancel" ]]; then
         read_live_refresh_price_into reference_baseline "$symbol" || return 1
     fi
     request_body="$(jq -cn         --arg symbol "$symbol"         --arg side "$side"         --argjson quantity "$quantity"         --argjson price "$price"         '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" ||
         return 1
-    authed_json_request_into response \
+    authed_json_request_with_status_into response http_status \
         POST "${base_url}/api/orders" \
-        "$token_variable" "$expiry_variable" "$user" "$password" request_body || return 1
+        "$token_variable" "$expiry_variable" "$user" "$password" request_body ||
+        submit_status=$?
+    if ((submit_status != 0)); then
+        record_submit_order_failure \
+            http-post "$submit_status" "$http_status" "$response" \
+            "$phase" "$side" "$price"
+        return "$submit_status"
+    fi
     [[ "$(jq -r '.status // ""' <<<"$response")" != "Rejected" ]] || {
+        record_submit_order_failure \
+            application-rejected 1 "$http_status" "$response" \
+            "$phase" "$side" "$price" "$(jq -r '.clOrdId // empty' <<<"$response")"
         log "ERROR: $side order was rejected: $response"
         return 1
     }
-    clordid="$(jq -er '.clOrdId | tostring' <<<"$response")" || return 1
-    wait_order_filled_into latency "$token_variable" "$expiry_variable" "$user" "$password" "$clordid" || return 1
+    clordid="$(jq -er '.clOrdId | tostring' <<<"$response")" || {
+        record_submit_order_failure \
+            malformed-response 1 "$http_status" "$response" \
+            "$phase" "$side" "$price"
+        return 1
+    }
+    if ! wait_order_filled_into \
+        latency "$token_variable" "$expiry_variable" "$user" "$password" "$clordid"; then
+        record_submit_order_failure \
+            fill-wait 1 "$http_status" "$response" \
+            "$phase" "$side" "$price" "$clordid"
+        return 1
+    fi
     printf '%s,%s,%s,%s,%s,%s,%s
 '         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase" "$symbol" "$user" "$side" "$clordid" "$latency"         >>"$workload_csv" || return 1
+    expected_workload_sequence=$((10#$clordid + 1))
     if [[ "$profile" == "pause-and-cancel" ]]; then
         strict_primary_reference_baseline="$reference_baseline"
         strict_primary_reference_direction="$side"

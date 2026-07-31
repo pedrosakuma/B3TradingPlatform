@@ -578,6 +578,9 @@ The helper writes only under ignored `soak-artifacts/`:
 - `metric-presence.csv` / `metric-presence.jsonl` — mandatory-series presence/value evidence;
 - `outage-telemetry.json` — strict-profile phase boundaries, counters, submissions, eligibility, and open orders;
 - `workload.csv` — order/fill latency evidence;
+- `submit-failures.jsonl` — secret-redacted failed order POST status/body,
+  resolved reference/limit/collar context, phase, side, quantity, and expected
+  workload sequence;
 - `strict-refreshes.csv` / `strict-refreshes.jsonl` — per-symbol maintenance
   trade timestamps, counts, alternating direction/identities, price source,
   prices, quantities, and both end-client ClOrdIDs;
@@ -594,6 +597,9 @@ The shared `suite-manifest.json` pins the first profile's compatibility object
 and adds one accepted run per profile. Neither the rendered projection nor any
 other artifact contains passwords, tokens, signing keys, password hashes,
 salts, or the bot access key.
+The suite runner additionally writes `suite-run.log` beside the shared
+manifest, preserving profile stdout/stderr and the original profile exit code
+even when `set -e` stops orchestration.
 
 Use this summary shape (generated values only; never fabricate results):
 
