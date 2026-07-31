@@ -511,6 +511,25 @@ public sealed class OrderSubmissionService
                 MetricsRegistry.OrdersGatewayFailed.Add(
                     1,
                     new KeyValuePair<string, object?>("firmId", req.FirmId));
+                if (dispatch.Outcome == NewOrderDispatchOutcome.ProvenUnsent)
+                {
+                    _logger.LogWarning(
+                        dispatch.Exception,
+                        "New-order outbound dispatch for mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}) was proven unsent; terminalising as a durable rejection.",
+                        mutationId,
+                        req.FirmId,
+                        clOrdId);
+                }
+                else
+                {
+                    _logger.LogError(
+                        dispatch.Exception,
+                        "New-order outbound dispatch for mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}) did not complete: {Outcome}.",
+                        mutationId,
+                        req.FirmId,
+                        clOrdId,
+                        dispatch.Outcome);
+                }
             }
             if (dispatch.Outcome == NewOrderDispatchOutcome.ProvenUnsent)
             {
@@ -541,7 +560,9 @@ public sealed class OrderSubmissionService
             MetricsRegistry.OrdersGatewayFailed.Add(1,
                 new KeyValuePair<string, object?>("firmId", req.FirmId));
             _logger.LogError(ex,
-                "Legacy gateway submit failed for {ClOrdId}; attempting durable synthetic rejection.",
+                "Legacy gateway submit failed for mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}); attempting durable synthetic rejection.",
+                mutationId,
+                req.FirmId,
                 clOrdId);
             if (marginReserved) _margin.ReleaseReservation(clOrdId);
             var walFailure = PublishSyntheticRejection(mutationId, order, "gateway_unavailable");
@@ -657,7 +678,9 @@ public sealed class OrderSubmissionService
     {
         _drain.BeginDrain("wal_synthetic_terminal_reconciliation_required");
         _logger.LogCritical(exception,
-            "Durable synthetic rejection failed for {ClOrdId}; ingress is draining and operator reconciliation is required.",
+            "Durable synthetic rejection failed for mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId}); ingress is draining and operator reconciliation is required.",
+            mutationId,
+            order.FirmId,
             order.ClOrdId);
         return OrderSubmissionResult.ReconciliationRequired(mutationId, order.ClOrdId);
     }

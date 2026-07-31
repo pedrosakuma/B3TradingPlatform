@@ -93,6 +93,42 @@ end-client, ciphertext, or customer identifier. `encryptedFieldReferences`
 contains only the stable end-client token, encrypted-field categories, and key
 identity needed to diagnose historical-key availability.
 
+### Correlating a failed mutation from product logs (#768)
+
+Every reconciliation-required/ambiguous terminal failure, every non-`Accepted`
+result from `POST /api/orders` (submit), `PUT /api/orders/{clOrdId}` (replace),
+`DELETE /api/orders/{clOrdId}` (cancel) — including their replayed-idempotency
+variants — and the modern and legacy outbound-dispatch failure branches log a
+single structured line carrying `MutationId`, `FirmId`, and the relevant
+`ClOrdId`/`OrigClOrdId` (no account/investor/ end-client identity, request
+body, or credentials). The REST layer additionally logs the ASP.NET Core
+`HttpContext.TraceIdentifier` on the same line via a shared, privacy-safe
+logging helper used identically by all three mutation endpoints. This lets an
+operator go from whatever the caller/observability stack captured to the
+authoritative mutation record even if the HTTP response itself was lost:
+
+1. **Start from what you have** — a support ticket's trace/request ID (from
+   response headers or client-side APM), a ClOrdID the end client reports, or
+   a timestamp/firm from an alert.
+2. **Grep the product log** for that value. All touched components emit
+   the identifiers as named fields in the message (e.g.
+   `mutation {MutationId} (firm {FirmId}, ClOrdId {ClOrdId})`, with an
+   additional `OrigClOrdId` field on replace/cancel and their replays), so a
+   plain text search for the trace ID or ClOrdID recovers the `MutationId`
+   even when the response was never delivered to the caller.
+3. **Pivot to the mutation record**:
+   `GET /api/admin/outbound-mutations/{mutationId}`. This returns the same
+   privacy-safe timeline used by the `#647` reconciliation flow above — attempt
+   history, dispatch/session state, and any evidence already registered.
+4. **Continue with the `#647` investigation and evidence steps** above if the
+   mutation still requires reconciliation; otherwise the timeline plus the log
+   line's `kind`/`code`/HTTP status is normally sufficient to close out a
+   one-off client-reported failure without further digging.
+
+This is a logging-only correlation aid: no new metric labels, WAL fields, or
+cross-process trace propagation were added. Accepted/successful traffic does
+not emit this log line, so log volume tracks failures, not request volume.
+
 ### Investigation and evidence
 
 1. List unresolved rows with
