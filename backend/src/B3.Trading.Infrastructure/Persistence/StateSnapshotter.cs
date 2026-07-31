@@ -1074,6 +1074,28 @@ public sealed class EventReplayer
     /// <see cref="CashLedger"/> keep working unchanged.
     /// </summary>
     private readonly CashLedger? _cash;
+    /// <summary>
+    /// #671/#753 (PR 1). Optional. When wired, replay of
+    /// <see cref="PositionAdjustmentEvent"/> overwrites the tracked
+    /// position via <see cref="PositionKeeper.SetAbsolute"/> — mirrors
+    /// the live path in <c>AdminEndpoints.HandlePositionAdjustment</c>.
+    /// Nullable so pre-existing test compositions that construct
+    /// <see cref="EventReplayer"/> without a <see cref="PositionKeeper"/>
+    /// keep working unchanged; production composition always wires the
+    /// same singleton <see cref="PositionKeeper"/> instance used by
+    /// <see cref="ExecutionReportProcessor"/> for fill-driven updates.
+    /// Code-review addendum: replay of <see cref="PositionAdjustmentEvent"/>
+    /// also calls <see cref="PnlKeeper.SetAbsoluteAvgCost"/> on the
+    /// pre-existing <see cref="_pnlKeeper"/> field so the avg-cost basis
+    /// is projectively replaced alongside this keeper — never left one
+    /// step behind after a cold/snapshot+tail recovery.
+    /// Code-review addendum #2: replay also calls
+    /// <see cref="SubAccountPnlKeeper.SetAbsoluteMasterBucketAvgCost"/>
+    /// on the pre-existing <see cref="_subAccountPnl"/> field, MASTER
+    /// bucket only — v1 adjustment never fabricates or alters a named
+    /// sub-account bucket, live or on replay.
+    /// </summary>
+    private readonly PositionKeeper? _positions;
 
     public EventReplayer(
         WorkingOrderBook orders,
@@ -1117,7 +1139,8 @@ public sealed class EventReplayer
         OutboundMutationLedger? outboundLedger = null,
         RestOrderIdempotencyStore? restOrderIdempotency = null,
         IMarginProvider? marginProvider = null,
-        CashLedger? cash = null)
+        CashLedger? cash = null,
+        PositionKeeper? positions = null)
     {
         _orders = orders;
         _ownership = ownership;
@@ -1149,6 +1172,7 @@ public sealed class EventReplayer
         _restOrderIdempotency = restOrderIdempotency;
         _marginProvider = marginProvider;
         _cash = cash;
+        _positions = positions;
     }
 
     /// <summary>
@@ -1702,6 +1726,41 @@ public sealed class EventReplayer
                 {
                     _cash?.ApplyWithdrawal(cle.FirmId, new EndClientId(cle.EndClientId), cle.Amount);
                 }
+                break;
+            case PositionAdjustmentEvent pae:
+                // #671/#753 PR 1. Absolute overwrite — replay must not
+                // accumulate. Mirrors AdminEndpoints.HandlePositionAdjustment's
+                // live-path calls to PositionKeeper.SetAbsolute,
+                // PnlKeeper.SetAbsoluteAvgCost, AND
+                // SubAccountPnlKeeper.SetAbsoluteMasterBucketAvgCost
+                // exactly, in the same order, so a cold/snapshot+tail
+                // replay converges on the identical (position, avg-cost
+                // basis, master-bucket basis) triple the live path would
+                // have produced. Null-tolerant for compositions/tests
+                // that don't wire a PositionKeeper, PnlKeeper, and/or
+                // SubAccountPnlKeeper into the replayer. Code-review
+                // addendum #3: only the MASTER bucket is ever touched
+                // here — v1 adjustment is account-wide/master-only and
+                // must never fabricate or alter a named sub-account
+                // bucket during replay either.
+                _positions?.SetAbsolute(
+                    pae.FirmId,
+                    new EndClientId(pae.EndClientId),
+                    pae.Symbol,
+                    pae.NetQuantity,
+                    pae.AverageEntryPrice);
+                _pnlKeeper?.SetAbsoluteAvgCost(
+                    pae.FirmId,
+                    pae.EndClientId,
+                    pae.Symbol,
+                    pae.NetQuantity,
+                    pae.AverageEntryPrice);
+                _subAccountPnl?.SetAbsoluteMasterBucketAvgCost(
+                    pae.FirmId,
+                    pae.EndClientId,
+                    pae.Symbol,
+                    pae.NetQuantity,
+                    pae.AverageEntryPrice);
                 break;
             case FeeAccruedEvent fae:
                 // Q2.3 (#270). Forward the accrual to FeeKeeper. The

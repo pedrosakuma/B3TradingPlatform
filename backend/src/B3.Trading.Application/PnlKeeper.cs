@@ -328,6 +328,69 @@ public sealed class PnlKeeper
     }
 
     /// <summary>
+    /// #671/#753 (RFC PR 1, code-review addendum). Companion to
+    /// <see cref="PositionKeeper.SetAbsolute"/>: replaces the tracked
+    /// avg-cost basis for (<paramref name="firmId"/>,
+    /// <paramref name="endClient"/>, <paramref name="symbol"/>) with an
+    /// ABSOLUTE (<paramref name="netQuantity"/>,
+    /// <paramref name="averageEntryPrice"/>) pair outright, discarding
+    /// any prior accumulated basis — known (<see cref="_avgCost"/>) or
+    /// unknown (<see cref="_unknownBasisQty"/>) — so the two keepers
+    /// never drift out of lockstep after an admin position adjustment.
+    /// A zero <paramref name="netQuantity"/> CLEARS the basis entirely
+    /// (a flat position carries no cost basis) rather than leaving a
+    /// stale <c>(0, 0m)</c> entry behind.
+    ///
+    /// <para>
+    /// Does not touch <see cref="_realizedByDay"/>: an absolute
+    /// position overwrite resets the basis going forward, it does not
+    /// retroactively realize or unwind P&amp;L already booked against
+    /// the prior basis (that stays exactly as recorded).
+    /// </para>
+    ///
+    /// <para>
+    /// Must be invoked in the SAME dispatcher-serialised apply as
+    /// <see cref="PositionKeeper.SetAbsolute"/> (see
+    /// <c>AdminEndpoints.HandlePositionAdjustment</c> and the
+    /// <c>PositionAdjustmentEvent</c> replay case in
+    /// <c>EventReplayer.Apply</c>) so the two keepers' state transitions
+    /// for a given adjustment are never observed interleaved with a
+    /// concurrent mutation of either keeper alone.
+    /// </para>
+    ///
+    /// <para>
+    /// Invariant re-checked here as defense-in-depth (mirrors
+    /// <see cref="PositionKeeper.SetAbsolute"/> exactly): zero
+    /// <paramref name="netQuantity"/> requires zero
+    /// <paramref name="averageEntryPrice"/>; non-zero requires a
+    /// strictly positive average entry price.
+    /// </para>
+    /// </summary>
+    public void SetAbsoluteAvgCost(string endClient, string symbol, long netQuantity, decimal averageEntryPrice) =>
+        SetAbsoluteAvgCost(DefaultFirmId, endClient, symbol, netQuantity, averageEntryPrice);
+
+    public void SetAbsoluteAvgCost(string firmId, string endClient, string symbol, long netQuantity, decimal averageEntryPrice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbol);
+        if (netQuantity == 0 && averageEntryPrice != 0m)
+            throw new ArgumentException("averageEntryPrice must be 0 when netQuantity is 0", nameof(averageEntryPrice));
+        if (netQuantity != 0 && averageEntryPrice <= 0m)
+            throw new ArgumentException("averageEntryPrice must be > 0 when netQuantity is non-zero", nameof(averageEntryPrice));
+
+        var key = (Norm(firmId), endClient, symbol);
+        // An absolute overwrite always establishes (or clears) a KNOWN
+        // basis — drop any stale unknown-basis leg unconditionally.
+        _unknownBasisQty.TryRemove(key, out _);
+        if (netQuantity == 0)
+        {
+            _avgCost.TryRemove(key, out _);
+            return;
+        }
+        _avgCost[key] = new AvgCostState(netQuantity, averageEntryPrice);
+    }
+
+    /// <summary>
     /// Pass-3 review (#277) parallel — defers a replay-time synth so a
     /// durable <see cref="RealizedPnlEvent"/> arriving later in the
     /// drain can supersede it via <see cref="Apply(RealizedPnlEvent)"/>.

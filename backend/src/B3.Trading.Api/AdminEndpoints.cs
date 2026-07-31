@@ -386,6 +386,21 @@ public static class AdminEndpoints
         group.MapPost("/cash", (CashLedgerRequest? req, HttpContext ctx, CashKeeper keeper, CashLedger cashLedger, EventDispatcher dispatcher, IAuditLogger audit) =>
             HandleCashLedger(req, ctx, keeper, cashLedger, dispatcher, audit));
 
+        // ── Position adjustment (#671/#753 RFC, PR 1) ───────────
+        // Admin-driven ABSOLUTE position overwrite, persisted as
+        // PositionAdjustmentEvent on the WAL and projected into
+        // PositionKeeper (SetAbsolute), PnlKeeper (SetAbsoluteAvgCost),
+        // AND SubAccountPnlKeeper's MASTER bucket only
+        // (SetAbsoluteMasterBucketAvgCost — code-review addendum #2:
+        // v1 adjustment is account-wide/master-only, never a named
+        // sub-account bucket) in the same dispatcher-serialised apply
+        // so the avg-cost basis never drifts from the position it is
+        // derived from. Mirrors the /cash pattern above: FirmId is
+        // always derived from the caller's JWT firm claim, never
+        // accepted from the request body.
+        group.MapPost("/positions", (PositionAdjustmentRequest? req, HttpContext ctx, PositionKeeper positions, PnlKeeper pnl, SubAccountPnlKeeper subAccountPnl, EventDispatcher dispatcher, IAuditLogger audit) =>
+            HandlePositionAdjustment(req, ctx, positions, pnl, subAccountPnl, dispatcher, audit));
+
         // POST /api/admin/simulator/er — synthetic ER injection (formerly the
         // ExchangeMode.Simulator-only route; merged into Mock+AllowErInjection
         // in #163). The route itself moved to the Infrastructure project as
@@ -553,6 +568,156 @@ public static class AdminEndpoints
         {
             MetricsRegistry.WalBackpressure.Add(1,
                 new KeyValuePair<string, object?>("call_site", "admin.cash"));
+            return Results.Json(
+                new { error = "system busy (WAL backpressure)", detail = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    }
+
+    /// <summary>
+    /// #671/#753 (RFC: admin account reset + runtime position adjustment,
+    /// PR 1). Handles <c>POST /api/admin/positions</c> — an operator-driven
+    /// ABSOLUTE position overwrite, mirroring <see cref="HandleCashLedger"/>
+    /// exactly (audit-first ordering, WAL-backpressure 503, FirmId always
+    /// derived from the JWT firm claim rather than the request body).
+    /// Unlike the cash-withdrawal path there is no insufficient-funds
+    /// failure mode here — every failure mode (missing fields, invariant
+    /// violation) is a 400 checked BEFORE the audit emit / dispatch, so a
+    /// plain <see cref="EventDispatcher.Dispatch(Persistence.WalEvent, Action)"/>
+    /// suffices (no <c>DispatchWithPreApply</c> rollback branch needed).
+    /// <see cref="PositionKeeper"/>, <see cref="PnlKeeper"/>, AND
+    /// <see cref="SubAccountPnlKeeper"/>'s MASTER bucket (code-review
+    /// addendum #2 — v1 adjustment is account-wide/master-only; no named
+    /// sub-account bucket is ever fabricated or altered here) are all
+    /// updated inside the SAME apply delegate so no keeper's avg-cost
+    /// basis observably lags the position it derives from.
+    /// </summary>
+    private static IResult HandlePositionAdjustment(
+        PositionAdjustmentRequest? req,
+        HttpContext ctx,
+        PositionKeeper positions,
+        PnlKeeper pnl,
+        SubAccountPnlKeeper subAccountPnl,
+        EventDispatcher dispatcher,
+        IAuditLogger audit)
+    {
+        if (req is null)
+            return Results.BadRequest(new { error = "request body required" });
+        if (string.IsNullOrWhiteSpace(req.Endclient))
+            return Results.BadRequest(new { error = "endclient required" });
+        if (string.IsNullOrWhiteSpace(req.Symbol))
+            return Results.BadRequest(new { error = "symbol required" });
+        // Code-review addendum (#671/#753 PR 1). NetQuantity/AverageEntryPrice
+        // are nullable at the JSON-binding level specifically so an omitted
+        // field is distinguishable from an explicit 0 — see the DTO doc
+        // comment on PositionAdjustmentRequest. Both are semantically
+        // required: there is no sensible default for an absolute overwrite.
+        if (req.NetQuantity is null)
+            return Results.BadRequest(new { error = "netQuantity required" });
+        if (req.AverageEntryPrice is null)
+            return Results.BadRequest(new { error = "averageEntryPrice required" });
+
+        var netQuantity = req.NetQuantity.Value;
+        var averageEntryPrice = req.AverageEntryPrice.Value;
+
+        // RFC #753 invariant: a flat (zero) position carries a zero
+        // average entry price; a non-flat position requires a strictly
+        // positive average entry price. PositionKeeper.SetAbsolute /
+        // PnlKeeper.SetAbsoluteAvgCost re-check this as defense-in-depth
+        // (also guards WAL replay of a corrupted segment), but the
+        // primary 400 gate lives here so the operator gets an immediate,
+        // request-scoped error.
+        if (netQuantity == 0 && averageEntryPrice != 0m)
+            return Results.BadRequest(new { error = "averageEntryPrice must be 0 when netQuantity is 0" });
+        if (netQuantity != 0 && averageEntryPrice <= 0m)
+            return Results.BadRequest(new { error = "averageEntryPrice must be > 0 when netQuantity is non-zero" });
+
+        var owner = new EndClientId(req.Endclient);
+        var operatorId = ctx.User.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
+        // RFC #753 product decision: admin operations are scoped to the
+        // administrator's JWT firm. No explicit cross-firm firmId
+        // request parameter in v1 — never trust a client-supplied firm.
+        //
+        // Code-review addendum (#671/#753 PR 1). FAIL CLOSED when the
+        // firm claim is missing or blank rather than silently defaulting
+        // to the DEFAULT tenant bucket: unlike the read-only endpoints
+        // elsewhere in this file that default to "default" for
+        // legacy/no-firm compatibility, this is a durable, tenant-scoped
+        // WRITE — misattributing it to the wrong (or a shared "default")
+        // firm bucket because a token happened to be missing its firm
+        // claim would be a silent cross-tenant data-integrity issue, not
+        // a benign read fallback. A normally-issued admin JWT (see
+        // JwtIssuer.Issue) always carries this claim; a token missing it
+        // is malformed/forged and must be rejected outright.
+        var firmIdClaim = ctx.User.FindFirstValue(JwtIssuer.FirmClaim);
+        if (string.IsNullOrWhiteSpace(firmIdClaim))
+        {
+            return Results.Json(
+                new { error = "firm claim missing or blank on caller JWT" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        var firmId = firmIdClaim;
+
+        try
+        {
+            // Pass-1 review (#322) P1.2 pattern, reused here: audit-first
+            // ordering — emit the operator's position-adjustment intent
+            // BEFORE the dispatch so a WAL-backpressured audit append
+            // refuses the mutation with 503 rather than committing it
+            // un-audited.
+            EmitAdminConfigChange(audit, ctx, "/api/admin/positions", AuditOutcomes.Success, new()
+            {
+                ["endclient"] = req.Endclient!,
+                ["firmId"] = firmId,
+                ["symbol"] = req.Symbol!,
+                ["netQuantity"] = netQuantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["averageEntryPrice"] = averageEntryPrice.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["reference"] = req.Reference ?? "",
+            }, failClosed: true);
+
+            dispatcher.Dispatch(
+                new PositionAdjustmentEvent
+                {
+                    EndClientId = req.Endclient,
+                    FirmId = firmId,
+                    Symbol = req.Symbol,
+                    NetQuantity = netQuantity,
+                    AverageEntryPrice = averageEntryPrice,
+                    Reference = req.Reference,
+                    OperatorId = operatorId,
+                },
+                () =>
+                {
+                    // All three keepers are updated in this single apply
+                    // delegate — the dispatcher serialises it exactly
+                    // like the live fill path (PositionKeeper.ApplyFill
+                    // + PnlKeeper.ApplyFillToAvgCost +
+                    // SubAccountPnlKeeper.ApplyBucketFill in
+                    // ExecutionReportProcessor) — so a reader can never
+                    // observe the position overwritten with a basis
+                    // still reflecting the pre-adjustment state, or
+                    // vice versa. SubAccountPnlKeeper only ever has its
+                    // MASTER bucket touched here (code-review addendum
+                    // #2) — v1 adjustment is account-wide/master-only,
+                    // never a named sub-account bucket.
+                    positions.SetAbsolute(firmId, owner, req.Symbol!, netQuantity, averageEntryPrice);
+                    pnl.SetAbsoluteAvgCost(firmId, req.Endclient!, req.Symbol!, netQuantity, averageEntryPrice);
+                    subAccountPnl.SetAbsoluteMasterBucketAvgCost(firmId, req.Endclient!, req.Symbol!, netQuantity, averageEntryPrice);
+                });
+
+            return Results.Ok(new
+            {
+                endclient = req.Endclient,
+                firmId,
+                symbol = req.Symbol,
+                netQuantity,
+                averageEntryPrice,
+            });
+        }
+        catch (WalBackpressureException ex)
+        {
+            MetricsRegistry.WalBackpressure.Add(1,
+                new KeyValuePair<string, object?>("call_site", "admin.positions"));
             return Results.Json(
                 new { error = "system busy (WAL backpressure)", detail = ex.Message },
                 statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -836,5 +1001,44 @@ public sealed class CashLedgerRequest
     public string? Kind { get; set; }
     public decimal Amount { get; set; }
     public string? Currency { get; set; }
+    public string? Reference { get; set; }
+}
+
+/// <summary>
+/// Body for <c>POST /api/admin/positions</c> (#671/#753 RFC, PR 1).
+/// Operator-driven ABSOLUTE position overwrite. <see cref="NetQuantity"/>
+/// is signed (positive = long, negative = short); <see cref="AverageEntryPrice"/>
+/// must be exactly 0 when <see cref="NetQuantity"/> is 0, and strictly
+/// positive otherwise (RFC #753 invariant, enforced in
+/// <c>AdminEndpoints.HandlePositionAdjustment</c> and, defense-in-depth,
+/// in <c>PositionKeeper.SetAbsolute</c>). There is deliberately no
+/// <c>FirmId</c> field here — per the RFC's "admin operations are
+/// scoped to the administrator's JWT firm" product decision, the firm
+/// is always derived from the caller's JWT firm claim, never accepted
+/// from the request body. <see cref="Reference"/> is operator free-form
+/// (ticket id, journal note), mirroring <see cref="CashLedgerRequest.Reference"/>.
+///
+/// <para>
+/// Code-review addendum (#671/#753 PR 1). <see cref="NetQuantity"/> and
+/// <see cref="AverageEntryPrice"/> are nullable at the JSON-binding
+/// level ON PURPOSE: both fields are semantically REQUIRED (there is
+/// no sensible default for an absolute overwrite), but the intentional
+/// "flatten to zero" request legitimately sends a literal
+/// <c>netQuantity: 0, averageEntryPrice: 0</c>. Using non-nullable
+/// <c>long</c>/<c>decimal</c> would make an omitted field
+/// indistinguishable from an explicit <c>0</c> (System.Text.Json
+/// silently defaults missing value-typed properties), silently
+/// accepting a malformed/incomplete request as a flatten-to-zero
+/// instruction. <c>HandlePositionAdjustment</c> rejects either field
+/// being <c>null</c> with 400 before evaluating the flatten/invariant
+/// rule below.
+/// </para>
+/// </summary>
+public sealed class PositionAdjustmentRequest
+{
+    public string? Endclient { get; set; }
+    public string? Symbol { get; set; }
+    public long? NetQuantity { get; set; }
+    public decimal? AverageEntryPrice { get; set; }
     public string? Reference { get; set; }
 }
