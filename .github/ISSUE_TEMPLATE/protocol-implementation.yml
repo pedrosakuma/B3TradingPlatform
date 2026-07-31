@@ -1,0 +1,64 @@
+name: Protocol implementation request
+description: Request participant-side work that depends on merged upstream wire behavior.
+title: "protocol: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this only when the B3MatchingPlatform / B3MarketDataPlatform wire behavior already exists upstream.
+        Upstream issues, RFCs, or proposals alone are not implementation evidence; use the protocol research / blocker template instead.
+  - type: textarea
+    id: upstream-evidence
+    attributes:
+      label: Merged upstream evidence
+      description: Link the merged upstream PR(s) and commit SHA(s) that shipped every required B3MatchingPlatform / B3MarketDataPlatform wire behavior.
+      placeholder: |
+        - B3MatchingPlatform PR #123, merged at abc1234
+        - B3MarketDataPlatform commit def5678
+    validations:
+      required: true
+  - type: input
+    id: official-schema-version
+    attributes:
+      label: Official schema version
+      description: Name the official B3 schema version(s) this request consumes.
+      placeholder: "EntryPoint SBE 8.4.2; UMDF SBE 2.2.0"
+    validations:
+      required: true
+  - type: input
+    id: template-ids
+    attributes:
+      label: Template ID(s)
+      description: List every official template ID this implementation depends on.
+      placeholder: "ExecutionReport_Trade template 35; InstrumentStatus template ..."
+    validations:
+      required: true
+  - type: textarea
+    id: fields-enums
+    attributes:
+      label: Fields and enums
+      description: List the exact fields and enum values consumed or emitted by this repo.
+      placeholder: |
+        - Field: TradingStatus
+        - Enum values: Halted, Resumed
+    validations:
+      required: true
+  - type: textarea
+    id: participant-requirement
+    attributes:
+      label: Participant-side requirement
+      description: Describe the participant capability or user outcome without inventing venue messages or statuses.
+      placeholder: "Trading-host should reject locally when the venue halt status is observed on the supported wire feed."
+    validations:
+      required: true
+  - type: checkboxes
+    id: gate
+    attributes:
+      label: Protocol gate
+      options:
+        - label: I cited merged upstream PR(s) / commit(s), not only proposal issues or RFCs.
+          required: true
+        - label: I listed the exact official schema version, template ID(s), fields, and enums.
+          required: true
+        - label: This request does not prescribe venue messages, templates, fields, or enum values that do not exist upstream.
+          required: true

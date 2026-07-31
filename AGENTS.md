@@ -119,6 +119,21 @@ semantics — opens an **RFC issue first**. The investigation lives in the
 issue thread; the PR follows the agreed design. This keeps reviewers
 focused on the change, not the discovery.
 
+### 🔌 Cross-repo protocol evidence gate
+
+Requests that depend on `B3MatchingPlatform` or `B3MarketDataPlatform`
+wire behavior must cite the merged upstream PR or commit that shipped
+that behavior, plus the exact official schema version, template ID, and
+fields / enums being consumed. Upstream issues, RFCs, and proposal text
+are useful discovery links, but are not implementation evidence. If the
+merged upstream behavior or official schema mapping is missing, file a
+protocol research / blocker issue instead of an implementation request.
+
+This repo is participant-side. Product requirements may describe the
+participant capability or user outcome, but must not prescribe venue
+messages, EntryPoint / UMDF templates, statuses, fields, or enums that
+do not exist in the official schema and a merged upstream implementation.
+
 ### 🧪 Flaky tests are real and tracked
 
 Several tests in this repo are timing-sensitive under xunit parallelism
