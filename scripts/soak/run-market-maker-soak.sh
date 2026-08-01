@@ -11,6 +11,7 @@ readonly trading_password counterparty_password
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
+source "$ROOT/scripts/lib/docker-workload-guard.sh"
 source "$ROOT/scripts/soak/market-maker-soak-lib.sh"
 if ! soak_child_environment_is_secret_free trading_password counterparty_password; then
     echo "ERROR: password input remained visible to child processes after environment scrubbing" >&2
@@ -65,6 +66,7 @@ Operator controls:
   SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS=<derived>
   SOAK_INVENTORY_BIAS_LOTS=12
   SOAK_SUITE_MANIFEST=soak-artifacts/<suite-id>/suite-manifest.json
+  B3TP_DOCKER_WORKLOAD_LOCK_FILE=<shared lock path>
 EOF
 }
 
@@ -898,10 +900,24 @@ jq -n \
       eligibilityReasons: ["runtime images and suite compatibility have not been verified"]
     }' >"${artifacts_dir}/run.json"
 
+docker_workload_guard_acquire "market-maker-soak:${project_name}"
 if ! "${compose[@]}" down -v --remove-orphans >"${artifacts_dir}/pre-run-compose-down.log" 2>&1; then
     log "ERROR: pre-run isolation teardown failed; refusing to start project '$project_name'"
     exit 1
 fi
+required_host_ports=(
+    "$TRADING_HOST_PORT"
+    "$MARKETDATA_PORT"
+    "$OTEL_OTLP_GRPC_PORT"
+    "$OTEL_OTLP_HTTP_PORT"
+    "$PROMETHEUS_PORT"
+    "$ALERTMANAGER_PORT"
+    "$ALERT_RECEIVER_PORT"
+)
+if $with_grafana; then
+    required_host_ports+=("$GRAFANA_PORT")
+fi
+docker_workload_guard_require_free_ports "${required_host_ports[@]}"
 if $build_images; then
     log "building trading-host, market-maker-bot, and local alert receiver"
     "${compose[@]}" build trading-host market-maker-bot alert-receiver
