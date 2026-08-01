@@ -68,6 +68,37 @@ if soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00 9223372036854775
     exit 1
 fi
 
+compatibility_workload_file="$(mktemp)"
+trap 'rm -f "$compatibility_workload_file"' EXIT
+cat >"$compatibility_workload_file" <<'EOF'
+{
+  "workload": {
+    "strictRefresh": {
+      "configuredInstruments": [{
+        "symbol": "PETR4",
+        "maxSkewTicks": 5,
+        "maxVolatilityAdditionalSpreadTicks": 20
+      }]
+    },
+    "recoveryCrosses": [{
+      "symbol": "PETR4",
+      "maxSkewTicks": 5,
+      "maxVolatilityAdditionalSpreadTicks": 20
+    }]
+  }
+}
+EOF
+compatibility_workload="$(
+    soak_suite_compatibility_workload "$compatibility_workload_file"
+)"
+[[ "$(jq -r '.strictRefresh.configuredInstruments[0].symbol' <<<"$compatibility_workload")" == "PETR4" ]]
+[[ "$(jq -r '.strictRefresh.configuredInstruments[0] | has("maxSkewTicks")' <<<"$compatibility_workload")" == "false" ]]
+[[ "$(jq -r '.strictRefresh.configuredInstruments[0] | has("maxVolatilityAdditionalSpreadTicks")' <<<"$compatibility_workload")" == "false" ]]
+[[ "$(jq -r '.recoveryCrosses[0] | has("maxSkewTicks")' <<<"$compatibility_workload")" == "false" ]]
+[[ "$(jq -r '.recoveryCrosses[0] | has("maxVolatilityAdditionalSpreadTicks")' <<<"$compatibility_workload")" == "false" ]]
+rm -f "$compatibility_workload_file"
+trap - EXIT
+
 [[ "$(soak_conservative_profile_funding_bound baseline)" == "232719" ]]
 [[ "$(soak_conservative_profile_funding_bound inventory-skew)" == "1120238" ]]
 [[ "$(soak_conservative_profile_funding_bound volatility-spread)" == "886408" ]]

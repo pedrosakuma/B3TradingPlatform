@@ -56,6 +56,16 @@ soak_resolve_sandbox_max_deposit() {
     fi
 }
 
+soak_suite_compatibility_workload() {
+    jq '
+      .workload
+      | .strictRefresh.configuredInstruments |=
+          map(del(.maxSkewTicks, .maxVolatilityAdditionalSpreadTicks))
+      | .recoveryCrosses |=
+          map(del(.maxSkewTicks, .maxVolatilityAdditionalSpreadTicks))
+    ' "$1"
+}
+
 soak_conservative_profile_funding_bound() {
     local profile="$1"
     awk \

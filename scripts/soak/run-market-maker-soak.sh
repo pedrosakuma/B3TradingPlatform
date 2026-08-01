@@ -1214,18 +1214,18 @@ runtime_image_binding="$(jq '
   [.[] | {service, configuredImage, imageId, repoDigests}] |
   sort_by(.service)
 ' "${artifacts_dir}/runtime-images.json")"
+compatibility_workload="$(
+    soak_suite_compatibility_workload "${artifacts_dir}/run.json"
+)"
 compatibility_json="$(jq -n \
     --slurpfile run "${artifacts_dir}/run.json" \
     --slurpfile rendered "${artifacts_dir}/rendered-config.json" \
-    --slurpfile runtimeImages "${artifacts_dir}/runtime-images.json" '
+    --slurpfile runtimeImages "${artifacts_dir}/runtime-images.json" \
+    --argjson workload "$compatibility_workload" '
     {
       gitSha: $run[0].gitSha,
       settings: $run[0].settings,
-      workload: (
-        $run[0].workload
-        | .strictRefresh.configuredInstruments |= map(del(.maxSkewTicks))
-        | .recoveryCrosses |= map(del(.maxSkewTicks))
-      ),
+      workload: $workload,
       configuredSymbols: $run[0].configuredSymbols,
       commonRenderedConfiguration: {
         auth: $rendered[0].services.tradingHost.auth,
