@@ -66,6 +66,26 @@ soak_suite_compatibility_workload() {
     ' "$1"
 }
 
+soak_reference_transition_interior_price() {
+    local current="$1" previous="$2" tick="$3"
+    awk -v current="$current" -v previous="$previous" -v tick="$tick" '
+      BEGIN {
+        if (tick <= 0) exit 2
+        low = current < previous ? current : previous
+        high = current > previous ? current : previous
+        if (high - low <= tick) {
+          printf "%.8f\n", current
+          exit
+        }
+        candidate = int((((low + high) / 2) / tick) + 0.5) * tick
+        if (candidate <= low) candidate = low + tick
+        if (candidate >= high) candidate = high - tick
+        if (candidate <= low || candidate >= high) candidate = current
+        printf "%.8f\n", candidate
+      }
+    '
+}
+
 soak_conservative_profile_funding_bound() {
     local profile="$1"
     awk \

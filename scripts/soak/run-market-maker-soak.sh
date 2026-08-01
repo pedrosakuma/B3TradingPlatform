@@ -1450,7 +1450,7 @@ soak_primary_reference_bootstrap_reset
 
 read_live_refresh_price_into() {
     local output_variable="$1" refresh_symbol="$2" status_variable="${3:-}"
-    local empty_request_body="" response live_row updated_epoch_ms now_epoch_ms price
+    local empty_request_body="" response live_row updated_epoch_ms now_epoch_ms live_price
     local last_status="missing" last_rejection="missing"
     local started=$SECONDS
     while ((SECONDS - started < max_reference_age_seconds)); do
@@ -1480,8 +1480,8 @@ read_live_refresh_price_into() {
                 sleep 0.25
                 continue
             fi
-            price="$(jq -er '.price' <<<"$live_row")" || return 1
-            printf -v "$output_variable" '%s' "$price"
+            live_price="$(jq -er '.price' <<<"$live_row")" || return 1
+            printf -v "$output_variable" '%s' "$live_price"
             [[ -z "$status_variable" ]] || printf -v "$status_variable" '%s' "fresh"
             if [[ "$refresh_symbol" == "$symbol" ]]; then
                 soak_primary_reference_mark_live_observed
@@ -1581,15 +1581,9 @@ resolve_live_refresh_price_into() {
                     --arg symbol "$refresh_symbol" \
                     '.[] | select(.symbol == $symbol) | .tickSize' \
                     <<<"$configured_instruments_json")" || return 1
-                price="$(awk \
-                    -v price="$price" \
-                    -v tick="$tick_size" \
-                    -v direction="$strict_primary_reference_direction" '
-                      BEGIN {
-                        adjusted = direction == "Buy" ? price - tick : price + tick
-                        printf "%.8f\n", adjusted
-                      }
-                    ')" || return 1
+                price="$(soak_reference_transition_interior_price \
+                    "$price" "$strict_primary_reference_baseline" "$tick_size")" ||
+                    return 1
             fi
             printf -v "$output_variable" '%s' "$price"
             return 0
@@ -1604,15 +1598,9 @@ resolve_live_refresh_price_into() {
             --arg symbol "$refresh_symbol" \
             '.[] | select(.symbol == $symbol) | .tickSize' \
             <<<"$configured_instruments_json")" || return 1
-        price="$(awk \
-            -v price="$price" \
-            -v tick="$tick_size" \
-            -v direction="$strict_primary_reference_direction" '
-              BEGIN {
-                adjusted = direction == "Buy" ? price - tick : price + tick
-                printf "%.8f\n", adjusted
-              }
-            ')" || return 1
+        price="$(soak_reference_transition_interior_price \
+            "$price" "$strict_primary_reference_baseline" "$tick_size")" ||
+            return 1
         printf -v "$output_variable" '%s' "$price"
         return 0
     fi
@@ -1732,10 +1720,21 @@ submit_order() {
 '         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase" "$symbol" "$user" "$side" "$clordid" "$latency"         >>"$workload_csv" || return 1
     expected_workload_sequence=$((10#$clordid + 1))
     if [[ "$profile" == "pause-and-cancel" ]]; then
-        strict_primary_reference_baseline="$reference_baseline"
-        strict_primary_reference_direction="$side"
-        strict_primary_reference_pending=true
-        strict_refresh_next_due=$SECONDS
+        if [[ "$phase" == "accounting-bootstrap" ]]; then
+            if [[ "$side" == "Sell" ]]; then
+                strict_primary_reference_baseline="$reference_baseline"
+                strict_primary_reference_direction="$side"
+                strict_primary_reference_pending=true
+            else
+                strict_primary_reference_pending=false
+            fi
+            strict_refresh_next_due=$((SECONDS + strict_refresh_interval_seconds))
+        else
+            strict_primary_reference_baseline="$reference_baseline"
+            strict_primary_reference_direction="$side"
+            strict_primary_reference_pending=true
+            strict_refresh_next_due=$SECONDS
+        fi
     fi
 }
 

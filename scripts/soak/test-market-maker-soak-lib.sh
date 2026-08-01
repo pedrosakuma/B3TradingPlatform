@@ -68,6 +68,15 @@ if soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00 9223372036854775
     exit 1
 fi
 
+[[ "$(soak_reference_transition_interior_price 29.99 30.05 0.01)" == "30.02000000" ]]
+[[ "$(soak_reference_transition_interior_price 30.05 30.00 0.01)" == "30.03000000" ]]
+[[ "$(soak_reference_transition_interior_price 30.01 30.00 0.01)" == "30.01000000" ]]
+[[ "$(soak_reference_transition_interior_price 30.00 30.00 0.01)" == "30.00000000" ]]
+if soak_reference_transition_interior_price 30.00 30.05 0 >/dev/null; then
+    echo "ERROR: non-positive tick was accepted for transition pricing" >&2
+    exit 1
+fi
+
 compatibility_workload_file="$(mktemp)"
 trap 'rm -f "$compatibility_workload_file"' EXIT
 cat >"$compatibility_workload_file" <<'EOF'
