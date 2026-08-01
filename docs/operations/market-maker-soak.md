@@ -105,6 +105,7 @@ The soak overlay:
 Render without starting anything:
 
 ```bash
+scripts/lib/test-docker-workload-guard.sh
 scripts/soak/test-market-maker-soak-lib.sh
 scripts/soak/run-market-maker-soak.sh --profile baseline --dry-run
 scripts/soak/run-market-maker-soak.sh --profile inventory-skew --dry-run
@@ -244,6 +245,14 @@ the manifest still has zero accepted runs and the retry must build again.
 Subsequent `--no-build` profiles are accepted only when their full runtime image
 identity list exactly matches the manifest. Do not rebuild, pull, or retag suite
 images between profiles.
+
+Before teardown, build, or startup, the runner acquires an exclusive
+shared-host lock. After removing only its own project, it verifies that every
+configured host port is free. A concurrent participating Docker workload fails
+before touching Compose; an unrelated stack using a requested port is reported
+but never stopped. Override `B3TP_DOCKER_WORKLOAD_LOCK_FILE` only when
+coordinating runners that intentionally use a different lock namespace.
+Alternate ports remain available through the existing `SOAK_*_PORT` variables.
 
 Useful controls:
 

@@ -436,6 +436,9 @@ jobs:
       - name: market-maker soak helper self-tests
         run: scripts/soak/test-market-maker-soak-lib.sh
 
+      - name: Docker workload guard self-tests
+        run: scripts/lib/test-docker-workload-guard.sh
+
       - name: docker compose config (Hybrid auth mapping)
         env:
           TRADING_AUTH_SIGNING_KEY: validate-only-placeholder-key-min-32-bytes-long-aaaaa
