@@ -144,6 +144,9 @@ derivation crosses only the predicted bid side.
 Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
+Primary workload submits carry a deterministic `Idempotency-Key`; transport
+timeouts may retry only with that key, so a lost HTTP response cannot create a
+duplicate venue order.
 This target-symbol workload remains independently recorded in `workload.csv`
 for cross-profile fill/P&L comparability.
 

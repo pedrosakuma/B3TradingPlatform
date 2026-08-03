@@ -196,13 +196,18 @@ soak_curl_json_request() {
 
 soak_curl_json_request_with_status() {
     local method="$1" url="$2" token_variable="$3" body_variable="$4"
+    local idempotency_key_variable="${5:-}"
     (
         set +x
         local token="${!token_variable-}" body="${!body_variable-}"
-        export -n token body
+        local idempotency_key_value=
+        [[ -z "$idempotency_key_variable" ]] ||
+            idempotency_key_value="${!idempotency_key_variable-}"
+        export -n token body idempotency_key_value
         local curl_bin="${SOAK_CURL_BIN:-curl}"
-        local curl_output curl_exit=0 http_status response_body
+        local curl_output curl_exit=0 http_status response_body attempt
         local -a arguments=(-sS --max-time 10 --request "$method")
+        local -a sensitive_variables=("$token_variable" "$body_variable")
         if [[ -n "$token" ]]; then
             exec 3<<<"Authorization: Bearer $token"
             arguments+=(--header @/dev/fd/3)
@@ -211,12 +216,27 @@ soak_curl_json_request_with_status() {
             exec 4<<<"$body"
             arguments+=(--header 'Content-Type: application/json' --data-binary @/dev/fd/4)
         fi
-        if ! soak_child_environment_is_secret_free "$token_variable" "$body_variable"; then
+        if [[ -n "$idempotency_key_value" ]]; then
+            exec 5<<<"Idempotency-Key: $idempotency_key_value"
+            arguments+=(--header @/dev/fd/5)
+            sensitive_variables+=("$idempotency_key_variable")
+        fi
+        if ! soak_child_environment_is_secret_free "${sensitive_variables[@]}"; then
             echo "ERROR: refusing to launch curl with credentials present in its child environment" >&2
             return 1
         fi
-        curl_output="$("$curl_bin" "${arguments[@]}" \
-            --write-out $'\n%{http_code}' "$url")" || curl_exit=$?
+        for attempt in 1 2 3; do
+            [[ -z "$token" ]] || exec 3<<<"Authorization: Bearer $token"
+            [[ -z "$body" ]] || exec 4<<<"$body"
+            [[ -z "$idempotency_key_value" ]] ||
+                exec 5<<<"Idempotency-Key: $idempotency_key_value"
+            curl_exit=0
+            curl_output="$("$curl_bin" "${arguments[@]}" \
+                --write-out $'\n%{http_code}' "$url")" || curl_exit=$?
+            ((curl_exit != 0)) || break
+            [[ -n "$idempotency_key_value" && "$attempt" -lt 3 ]] || break
+            sleep 1
+        done
         http_status="${curl_output##*$'\n'}"
         response_body="${curl_output%$'\n'*}"
         [[ "$curl_output" == *$'\n'* ]] || {

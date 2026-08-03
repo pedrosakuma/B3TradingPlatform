@@ -1399,12 +1399,12 @@ authed_json_request_with_status_into() {
     local response_variable="$1" status_variable="$2"
     local method="$3" url="$4" token_variable="$5" expiry_variable="$6"
     local user="$7" password="$8" body_variable="$9"
-    local token envelope
+    local token envelope idempotency_key_variable="${10:-}"
     refresh_session_token_if_due \
         "$token_variable" "$expiry_variable" "$user" "$password" || return 1
     token="${!token_variable}"
     envelope="$(soak_curl_json_request_with_status \
-        "$method" "$url" token "$body_variable")" || return 1
+        "$method" "$url" token "$body_variable" "$idempotency_key_variable")" || return 1
     soak_curl_status_envelope_into \
         "$response_variable" "$status_variable" "$envelope"
 }
@@ -1679,13 +1679,15 @@ record_primary_refresh_fill() {
 
 submit_order() {
     local token_variable="$1" expiry_variable="$2" user="$3" password="$4" side="$5" price="$6" phase="$7"
-    local response="" http_status="" clordid="" latency request_body
+    local response="" http_status="" clordid="" latency request_body idempotency_key
     local submit_status=0
+    idempotency_key="soak-${run_id}-${user}-${expected_workload_sequence}"
     request_body="$(jq -cn         --arg symbol "$symbol"         --arg side "$side"         --argjson quantity "$quantity"         --argjson price "$price"         '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" ||
         return 1
     authed_json_request_with_status_into response http_status \
         POST "${base_url}/api/orders" \
-        "$token_variable" "$expiry_variable" "$user" "$password" request_body ||
+        "$token_variable" "$expiry_variable" "$user" "$password" request_body \
+        idempotency_key ||
         submit_status=$?
     if ((submit_status != 0)); then
         record_submit_order_failure \

@@ -174,6 +174,48 @@ status_envelope="$(SOAK_CURL_BIN=mock_status_curl \
         status_test_token status_test_body)"
 [[ "$(jq -r '.curlExit' <<<"$status_envelope")" == "22" ]]
 [[ "$(jq -r '.httpStatus' <<<"$status_envelope")" == "422" ]]
+mock_idempotent_status_curl() {
+    local idempotency_header arguments
+    idempotency_header="$(cat <&5)"
+    arguments="$(printf '%s\n' "$@")"
+    [[ "$idempotency_header" == "Idempotency-Key: soak-run-alice-3181" ]]
+    grep -Fxq '@/dev/fd/5' <<<"$arguments"
+    ! grep -Fxq -- '--retry-all-errors' <<<"$arguments"
+    ! grep -Fxq -- '--retry' <<<"$arguments"
+    printf '%s\n' '{"status":"Pending","clOrdId":"3181","replayed":true}' 202
+}
+idempotency_key='soak-run-alice-3181'
+idempotent_status_envelope="$(SOAK_CURL_BIN=mock_idempotent_status_curl \
+    soak_curl_json_request_with_status POST https://example.invalid \
+        status_test_token status_test_body idempotency_key)"
+[[ "$(jq -r '.curlExit' <<<"$idempotent_status_envelope")" == "0" ]]
+[[ "$(jq -r '.httpStatus' <<<"$idempotent_status_envelope")" == "202" ]]
+[[ "$(jq -r '.body | fromjson | .replayed' <<<"$idempotent_status_envelope")" == "true" ]]
+status_retry_count_file="${TMPDIR:-/tmp}/b3tp-soak-retry-count-$$"
+printf '0\n' >"$status_retry_count_file"
+mock_transport_retry_curl() {
+    local count header request_body idempotency_header
+    count="$(cat "$status_retry_count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$status_retry_count_file"
+    header="$(cat <&3)"
+    request_body="$(cat <&4)"
+    idempotency_header="$(cat <&5)"
+    [[ "$header" == "Authorization: Bearer status-test-token" ]]
+    [[ "$request_body" == '{"symbol":"PETR4"}' ]]
+    [[ "$idempotency_header" == "Idempotency-Key: soak-run-alice-3181" ]]
+    if ((count == 1)); then
+        return 28
+    fi
+    printf '%s\n' '{"status":"Pending","clOrdId":"3181","replayed":true}' 202
+}
+transport_retry_envelope="$(SOAK_CURL_BIN=mock_transport_retry_curl \
+    soak_curl_json_request_with_status POST https://example.invalid \
+        status_test_token status_test_body idempotency_key)"
+[[ "$(cat "$status_retry_count_file")" == "2" ]]
+[[ "$(jq -r '.curlExit' <<<"$transport_retry_envelope")" == "0" ]]
+[[ "$(jq -r '.httpStatus' <<<"$transport_retry_envelope")" == "202" ]]
+rm -f "$status_retry_count_file"
 status_body=""
 http_status=""
 set +e
