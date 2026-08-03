@@ -1440,9 +1440,6 @@ primary_price_collar_percent="$(jq -r '.limits.priceCollarPercent // empty' \
 primary_price_collar_absolute="$(jq -r '.limits.priceCollarAbsolute // empty' \
     <<<"$primary_risk_limits")" || exit 1
 
-strict_primary_reference_pending=false
-strict_primary_reference_baseline=
-strict_primary_reference_direction=
 last_resolved_primary_reference=
 last_resolved_primary_limit=
 last_resolved_primary_source=
@@ -1530,7 +1527,6 @@ resolve_primary_order_price_into() {
         --arg symbol "$symbol" \
         '.[] | select(.symbol == $symbol) | .maxVolatilityAdditionalSpreadTicks' \
         <<<"$configured_instruments_json")" || return 1
-
     resolved_price="$(soak_resolve_marketable_limit \
         "$side" \
         "$live_reference" \
@@ -1554,58 +1550,9 @@ resolve_primary_order_price_into() {
 }
 
 resolve_live_refresh_price_into() {
-    local output_variable="$1" refresh_symbol="$2" started=$SECONDS price tick_size wait_budget
-    wait_budget="$max_reference_age_seconds"
-    if [[ "$refresh_symbol" == "$symbol" ]] &&
-        $strict_primary_reference_pending; then
-        wait_budget="$full_telemetry_cycle_seconds"
-    fi
-    while ((SECONDS - started < wait_budget)); do
-        read_live_refresh_price_into price "$refresh_symbol" || return 1
-        if [[ "$refresh_symbol" != "$symbol" ]] ||
-            ! $strict_primary_reference_pending ||
-            awk -v actual="$price" \
-                -v baseline="$strict_primary_reference_baseline" \
-                -v direction="$strict_primary_reference_direction" '
-                  BEGIN {
-                    if (direction == "Buy")
-                      exit !(actual > baseline)
-                    if (direction == "Sell")
-                      exit !(actual < baseline)
-                    exit 1
-                  }
-                '; then
-            if [[ "$refresh_symbol" == "$symbol" ]] &&
-                $strict_primary_reference_pending; then
-                tick_size="$(jq -er \
-                    --arg symbol "$refresh_symbol" \
-                    '.[] | select(.symbol == $symbol) | .tickSize' \
-                    <<<"$configured_instruments_json")" || return 1
-                price="$(soak_reference_transition_interior_price \
-                    "$price" "$strict_primary_reference_baseline" "$tick_size")" ||
-                    return 1
-            fi
-            printf -v "$output_variable" '%s' "$price"
-            return 0
-        fi
-        sleep 0.25
-    done
-    if [[ "$refresh_symbol" == "$symbol" ]] &&
-        $strict_primary_reference_pending; then
-        log "WARN: $refresh_symbol primary $strict_primary_reference_direction fill did not advance the live reference; using an interior-tick maintenance price after the full drain window"
-        read_live_refresh_price_into price "$refresh_symbol" || return 1
-        tick_size="$(jq -er \
-            --arg symbol "$refresh_symbol" \
-            '.[] | select(.symbol == $symbol) | .tickSize' \
-            <<<"$configured_instruments_json")" || return 1
-        price="$(soak_reference_transition_interior_price \
-            "$price" "$strict_primary_reference_baseline" "$tick_size")" ||
-            return 1
-        printf -v "$output_variable" '%s' "$price"
-        return 0
-    fi
-    log "ERROR: no fresh live reference is available for strict refresh symbol '$refresh_symbol'"
-    return 1
+    local output_variable="$1" refresh_symbol="$2" price
+    read_live_refresh_price_into price "$refresh_symbol" || return 1
+    printf -v "$output_variable" '%s' "$price"
 }
 
 wait_order_filled_into() {
@@ -1677,13 +1624,63 @@ record_submit_order_failure() {
     fi
 }
 
+record_primary_refresh_fill() {
+    local phase="$1" side="$2" price="$3" clordid="$4" latency="$5"
+    local timestamp direction seller buyer sell_clordid= buy_clordid= refresh_row
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+    if [[ "$side" == "Buy" ]]; then
+        direction=trading-buys
+        seller=market-maker-bot
+        buyer="$trading_user"
+        buy_clordid="$clordid"
+    else
+        direction=counterparty-buys
+        seller="$trading_user"
+        buyer=market-maker-bot
+        sell_clordid="$clordid"
+    fi
+    refresh_row="$(jq -cn \
+        --arg timestampUtc "$timestamp" \
+        --arg segment "$strict_refresh_segment" \
+        --arg phase "${phase}-primary-fill" \
+        --arg symbol "$symbol" \
+        --arg direction "$direction" \
+        --arg seller "$seller" \
+        --arg buyer "$buyer" \
+        --arg priceSource "primary-workload-limit" \
+        --argjson quantity "$quantity" \
+        --argjson price "$price" \
+        --arg sellClOrdId "$sell_clordid" \
+        --arg buyClOrdId "$buy_clordid" \
+        --argjson fillLatencySeconds "$latency" '
+          {
+            timestampUtc: $timestampUtc,
+            segment: $segment,
+            phase: $phase,
+            symbol: $symbol,
+            direction: $direction,
+            seller: $seller,
+            buyer: $buyer,
+            priceSource: $priceSource,
+            quantity: $quantity,
+            price: $price,
+            sellClOrdId: $sellClOrdId,
+            buyClOrdId: $buyClOrdId,
+            fillLatencySeconds: $fillLatencySeconds
+          }
+        ')" || return 1
+    printf '%s\n' "$refresh_row" >>"$strict_refresh_jsonl" || return 1
+    jq -r '[
+      .timestampUtc,.segment,.phase,.symbol,.direction,.seller,.buyer,
+      .priceSource,.quantity,.price,
+      .sellClOrdId,.buyClOrdId,.fillLatencySeconds
+    ] | @csv' <<<"$refresh_row" >>"$strict_refresh_csv" || return 1
+}
+
 submit_order() {
     local token_variable="$1" expiry_variable="$2" user="$3" password="$4" side="$5" price="$6" phase="$7"
-    local response="" http_status="" clordid="" latency request_body reference_baseline
+    local response="" http_status="" clordid="" latency request_body
     local submit_status=0
-    if [[ "$profile" == "pause-and-cancel" ]]; then
-        read_live_refresh_price_into reference_baseline "$symbol" || return 1
-    fi
     request_body="$(jq -cn         --arg symbol "$symbol"         --arg side "$side"         --argjson quantity "$quantity"         --argjson price "$price"         '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" ||
         return 1
     authed_json_request_with_status_into response http_status \
@@ -1720,20 +1717,10 @@ submit_order() {
 '         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$phase" "$symbol" "$user" "$side" "$clordid" "$latency"         >>"$workload_csv" || return 1
     expected_workload_sequence=$((10#$clordid + 1))
     if [[ "$profile" == "pause-and-cancel" ]]; then
+        record_primary_refresh_fill "$phase" "$side" "$price" "$clordid" "$latency" ||
+            return 1
         if [[ "$phase" == "accounting-bootstrap" ]]; then
-            if [[ "$side" == "Sell" ]]; then
-                strict_primary_reference_baseline="$reference_baseline"
-                strict_primary_reference_direction="$side"
-                strict_primary_reference_pending=true
-            else
-                strict_primary_reference_pending=false
-            fi
             strict_refresh_next_due=$((SECONDS + strict_refresh_interval_seconds))
-        else
-            strict_primary_reference_baseline="$reference_baseline"
-            strict_primary_reference_direction="$side"
-            strict_primary_reference_pending=true
-            strict_refresh_next_due=$SECONDS
         fi
     fi
 }
@@ -2271,7 +2258,6 @@ strict_refresh_cycle_count=0
 run_strict_refresh_cycle() {
     local phase="$1" segment="$2" price_mode="${3:-live}"
     local refresh_symbol refresh_quantity refresh_price configured_price price_source refresh_rows direction
-    local primary_reference_pending
     [[ "$profile" == "pause-and-cancel" ]] || return 0
     if ((strict_refresh_cycle_count % 2 == 0)); then
         direction=trading-buys
@@ -2281,17 +2267,12 @@ run_strict_refresh_cycle() {
     refresh_rows="$(jq -r '.[] | [.symbol,.quantity,.referencePrice] | @tsv' \
         <<<"$configured_instruments_json")" || return 1
     while IFS=$'\t' read -r refresh_symbol refresh_quantity configured_price; do
+        if [[ "$price_mode" == "live" && "$refresh_symbol" == "$symbol" ]]; then
+            continue
+        fi
         if [[ "$price_mode" == "live" ]]; then
-            primary_reference_pending="$strict_primary_reference_pending"
             resolve_live_refresh_price_into refresh_price "$refresh_symbol" || return 1
-            if [[ "$refresh_symbol" == "$symbol" ]]; then
-                strict_primary_reference_pending=false
-            fi
-            if [[ "$refresh_symbol" == "$symbol" && "$primary_reference_pending" == "true" ]]; then
-                price_source=trading-host-live-reference-interior-tick
-            else
-                price_source=trading-host-live-reference
-            fi
+            price_source=trading-host-live-reference
         else
             refresh_price="$configured_price"
             price_source=configured-reference
@@ -2912,6 +2893,7 @@ strict_freshness_report=null
 if [[ "$profile" == "pause-and-cancel" ]]; then
     strict_freshness_report="$(jq -n \
         --argjson configuredSymbols "$configured_symbols_json" \
+        --arg primarySymbol "$symbol" \
         --argjson maxReferenceAgeSeconds "$max_reference_age_seconds" \
         --argjson refreshIntervalSeconds "$strict_refresh_interval_seconds" \
         --argjson refreshMarginSeconds "$strict_refresh_margin_seconds" \
@@ -2919,6 +2901,7 @@ if [[ "$profile" == "pause-and-cancel" ]]; then
         --slurpfile metricSamples "$samples_jsonl" '
           {
             configuredSymbols: $configuredSymbols,
+            primarySymbol: $primarySymbol,
             maxReferenceAgeSeconds: $maxReferenceAgeSeconds,
             refreshIntervalSeconds: $refreshIntervalSeconds,
             refreshMarginSeconds: $refreshMarginSeconds,

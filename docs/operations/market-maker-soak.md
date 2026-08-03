@@ -147,32 +147,33 @@ samples. No external price generator or synthetic ER injector is introduced.
 This target-symbol workload remains independently recorded in `workload.csv`
 for cross-profile fill/P&L comparability.
 
+For `pause-and-cancel`, PETR4 primary fills are also recorded as strict-refresh
+evidence. Periodic synthetic crosses cover only VALE3 and ITUB4 while the bot
+is quoting; the initial and post-gap recovery rounds still cross all three
+symbols while no competing current-epoch quotes exist. Freshness evaluation
+therefore applies the synthetic gap bound to VALE3/ITUB4 and requires balanced
+primary fills plus fresh eligible telemetry for PETR4.
+
 The inventory profile first makes the bot long by 12 lots, records positive
 skew saturation, then reverses it through flat to 12 lots short and records
 negative saturation. The feed profile stops only the isolated `marketdata`
 service. Because strict mode cannot quote without a current-epoch reference,
 the helper crosses all three symbols before the initial quote assertion and
-continues deterministic same-price crosses for every configured symbol
-throughout warmup, pre-outage stabilization, and duration. These maintenance
-prints are recorded separately in `strict-refreshes.csv`/`.jsonl`; they do not
-replace or change the alternating PETR4 primary workload.
+continues deterministic same-price crosses for VALE3 and ITUB4 throughout
+warmup, pre-outage stabilization, and duration. These maintenance prints and
+the alternating PETR4 primary fills are recorded in
+`strict-refreshes.csv`/`.jsonl`.
 Before each periodic maintenance cross, the helper uses its isolated local
 diagnostics identity to read the existing trading-host live-reference endpoint
 and crosses at that live price, inside the bot spread. Initial and post-outage
 recovery crosses use the configured reference while strict quotes are absent.
-This prevents a stale configured price from consuming a bot quote after the
-primary PETR4 workload has moved the market. Refresh-cycle ownership alternates:
+This prevents a stale configured price from consuming a bot quote. Refresh-cycle ownership alternates:
 the trading identity buys one cycle and the counterparty buys the next. Both
 identities receive the configured sandbox deposit, so the refresh stream remains
 position- and cash-bounded over a multi-hour run.
-After a primary target fill, the helper allows one full telemetry cycle for
-the live reference to advance. It then moves the maintenance cross one tick
-toward the spread interior, away from the potentially stale quote on the fill
-side; if the primary print is not reference-eligible, it applies the same
-interior-tick rule to the stable live reference. Strict mode schedules the next
-all-symbol refresh before another primary target order, so target movement
-cannot starve the other configured symbols. The default margin combines one
-full telemetry cycle with the serial three-symbol execution budget; the
+PETR4 freshness is evidenced by successful primary fills in both directions
+plus eligible reference-age telemetry. The default margin combines one full
+telemetry cycle with the serial synthetic-refresh execution budget; the
 refresh interval is derived from the remaining `MaxReferenceAge` budget. The
 helper rejects configuration unless
 `refreshInterval + refreshMargin < MaxReferenceAge`.
@@ -258,9 +259,9 @@ Useful controls:
 | `SOAK_SAMPLE_INTERVAL_SECONDS` | `15` | Prometheus snapshot interval |
 | `SOAK_WORKLOAD_INTERVAL_SECONDS` | `1` | Delay after each completed order |
 | `MM_SOAK_MAX_REFERENCE_AGE` | `00:00:30` | Strict feed and P&L mark freshness bound (`HH:MM:SS`) |
-| `SOAK_STRICT_REFRESH_INTERVAL_SECONDS` | derived (`7`) | Start-to-next-cycle delay for all-symbol strict refresh trades |
+| `SOAK_STRICT_REFRESH_INTERVAL_SECONDS` | derived (`7`) | Start-to-next-cycle delay for VALE3/ITUB4 maintenance crosses |
 | `SOAK_STRICT_REFRESH_MARGIN_SECONDS` | telemetry cycle + cycle budget (`15`) | Required execution/sampling margin below `MaxReferenceAge` |
-| `SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS` | `5` | Budget for the serial three-symbol paired-cross cycle |
+| `SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS` | `5` | Budget for the serial synthetic paired-cross cycle |
 | `SOAK_OUTAGE_SECONDS` | `20` | Feed hold-down after cancellation proof |
 | `SOAK_RECOVERY_TIMEOUT_SECONDS` | `120` | Cancellation, reconnect hold, and fresh-recovery deadline |
 | `SOAK_RECOVERY_CROSS_ATTEMPTS` | `3` | Recorded post-gap crosses per symbol |

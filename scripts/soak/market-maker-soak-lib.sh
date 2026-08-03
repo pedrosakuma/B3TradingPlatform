@@ -66,26 +66,6 @@ soak_suite_compatibility_workload() {
     ' "$1"
 }
 
-soak_reference_transition_interior_price() {
-    local current="$1" previous="$2" tick="$3"
-    awk -v current="$current" -v previous="$previous" -v tick="$tick" '
-      BEGIN {
-        if (tick <= 0) exit 2
-        low = current < previous ? current : previous
-        high = current > previous ? current : previous
-        if (high - low <= tick) {
-          printf "%.8f\n", current
-          exit
-        }
-        candidate = int((((low + high) / 2) / tick) + 0.5) * tick
-        if (candidate <= low) candidate = low + tick
-        if (candidate >= high) candidate = high - tick
-        if (candidate <= low || candidate >= high) candidate = current
-        printf "%.8f\n", candidate
-      }
-    '
-}
-
 soak_conservative_profile_funding_bound() {
     local profile="$1"
     awk \
@@ -458,6 +438,7 @@ soak_evaluate_strict_freshness() {
       ($evidence.configuredSymbols // []) as $symbols |
       ($evidence.refreshes // []) as $refreshes |
       ($evidence.metricSamples // []) as $samples |
+      ($evidence.primarySymbol // "") as $primarySymbol |
       ($evidence.maxReferenceAgeSeconds // 0) as $maxAge |
       ($evidence.refreshIntervalSeconds // 0) as $interval |
       ($evidence.refreshMarginSeconds // 0) as $margin |
@@ -508,7 +489,11 @@ soak_evaluate_strict_freshness() {
             ["pre-outage","post-recovery"][] as $segment |
             ([
               $refreshes[] |
-              select(.symbol == $symbol and .segment == $segment)
+              select(.symbol == $symbol and .segment == $segment) |
+              select(
+                $symbol != $primarySymbol or
+                .priceSource == "primary-workload-limit"
+              )
             ]) as $segmentRows |
             ($segmentRows | map(.timestampUtc | fromdateiso8601) | sort) as $times |
             ([
@@ -554,15 +539,27 @@ soak_evaluate_strict_freshness() {
               passed: (
                 ($times | length) > 0 and
                 ($windowTimes | length) > 0 and
-                ($gaps | length) > 0 and
-                ($gaps | max) <= ($interval + $margin) and
-                ($gaps | max) < $maxAge and
+                (
+                  $symbol == $primarySymbol or
+                  (
+                    ($gaps | length) > 0 and
+                    ($gaps | max) <= ($interval + $margin) and
+                    ($gaps | max) < $maxAge
+                  )
+                ) and
                 (([
                   ([$segmentRows[] | select(.direction == "trading-buys")] | length) -
                     ([$segmentRows[] | select(.direction == "counterparty-buys")] | length),
                   ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) -
                     ([$segmentRows[] | select(.direction == "trading-buys")] | length)
-                ] | max) <= 1)
+                ] | max) <= 1) and
+                (
+                  $symbol != $primarySymbol or
+                  (
+                    ([$segmentRows[] | select(.direction == "trading-buys")] | length) > 0 and
+                    ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) > 0
+                  )
+                )
               )
             }
           ]
@@ -598,9 +595,10 @@ soak_evaluate_strict_freshness() {
           refreshIntervalSeconds: $interval,
           refreshMarginSeconds: $margin,
           maximumPermittedObservedGapSeconds: ($interval + $margin),
+          primarySymbol: $primarySymbol,
           excludedIntentionalPhases: $excludedPhases,
           requirement:
-            "every configured symbol remains eligible and below MaxReferenceAge outside intentional outage/reconnect phases"
+            "the primary symbol has balanced workload fills in both active segments; synthetic-refresh symbols stay within the gap bound; every symbol remains eligible and below MaxReferenceAge outside intentional outage/reconnect phases"
         },
         refreshSummary: $refreshSummary,
         symbolFreshness: $symbolFreshness,

@@ -68,15 +68,6 @@ if soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00 9223372036854775
     exit 1
 fi
 
-[[ "$(soak_reference_transition_interior_price 29.99 30.05 0.01)" == "30.02000000" ]]
-[[ "$(soak_reference_transition_interior_price 30.05 30.00 0.01)" == "30.03000000" ]]
-[[ "$(soak_reference_transition_interior_price 30.01 30.00 0.01)" == "30.01000000" ]]
-[[ "$(soak_reference_transition_interior_price 30.00 30.00 0.01)" == "30.00000000" ]]
-if soak_reference_transition_interior_price 30.00 30.05 0 >/dev/null; then
-    echo "ERROR: non-positive tick was accepted for transition pricing" >&2
-    exit 1
-fi
-
 compatibility_workload_file="$(mktemp)"
 trap 'rm -f "$compatibility_workload_file"' EXIT
 cat >"$compatibility_workload_file" <<'EOF'
@@ -297,6 +288,22 @@ accelerated_freshness="$(jq -n '
 accelerated_freshness_report="$(soak_evaluate_strict_freshness <<<"$accelerated_freshness")"
 [[ "$(jq -r '.passed' <<<"$accelerated_freshness_report")" == "true" ]]
 [[ "$(jq -r '.refreshSummary | length' <<<"$accelerated_freshness_report")" == "3" ]]
+primary_freshness="$(jq '
+  .primarySymbol = "PETR4" |
+  .refreshes |= map(
+    if .symbol == "PETR4" then .priceSource = "primary-workload-limit"
+    else .priceSource = "trading-host-live-reference"
+    end
+  )
+' <<<"$accelerated_freshness")"
+[[ "$(soak_evaluate_strict_freshness <<<"$primary_freshness" | jq -r '.passed')" == "true" ]]
+configured_primary_only="$(jq '
+  .refreshes |= map(
+    if .symbol == "PETR4" then .priceSource = "configured-reference"
+    else . end
+  )
+' <<<"$primary_freshness")"
+[[ "$(soak_evaluate_strict_freshness <<<"$configured_primary_only" | jq -r '.passed')" == "false" ]]
 unbounded_direction="$(jq '
   .refreshes |= map(
     if .segment == "pre-outage" then .direction = "trading-buys" else . end
