@@ -2037,7 +2037,8 @@ mandatory_metric_requirements() {
 }
 
 record_metric_presence() {
-    local phase="$1" timestamp="$2" body="$3" requirements report rows_csv
+    local phase="$1" timestamp="$2" body="$3" persist_failure="${4:-true}"
+    local requirements report rows_csv
     requirements="$(mandatory_metric_requirements "$phase")" || return 1
     report="$(jq -c \
         --arg timestampUtc "$timestamp" \
@@ -2079,21 +2080,26 @@ record_metric_presence() {
         }
       ]
     ' <<<"$body")" || return 1
+    if ! jq -e 'all(.[]; .present)' >/dev/null <<<"$report"; then
+        [[ "$persist_failure" == "true" ]] || return 2
+        jq -c '.[]' <<<"$report" >>"$metric_presence_jsonl" || return 1
+        rows_csv="$(jq -r '.[] |
+          [.timestampUtc,.phase,.metric,(.symbol // ""),.required,.present,.seriesCount,(.value // "")] |
+          @csv' <<<"$report")" || return 1
+        printf '%s\n' "$rows_csv" >>"$metric_presence_csv" || return 1
+        printf '%s\n' "$report" >"${artifacts_dir}/metric-presence-error.json" || return 1
+        log "ERROR: mandatory metric series missing in phase '$phase': $(jq -c '[.[] | select(.present | not) | {metric,symbol}]' <<<"$report")"
+        return 1
+    fi
     jq -c '.[]' <<<"$report" >>"$metric_presence_jsonl" || return 1
     rows_csv="$(jq -r '.[] |
       [.timestampUtc,.phase,.metric,(.symbol // ""),.required,.present,.seriesCount,(.value // "")] |
       @csv' <<<"$report")" || return 1
     printf '%s\n' "$rows_csv" >>"$metric_presence_csv" || return 1
-    if ! jq -e 'all(.[]; .present)' >/dev/null <<<"$report"; then
-        printf '%s\n' "$report" >"${artifacts_dir}/metric-presence-error.json" || return 1
-        log "ERROR: mandatory metric series missing in phase '$phase': $(jq -c '[.[] | select(.present | not) | {metric,symbol}]' <<<"$report")"
-        return 1
-    fi
 }
 
 capture_metrics() {
-    local phase="$1" timestamp body started normalized csv_rows current_accounting
-    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+    local phase="$1" timestamp body started presence_status normalized csv_rows current_accounting
     capture_runtime_state "$phase" || return 1
     current_accounting="$(current_accounting_period)" || return 1
     if [[ -z "$current_accounting" ]]; then
@@ -2106,20 +2112,28 @@ capture_metrics() {
     fi
     started=$SECONDS
     while true; do
+        timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
         body="$(collect_all_metrics)" || {
             log "ERROR: failed to collect mandatory market-maker telemetry for phase '$phase'"
             return 1
         }
         if jq -e '(.data.result | length) > 0' >/dev/null <<<"$body"; then
+            presence_status=0
+            record_metric_presence "$phase" "$timestamp" "$body" false ||
+                presence_status=$?
+            if ((presence_status == 0)); then
+                break
+            fi
+            if ((presence_status != 2)); then
+                return "$presence_status"
+            fi
+        fi
+        if ((SECONDS - started >= full_telemetry_cycle_seconds)); then
+            record_metric_presence "$phase" "$timestamp" "$body" true || return 1
             break
         fi
-        (( SECONDS - started < 30 )) || {
-            log "ERROR: no market-maker metric series were available for phase '$phase'"
-            return 1
-        }
         sleep 1
     done
-    record_metric_presence "$phase" "$timestamp" "$body" || return 1
     if ! normalized="$(jq -c \
       --arg timestamp "$timestamp" \
       --arg phase "$phase" \

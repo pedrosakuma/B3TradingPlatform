@@ -234,7 +234,9 @@ export SOAK_MARKET_MAKER_BOT_IMAGE="b3tp-719-market-maker-bot:${image_tag}"
 export SOAK_ALERT_RECEIVER_IMAGE="b3tp-719-alert-receiver:${image_tag}"
 
 # The suite runner clean-builds baseline, reuses the pinned images for later
-# profiles, and exits immediately on the first non-zero profile result.
+# profiles, and exits immediately on the first non-zero profile result. When
+# explicit image tags are omitted, it derives one baseline tag set from the
+# suite ID and keeps that set for every profile.
 SOAK_SUITE_ID="$suite_id" scripts/soak/run-market-maker-soak-suite.sh
 ```
 

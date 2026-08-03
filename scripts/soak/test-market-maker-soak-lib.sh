@@ -223,7 +223,10 @@ while (($#)); do
         shift
     fi
 done
-printf '%s:%s\n' "$profile" "$mode" >>"$SOAK_SUITE_TEST_LOG"
+printf '%s:%s:%s:%s:%s:%s\n' \
+    "$profile" "$mode" "$SOAK_BUILD_IMAGES" "$SOAK_TRADING_IMAGE" \
+    "$SOAK_MARKET_MAKER_BOT_IMAGE" "$SOAK_ALERT_RECEIVER_IMAGE" \
+    >>"$SOAK_SUITE_TEST_LOG"
 printf 'stdout:%s\n' "$profile"
 printf 'stderr:%s\n' "$profile" >&2
 [[ "$profile" != "inventory-skew" ]] || exit 23
@@ -241,7 +244,7 @@ if [[ "$suite_status" != "23" ]]; then
     exit 1
 fi
 [[ "$(cat "$suite_test_root/calls.log")" == \
-    $'baseline:build\ninventory-skew:no-build' ]]
+    $'baseline:build:true:suite-control-flow-test-baseline-trading-host:dev:suite-control-flow-test-baseline-market-maker-bot:dev:suite-control-flow-test-baseline-alert-receiver:dev\ninventory-skew:no-build:true:suite-control-flow-test-baseline-trading-host:dev:suite-control-flow-test-baseline-market-maker-bot:dev:suite-control-flow-test-baseline-alert-receiver:dev' ]]
 grep -Fq 'stdout:inventory-skew' "$suite_test_root/suite/suite-run.log"
 grep -Fq 'stderr:inventory-skew' "$suite_test_root/suite/suite-run.log"
 grep -Fq 'finished profile=inventory-skew exit=23' \
