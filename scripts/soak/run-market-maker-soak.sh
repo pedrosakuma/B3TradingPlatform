@@ -858,6 +858,7 @@ jq -n \
     --argjson quantity "$quantity" \
     --argjson marketableBuyPrice "$marketable_buy_price" \
     --argjson marketableSellPrice "$marketable_sell_price" \
+    --argjson marketablePriceExtraTicks "$marketable_price_extra_ticks" \
     --argjson referenceCrossPrice "$reference_cross_price" \
     --argjson depositAmount "$deposit_amount" \
     --argjson counterpartyDepositAmount "$counterparty_deposit_amount" \
@@ -913,6 +914,7 @@ jq -n \
           quantity: $quantity,
           marketableBuyPrice: $marketableBuyPrice,
           marketableSellPrice: $marketableSellPrice,
+          marketablePriceExtraTicks: $marketablePriceExtraTicks,
           intervalSeconds: $workloadIntervalSeconds,
           evidenceArtifact: "workload.csv"
         },
