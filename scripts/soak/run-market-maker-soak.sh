@@ -597,6 +597,7 @@ readonly samples_csv="${artifacts_dir}/samples.csv"
 readonly metric_presence_jsonl="${artifacts_dir}/metric-presence.jsonl"
 readonly metric_presence_csv="${artifacts_dir}/metric-presence.csv"
 readonly workload_csv="${artifacts_dir}/workload.csv"
+readonly submit_retries_jsonl="${artifacts_dir}/submit-retries.jsonl"
 readonly strict_refresh_jsonl="${artifacts_dir}/strict-refreshes.jsonl"
 readonly strict_refresh_csv="${artifacts_dir}/strict-refreshes.csv"
 readonly runtime_jsonl="${artifacts_dir}/runtime.jsonl"
@@ -1399,14 +1400,14 @@ authed_json_request_with_status_into() {
     local response_variable="$1" status_variable="$2"
     local method="$3" url="$4" token_variable="$5" expiry_variable="$6"
     local user="$7" password="$8" body_variable="$9"
-    local token envelope idempotency_key_variable="${10:-}"
+    local token envelope idempotency_key_variable="${10:-}" attempts_variable="${11:-}"
     refresh_session_token_if_due \
         "$token_variable" "$expiry_variable" "$user" "$password" || return 1
     token="${!token_variable}"
     envelope="$(soak_curl_json_request_with_status \
         "$method" "$url" token "$body_variable" "$idempotency_key_variable")" || return 1
     soak_curl_status_envelope_into \
-        "$response_variable" "$status_variable" "$envelope"
+        "$response_variable" "$status_variable" "$envelope" "$attempts_variable"
 }
 
 set_session_token trading_token trading_token_expires_at "$trading_user" "$trading_password"
@@ -1680,6 +1681,7 @@ record_primary_refresh_fill() {
 submit_order() {
     local token_variable="$1" expiry_variable="$2" user="$3" password="$4" side="$5" price="$6" phase="$7"
     local response="" http_status="" clordid="" latency request_body idempotency_key
+    local submit_attempts=0
     local submit_status=0
     idempotency_key="soak-${run_id}-${user}-${expected_workload_sequence}"
     request_body="$(jq -cn         --arg symbol "$symbol"         --arg side "$side"         --argjson quantity "$quantity"         --argjson price "$price"         '{symbol:$symbol,side:$side,type:"Limit",quantity:$quantity,price:$price}')" ||
@@ -1687,13 +1689,32 @@ submit_order() {
     authed_json_request_with_status_into response http_status \
         POST "${base_url}/api/orders" \
         "$token_variable" "$expiry_variable" "$user" "$password" request_body \
-        idempotency_key ||
+        idempotency_key submit_attempts ||
         submit_status=$?
     if ((submit_status != 0)); then
         record_submit_order_failure \
             http-post "$submit_status" "$http_status" "$response" \
             "$phase" "$side" "$price"
         return "$submit_status"
+    fi
+    if ((submit_attempts > 1)); then
+        jq -cn \
+            --arg timestampUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg profile "$profile" \
+            --arg phase "$phase" \
+            --arg side "$side" \
+            --argjson expectedSequence "$expected_workload_sequence" \
+            --argjson attempts "$submit_attempts" \
+            --arg replayed "$(jq -r '.replayed // false' <<<"$response")" \
+            '{
+              timestampUtc:$timestampUtc,
+              profile:$profile,
+              phase:$phase,
+              side:$side,
+              expectedSequence:$expectedSequence,
+              attempts:$attempts,
+              replayed:($replayed == "true")
+            }' >>"$submit_retries_jsonl" || return 1
     fi
     [[ "$(jq -r '.status // ""' <<<"$response")" != "Rejected" ]] || {
         record_submit_order_failure \

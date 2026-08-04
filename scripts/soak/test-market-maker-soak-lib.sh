@@ -189,6 +189,7 @@ idempotent_status_envelope="$(SOAK_CURL_BIN=mock_idempotent_status_curl \
     soak_curl_json_request_with_status POST https://example.invalid \
         status_test_token status_test_body idempotency_key)"
 [[ "$(jq -r '.curlExit' <<<"$idempotent_status_envelope")" == "0" ]]
+[[ "$(jq -r '.curlAttempts' <<<"$idempotent_status_envelope")" == "1" ]]
 [[ "$(jq -r '.httpStatus' <<<"$idempotent_status_envelope")" == "202" ]]
 [[ "$(jq -r '.body | fromjson | .replayed' <<<"$idempotent_status_envelope")" == "true" ]]
 status_retry_count_file="${TMPDIR:-/tmp}/b3tp-soak-retry-count-$$"
@@ -214,6 +215,7 @@ transport_retry_envelope="$(SOAK_CURL_BIN=mock_transport_retry_curl \
         status_test_token status_test_body idempotency_key)"
 [[ "$(cat "$status_retry_count_file")" == "2" ]]
 [[ "$(jq -r '.curlExit' <<<"$transport_retry_envelope")" == "0" ]]
+[[ "$(jq -r '.curlAttempts' <<<"$transport_retry_envelope")" == "2" ]]
 [[ "$(jq -r '.httpStatus' <<<"$transport_retry_envelope")" == "202" ]]
 rm -f "$status_retry_count_file"
 status_body=""
@@ -352,6 +354,41 @@ unbounded_direction="$(jq '
   )
 ' <<<"$accelerated_freshness")"
 [[ "$(soak_evaluate_strict_freshness <<<"$unbounded_direction" | jq -r '.passed')" == "false" ]]
+
+delayed_refresh_confirmation="$(jq '
+  .refreshes |= map(
+    if .segment == "post-recovery" and
+       (.symbol == "VALE3" or .symbol == "ITUB4") and
+       .timestampUtc == "2026-07-24T00:00:23Z"
+    then .timestampUtc = "2026-07-24T00:00:30Z"
+    else . end
+  )
+' <<<"$accelerated_freshness")"
+delayed_refresh_report="$(soak_evaluate_strict_freshness <<<"$delayed_refresh_confirmation")"
+[[ "$(jq -r '.passed' <<<"$delayed_refresh_report")" == "true" ]]
+[[ "$(jq '[.refreshSummary[] | select(.symbol != "PETR4") |
+    .segments[] | select(.segment == "post-recovery") |
+    .recordedEvidenceMaxGapSeconds] | max > 9' \
+    <<<"$delayed_refresh_report")" == "true" ]]
+[[ "$(jq '[.refreshSummary[] | select(.symbol != "PETR4") |
+    .segments[] | select(.segment == "post-recovery") |
+    .maxGapSeconds] | max <= 9' <<<"$delayed_refresh_report")" == "true" ]]
+single_direction_with_fresh_telemetry="$(jq '
+  .refreshes |= map(select(
+    .symbol == "PETR4" or .direction == "trading-buys"
+  ))
+' <<<"$accelerated_freshness")"
+[[ "$(soak_evaluate_strict_freshness \
+    <<<"$single_direction_with_fresh_telemetry" | jq -r '.passed')" == "false" ]]
+negative_reference_age="$(jq '
+  .metricSamples |= map(
+    if .metric == "bot_market_data_reference_age_seconds"
+    then .value = -1
+    else . end
+  )
+' <<<"$accelerated_freshness")"
+[[ "$(soak_evaluate_strict_freshness \
+    <<<"$negative_reference_age" | jq -r '.passed')" == "false" ]]
 
 stopped_refresh="$(jq '
   .refreshes |= map(select(

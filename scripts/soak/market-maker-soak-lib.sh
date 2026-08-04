@@ -225,7 +225,7 @@ soak_curl_json_request_with_status() {
             echo "ERROR: refusing to launch curl with credentials present in its child environment" >&2
             return 1
         fi
-        for attempt in 1 2 3; do
+        for attempt in 1 2; do
             [[ -z "$token" ]] || exec 3<<<"Authorization: Bearer $token"
             [[ -z "$body" ]] || exec 4<<<"$body"
             [[ -z "$idempotency_key_value" ]] ||
@@ -234,7 +234,7 @@ soak_curl_json_request_with_status() {
             curl_output="$("$curl_bin" "${arguments[@]}" \
                 --write-out $'\n%{http_code}' "$url")" || curl_exit=$?
             ((curl_exit != 0)) || break
-            [[ -n "$idempotency_key_value" && "$attempt" -lt 3 ]] || break
+            [[ -n "$idempotency_key_value" && "$attempt" -lt 2 ]] || break
             sleep 1
         done
         http_status="${curl_output##*$'\n'}"
@@ -245,20 +245,25 @@ soak_curl_json_request_with_status() {
         }
         jq -cn \
             --argjson curlExit "$curl_exit" \
+            --argjson curlAttempts "$attempt" \
             --arg httpStatus "$http_status" \
             --arg body "$response_body" \
-            '{curlExit:$curlExit,httpStatus:$httpStatus,body:$body}'
+            '{curlExit:$curlExit,curlAttempts:$curlAttempts,httpStatus:$httpStatus,body:$body}'
     )
 }
 
 soak_curl_status_envelope_into() {
     local response_variable="$1" status_variable="$2" envelope="$3"
-    local parsed_curl_exit parsed_http_status parsed_response_body
+    local attempts_variable="${4:-}"
+    local parsed_curl_exit parsed_curl_attempts parsed_http_status parsed_response_body
     parsed_curl_exit="$(jq -er '.curlExit' <<<"$envelope")" || return 1
+    parsed_curl_attempts="$(jq -er '.curlAttempts // 1' <<<"$envelope")" || return 1
     parsed_http_status="$(jq -er '.httpStatus' <<<"$envelope")" || return 1
     parsed_response_body="$(jq -r '.body' <<<"$envelope")" || return 1
     printf -v "$response_variable" '%s' "$parsed_response_body"
     printf -v "$status_variable" '%s' "$parsed_http_status"
+    [[ -z "$attempts_variable" ]] ||
+        printf -v "$attempts_variable" '%s' "$parsed_curl_attempts"
     ((parsed_curl_exit == 0)) || return "$parsed_curl_exit"
     [[ "$parsed_http_status" =~ ^[0-9]{3}$ ]] || return 1
     ((10#$parsed_http_status < 400)) || return 22
@@ -488,6 +493,7 @@ soak_evaluate_strict_freshness() {
           passed: (
             $eligible.value == 1 and
             ($ageRows | length) > 0 and
+            ($ageRows | map(.value) | min) >= 0 and
             ($ageRows | map(.value) | min) < $maxAge
           )
         }
@@ -522,15 +528,27 @@ soak_evaluate_strict_freshness() {
               select(.phase as $phase | segment_phases($segment) | index($phase)) |
               (.timestampUtc | fromdateiso8601)
             ] | sort) as $windowTimes |
+            ([
+              $observations[] |
+              select(.symbol == $symbol and .passed) |
+              select(.phase as $phase | segment_phases($segment) | index($phase)) |
+              ((.timestampUtc | fromdateiso8601) - .referenceAgeSeconds)
+            ] | sort | unique) as $observedReferenceTimes |
+            (($times + $observedReferenceTimes) | sort | unique) as $effectiveTimes |
             (
-              if ($times | length) == 0 or ($windowTimes | length) == 0 then []
+              if ($effectiveTimes | length) == 0 or ($windowTimes | length) == 0 then []
               else
-                ([range(1; $times | length) |
-                  $times[.] - $times[. - 1]]) +
-                [([0, ($times[0] - $windowTimes[0])] | max)] +
-                [([0, (($windowTimes | last) - ($times | last))] | max)]
+                ([range(1; $effectiveTimes | length) |
+                  $effectiveTimes[.] - $effectiveTimes[. - 1]]) +
+                [([0, ($effectiveTimes[0] - $windowTimes[0])] | max)] +
+                [([0, (($windowTimes | last) - ($effectiveTimes | last))] | max)]
               end
             ) as $gaps |
+            (
+              if ($times | length) < 2 then []
+              else [range(1; $times | length) | $times[.] - $times[. - 1]]
+              end
+            ) as $recordedGaps |
             {
               segment: $segment,
               count: ($times | length),
@@ -556,6 +574,10 @@ soak_evaluate_strict_freshness() {
               maxGapSeconds: (
                 if ($gaps | length) == 0 then null else ($gaps | max) end
               ),
+              recordedEvidenceMaxGapSeconds: (
+                if ($recordedGaps | length) == 0 then null else ($recordedGaps | max) end
+              ),
+              observedReferenceTimestampCount: ($observedReferenceTimes | length),
               passed: (
                 ($times | length) > 0 and
                 ($windowTimes | length) > 0 and
@@ -573,8 +595,10 @@ soak_evaluate_strict_freshness() {
                   ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) -
                     ([$segmentRows[] | select(.direction == "trading-buys")] | length)
                 ] | max) <= 1) and
+                ([$segmentRows[] | select(.direction == "trading-buys")] | length) > 0 and
+                ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) > 0 and
                 (
-                  $symbol != $primarySymbol or
+                    $symbol != $primarySymbol or
                   (
                     ([$segmentRows[] | select(.direction == "trading-buys")] | length) > 0 and
                     ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) > 0
@@ -618,7 +642,7 @@ soak_evaluate_strict_freshness() {
           primarySymbol: $primarySymbol,
           excludedIntentionalPhases: $excludedPhases,
           requirement:
-            "the primary symbol has balanced workload fills in both active segments; synthetic-refresh symbols stay within the gap bound; every symbol remains eligible and below MaxReferenceAge outside intentional outage/reconnect phases"
+            "the primary symbol has balanced workload fills in both active segments; synthetic-refresh symbols stay within the gap bound using fill evidence plus telemetry-derived reference timestamps; every symbol remains eligible and below MaxReferenceAge outside intentional outage/reconnect phases"
         },
         refreshSummary: $refreshSummary,
         symbolFreshness: $symbolFreshness,

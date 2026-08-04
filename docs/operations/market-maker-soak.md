@@ -145,8 +145,13 @@ Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
 Primary workload submits carry a deterministic `Idempotency-Key`; transport
-timeouts may retry only with that key, so a lost HTTP response cannot create a
-duplicate venue order.
+timeouts may retry once only with that key, so a lost HTTP response cannot
+create a duplicate venue order or block the strict-refresh loop for three full
+HTTP timeout windows. Recovered retries are recorded in `submit-retries.jsonl`.
+Strict-refresh gap evaluation combines completed-fill evidence with the
+reference timestamps implied by eligible runtime telemetry. This prevents a
+late HTTP confirmation from being mistaken for a stale market while retaining
+the fail-closed eligibility and `MaxReferenceAge` checks.
 This target-symbol workload remains independently recorded in `workload.csv`
 for cross-profile fill/P&L comparability.
 
