@@ -228,6 +228,7 @@ set -e
 [[ "$http_status" == "422" ]]
 [[ "$(jq -r '.code' <<<"$status_body")" == "cash_limit" ]]
 submit_failure_file="$ROOT/soak-artifacts/submit-failure-self-test-$$.jsonl"
+mkdir -p "$(dirname "$submit_failure_file")"
 submit_context='{"profile":"inventory-skew","phase":"duration","side":"Sell","quantity":100,"expectedSequence":3181}'
 soak_append_submit_failure \
     "$submit_failure_file" "2026-07-31T14:46:05Z" http-post \
