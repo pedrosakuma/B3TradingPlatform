@@ -125,39 +125,64 @@ The helper reuses the same real-stack sandbox seam as
 4. submit one-lot PETR4 marketable limits through `POST /api/orders`;
 5. wait for each order to fill against the bot before sending the next.
 
-Alternating `Buy @ 32.80` and `Sell @ 29.30` consumes the bot's own resting
-quotes. Each fill prints a real matching-engine trade into UMDF, moves the live
+The primary workload derives each actual order limit immediately before
+submission from a raw live reference whose `updatedUtc` age is strictly less
+than `MM_SOAK_MAX_REFERENCE_AGE`. The offset covers the configured half-spread,
+the target symbol's worst-case inventory skew, the configured maximum
+volatility additional half-spread when enabled, and
+`SOAK_MARKETABLE_PRICE_EXTRA_TICKS` of crossing margin. It validates the result
+against the effective percent/absolute collar returned by
+`/api/admin/risk/limits` and fails rather than submitting a non-marketable
+collar-bound order. It also fails explicitly when no fresh live reference is
+available after a raw cache entry has been observed. Before the first market
+data print, and only while the raw `.live` entry is missing rather than stale,
+`SOAK_MARKETABLE_BUY_PRICE` / `SOAK_MARKETABLE_SELL_PRICE` bootstrap that entry
+with an explicit warning. The profile process records the first valid primary
+live reference in persistent shell state; after that observation, missing,
+null, invalid, or stale raw values fail closed and cannot re-enable fallback
+after a reconnect. Buy derivation crosses only the predicted ask side; sell
+derivation crosses only the predicted bid side.
+Each fill prints a real matching-engine trade into UMDF, moves the live
 market-data reference, and gives the volatility estimator valid trade-to-trade
 samples. No external price generator or synthetic ER injector is introduced.
+Primary workload submits carry a deterministic `Idempotency-Key`; transport
+timeouts may retry once only with that key, so a lost HTTP response cannot
+create a duplicate venue order or block the strict-refresh loop for three full
+HTTP timeout windows. Recovered retries are recorded in `submit-retries.jsonl`.
+Strict-refresh gap evaluation combines completed-fill evidence with the
+reference timestamps implied by eligible runtime telemetry. This prevents a
+late HTTP confirmation from being mistaken for a stale market while retaining
+the fail-closed eligibility and `MaxReferenceAge` checks.
 This target-symbol workload remains independently recorded in `workload.csv`
 for cross-profile fill/P&L comparability.
+
+For `pause-and-cancel`, PETR4 primary fills are also recorded as strict-refresh
+evidence. Periodic synthetic crosses cover only VALE3 and ITUB4 while the bot
+is quoting; the initial and post-gap recovery rounds still cross all three
+symbols while no competing current-epoch quotes exist. Freshness evaluation
+therefore applies the synthetic gap bound to VALE3/ITUB4 and requires balanced
+primary fills plus fresh eligible telemetry for PETR4.
 
 The inventory profile first makes the bot long by 12 lots, records positive
 skew saturation, then reverses it through flat to 12 lots short and records
 negative saturation. The feed profile stops only the isolated `marketdata`
 service. Because strict mode cannot quote without a current-epoch reference,
 the helper crosses all three symbols before the initial quote assertion and
-continues deterministic same-price crosses for every configured symbol
-throughout warmup, pre-outage stabilization, and duration. These maintenance
-prints are recorded separately in `strict-refreshes.csv`/`.jsonl`; they do not
-replace or change the alternating PETR4 primary workload.
+continues deterministic same-price crosses for VALE3 and ITUB4 throughout
+warmup, pre-outage stabilization, and duration. These maintenance prints and
+the alternating PETR4 primary fills are recorded in
+`strict-refreshes.csv`/`.jsonl`.
 Before each periodic maintenance cross, the helper uses its isolated local
 diagnostics identity to read the existing trading-host live-reference endpoint
 and crosses at that live price, inside the bot spread. Initial and post-outage
 recovery crosses use the configured reference while strict quotes are absent.
-This prevents a stale configured price from consuming a bot quote after the
-primary PETR4 workload has moved the market. Refresh-cycle ownership alternates:
+This prevents a stale configured price from consuming a bot quote. Refresh-cycle ownership alternates:
 the trading identity buys one cycle and the counterparty buys the next. Both
 identities receive the configured sandbox deposit, so the refresh stream remains
 position- and cash-bounded over a multi-hour run.
-After a primary target fill, the helper allows one full telemetry cycle for
-the live reference to advance. It then moves the maintenance cross one tick
-toward the spread interior, away from the potentially stale quote on the fill
-side; if the primary print is not reference-eligible, it applies the same
-interior-tick rule to the stable live reference. Strict mode schedules the next
-all-symbol refresh before another primary target order, so target movement
-cannot starve the other configured symbols. The default margin combines one
-full telemetry cycle with the serial three-symbol execution budget; the
+PETR4 freshness is evidenced by successful primary fills in both directions
+plus eligible reference-age telemetry. The default margin combines one full
+telemetry cycle with the serial synthetic-refresh execution budget; the
 refresh interval is derived from the remaining `MaxReferenceAge` budget. The
 helper rejects configuration unless
 `refreshInterval + refreshMargin < MaxReferenceAge`.
@@ -210,6 +235,7 @@ export SOAK_DURATION_SECONDS=7200
 export SOAK_SAMPLE_INTERVAL_SECONDS=15
 export SOAK_WORKLOAD_INTERVAL_SECONDS=1
 export SOAK_OUTAGE_SECONDS=60
+export SOAK_DEPOSIT_AMOUNT=1250000.00
 image_tag="$(git rev-parse --short=12 HEAD)"
 suite_id="b3tp-719-${image_tag}-01"
 export SOAK_SUITE_MANIFEST="soak-artifacts/${suite_id}/suite-manifest.json"
@@ -217,24 +243,11 @@ export SOAK_TRADING_IMAGE="b3tp-719-trading-host:${image_tag}"
 export SOAK_MARKET_MAKER_BOT_IMAGE="b3tp-719-market-maker-bot:${image_tag}"
 export SOAK_ALERT_RECEIVER_IMAGE="b3tp-719-alert-receiver:${image_tag}"
 
-# The manifest-creating run must build the exact clean checkout. Do not add
-# --no-build here; the helper rejects it while the suite has no accepted runs.
-SOAK_PROJECT_NAME=b3tp-719-baseline-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/baseline" \
-  scripts/soak/run-market-maker-soak.sh --profile baseline
-
-# Reuse the same images. The helper compares actual sha256 image IDs, not tags.
-SOAK_PROJECT_NAME=b3tp-719-inventory-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/inventory-skew" \
-  scripts/soak/run-market-maker-soak.sh --profile inventory-skew --no-build
-
-SOAK_PROJECT_NAME=b3tp-719-volatility-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/volatility-spread" \
-  scripts/soak/run-market-maker-soak.sh --profile volatility-spread --no-build
-
-SOAK_PROJECT_NAME=b3tp-719-feed-01 \
-SOAK_ARTIFACTS_DIR="soak-artifacts/${suite_id}/pause-and-cancel" \
-  scripts/soak/run-market-maker-soak.sh --profile pause-and-cancel --no-build
+# The suite runner clean-builds baseline, reuses the pinned images for later
+# profiles, and exits immediately on the first non-zero profile result. When
+# explicit image tags are omitted, it derives one baseline tag set from the
+# suite ID and keeps that set for every profile.
+SOAK_SUITE_ID="$suite_id" scripts/soak/run-market-maker-soak-suite.sh
 ```
 
 The configured tags are labels only and may be mutable. The first
@@ -263,9 +276,9 @@ Useful controls:
 | `SOAK_SAMPLE_INTERVAL_SECONDS` | `15` | Prometheus snapshot interval |
 | `SOAK_WORKLOAD_INTERVAL_SECONDS` | `1` | Delay after each completed order |
 | `MM_SOAK_MAX_REFERENCE_AGE` | `00:00:30` | Strict feed and P&L mark freshness bound (`HH:MM:SS`) |
-| `SOAK_STRICT_REFRESH_INTERVAL_SECONDS` | derived (`7`) | Start-to-next-cycle delay for all-symbol strict refresh trades |
+| `SOAK_STRICT_REFRESH_INTERVAL_SECONDS` | derived (`7`) | Start-to-next-cycle delay for VALE3/ITUB4 maintenance crosses |
 | `SOAK_STRICT_REFRESH_MARGIN_SECONDS` | telemetry cycle + cycle budget (`15`) | Required execution/sampling margin below `MaxReferenceAge` |
-| `SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS` | `5` | Budget for the serial three-symbol paired-cross cycle |
+| `SOAK_STRICT_REFRESH_CYCLE_BUDGET_SECONDS` | `5` | Budget for the serial synthetic paired-cross cycle |
 | `SOAK_OUTAGE_SECONDS` | `20` | Feed hold-down after cancellation proof |
 | `SOAK_RECOVERY_TIMEOUT_SECONDS` | `120` | Cancellation, reconnect hold, and fresh-recovery deadline |
 | `SOAK_RECOVERY_CROSS_ATTEMPTS` | `3` | Recorded post-gap crosses per symbol |
@@ -276,8 +289,10 @@ Useful controls:
 | `SOAK_PRE_OUTAGE_STABILIZATION_TIMEOUT_SECONDS` | derived (`60`) | Deadline to obtain stable pre-outage submissions |
 | `SOAK_INVENTORY_BIAS_LOTS` | `12` | Long/short reversal magnitude |
 | `SOAK_QUANTITY` | `100` | PETR4 workload order quantity |
-| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Marketable workload buy limit |
-| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Marketable workload sell limit |
+| `SOAK_DEPOSIT_AMOUNT` | `1250000.00` | Per-workload-user soak funding, sized for the conservative four-profile bound |
+| `SOAK_MARKETABLE_BUY_PRICE` | `32.80` | Initial bootstrap buy used only while raw `.live` is missing, never stale |
+| `SOAK_MARKETABLE_SELL_PRICE` | `29.30` | Initial bootstrap sell used only while raw `.live` is missing, never stale |
+| `SOAK_MARKETABLE_PRICE_EXTRA_TICKS` | `1` | Crossing margin beyond configured/adaptive half-spread + worst-case skew |
 | `SOAK_REFERENCE_CROSS_PRICE` | `30.00` | PETR4 feed-recovery cross |
 | `SOAK_DEPOSIT_AMOUNT` | `100000.00` | Trading-user sandbox deposit |
 | `SOAK_COUNTERPARTY_DEPOSIT_AMOUNT` | same as trading user (`100000.00`) | Counterparty sandbox deposit for alternating refresh ownership |
@@ -585,6 +600,9 @@ The helper writes only under ignored `soak-artifacts/`:
 - `metric-presence.csv` / `metric-presence.jsonl` — mandatory-series presence/value evidence;
 - `outage-telemetry.json` — strict-profile phase boundaries, counters, submissions, eligibility, and open orders;
 - `workload.csv` — order/fill latency evidence;
+- `submit-failures.jsonl` — secret-redacted failed order POST status/body,
+  resolved reference/limit/collar context, phase, side, quantity, and expected
+  workload sequence;
 - `strict-refreshes.csv` / `strict-refreshes.jsonl` — per-symbol maintenance
   trade timestamps, counts, alternating direction/identities, price source,
   prices, quantities, and both end-client ClOrdIDs;
@@ -601,6 +619,9 @@ The shared `suite-manifest.json` pins the first profile's compatibility object
 and adds one accepted run per profile. Neither the rendered projection nor any
 other artifact contains passwords, tokens, signing keys, password hashes,
 salts, or the bot access key.
+The suite runner additionally writes `suite-run.log` beside the shared
+manifest, preserving profile stdout/stderr and the original profile exit code
+even when `set -e` stops orchestration.
 
 Use this summary shape (generated values only; never fabricate results):
 

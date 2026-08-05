@@ -399,6 +399,7 @@ jobs:
           ALERT_SMOKE_RUN_ID: validate
           MM_SOAK_COUNTERPARTY_USER: soak-counterparty
           MM_SOAK_ADMIN_USER: soak-admin
+          MM_SOAK_MAX_DEPOSIT_AMOUNT: 1000000000
         run: |
           docker compose -f docker/docker-compose.yml config --quiet
           docker compose -f docker/docker-compose.yml -f docker/docker-compose.unavailable.yml config --quiet

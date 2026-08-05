@@ -35,6 +35,10 @@ services:
       - Trading__Auth__Users__8__Iterations=600000
       - Trading__Auth__Users__8__Role=admin
       - Trading__Auth__Users__8__Firm=FIRM01
+      # Acceptance workloads intentionally cross the spread for >=2h. Keep
+      # this soak-only cap aligned with the helper's deterministic funding
+      # seed; the global sandbox defaults and total-balance cap are unchanged.
+      - Trading__Sandbox__MaxDepositAmount=${MM_SOAK_MAX_DEPOSIT_AMOUNT:?Set MM_SOAK_MAX_DEPOSIT_AMOUNT}
       # The feed-recovery workload prints end-client crosses for all symbols.
       # Match the existing real-conformance sandbox policy; this is isolated
       # test-account configuration, not a market-maker strategy change. List

@@ -1,5 +1,153 @@
 #!/usr/bin/env bash
 
+readonly SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT="1250000.00"
+readonly SOAK_ACCEPTANCE_FUNDING_HEADROOM_PERCENT="25"
+
+soak_normalize_brl_amount() {
+    local value="$1" integer fraction
+    [[ "$value" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || return 2
+    integer="${value%%.*}"
+    if [[ "$value" == *.* ]]; then
+        fraction="${value#*.}"
+    else
+        fraction=""
+    fi
+    while [[ "${#integer}" -gt 1 && "$integer" == 0* ]]; do
+        integer="${integer#0}"
+    done
+    case "${#fraction}" in
+        0) fraction="00" ;;
+        1) fraction="${fraction}0" ;;
+    esac
+    [[ "$integer" != "0" || "$fraction" != "00" ]] || return 2
+    printf '%s.%s\n' "$integer" "$fraction"
+}
+
+soak_brl_amount_greater_than() {
+    local left_integer="${1%%.*}" right_integer="${2%%.*}"
+    if [[ "${#left_integer}" != "${#right_integer}" ]]; then
+        [[ "${#left_integer}" -gt "${#right_integer}" ]]
+    elif [[ "$left_integer" != "$right_integer" ]]; then
+        [[ "$left_integer" > "$right_integer" ]]
+    else
+        [[ "${1#*.}" > "${2#*.}" ]]
+    fi
+}
+
+soak_resolve_sandbox_max_deposit() {
+    local primary_deposit counterparty_deposit explicit_max="" required
+    primary_deposit="$(soak_normalize_brl_amount "$1")" || return 2
+    counterparty_deposit="$(soak_normalize_brl_amount "$2")" || return 2
+    if [[ -n "${3:-}" ]]; then
+        explicit_max="$(soak_normalize_brl_amount "$3")" || return 2
+    fi
+
+    required="$primary_deposit"
+    if soak_brl_amount_greater_than "$counterparty_deposit" "$primary_deposit"; then
+        required="$counterparty_deposit"
+    fi
+    if [[ -n "$explicit_max" ]]; then
+        if soak_brl_amount_greater_than "$required" "$explicit_max"; then
+            return 3
+        fi
+        printf '%s\n' "$explicit_max"
+    else
+        printf '%s\n' "$required"
+    fi
+}
+
+soak_suite_compatibility_workload() {
+    jq '
+      .workload
+      | .strictRefresh.configuredInstruments |=
+          map(del(.maxSkewTicks, .maxVolatilityAdditionalSpreadTicks))
+      | .recoveryCrosses |=
+          map(del(.maxSkewTicks, .maxVolatilityAdditionalSpreadTicks))
+    ' "$1"
+}
+
+soak_conservative_profile_funding_bound() {
+    local profile="$1"
+    awk \
+        -v profile="$profile" \
+        -v warmup=900 \
+        -v duration=7200 \
+        -v interval=1 \
+        -v quantity=100 \
+        -v bootstrap_price=32.80 \
+        -v tick=0.01 \
+        -v inventory_bias_lots=12 \
+        -v strict_refresh_interval=7 \
+        -v recovery_cross_attempts=3 \
+        -v headroom_percent="$SOAK_ACCEPTANCE_FUNDING_HEADROOM_PERCENT" '
+          function round_cent(value) {
+            return int(value * 100 + 0.500001) / 100
+          }
+          function fee(price, notional, brokerage) {
+            notional = price * quantity
+            brokerage = round_cent(notional * 5 / 10000)
+            if (brokerage < 2) brokerage = 2
+            return brokerage + round_cent(notional * 3.25 / 10000) + round_cent(notional * 2.75 / 10000)
+          }
+          function ceil(value) {
+            return value == int(value) ? value : int(value) + 1
+          }
+          BEGIN {
+            window_orders = int((warmup + duration) / interval)
+            run_buys = int((window_orders + 1) / 2)
+            run_sells = int(window_orders / 2)
+            setup_buys = 1
+            setup_sells = 1
+            net_quantity = 0
+            offset_ticks = 6
+
+            if (profile == "inventory-skew") {
+              setup_buys += inventory_bias_lots * 2
+              setup_sells += inventory_bias_lots
+              net_quantity = inventory_bias_lots * quantity
+              offset_ticks = 11
+            } else if (profile == "volatility-spread") {
+              offset_ticks = 26
+            } else if (profile != "baseline" && profile != "pause-and-cancel") {
+              exit 2
+            }
+
+            buys = setup_buys + run_buys
+            sells = setup_sells + run_sells
+            executions = buys + sells
+            offset = offset_ticks * tick
+            price = bootstrap_price
+            total_fees = 0
+            maximum_side = buys > sells ? buys : sells
+
+            # Isolated-venue upper path: every Buy advances the live price by
+            # the full marketable offset and every Sell executes at that level.
+            for (i = 0; i < maximum_side; i++) {
+              if (i < buys) {
+                if (i > 0) price += offset
+                total_fees += fee(price)
+              }
+              if (i < sells) total_fees += fee(price)
+            }
+
+            pairs = buys < sells ? buys : sells
+            pair_crossing_cost = pairs * 2 * offset * quantity
+            inventory_capital = net_quantity * price
+            subtotal = pair_crossing_cost + inventory_capital + total_fees
+
+            if (profile == "pause-and-cancel") {
+              strict_cycles = 1 + ceil((warmup + duration) / strict_refresh_interval) + recovery_cross_attempts
+              # Each end-client receives one fill per configured symbol per
+              # cycle; direction alternates but every execution pays fees.
+              subtotal += strict_cycles * (fee(price) + fee(70.00) + fee(32.00))
+            }
+
+            with_headroom = subtotal * (100 + headroom_percent) / 100
+            print ceil(with_headroom)
+          }
+        '
+}
+
 soak_environment_snapshot_is_secret_free() {
     set +x
     local snapshot_variable="$1"
@@ -44,6 +192,129 @@ soak_curl_json_request() {
         fi
         "$curl_bin" "${arguments[@]}" "$url"
     )
+}
+
+soak_curl_json_request_with_status() {
+    local method="$1" url="$2" token_variable="$3" body_variable="$4"
+    local idempotency_key_variable="${5:-}"
+    (
+        set +x
+        local token="${!token_variable-}" body="${!body_variable-}"
+        local idempotency_key_value=
+        [[ -z "$idempotency_key_variable" ]] ||
+            idempotency_key_value="${!idempotency_key_variable-}"
+        export -n token body idempotency_key_value
+        local curl_bin="${SOAK_CURL_BIN:-curl}"
+        local curl_output curl_exit=0 http_status response_body attempt
+        local -a arguments=(-sS --max-time 10 --request "$method")
+        local -a sensitive_variables=("$token_variable" "$body_variable")
+        if [[ -n "$token" ]]; then
+            exec 3<<<"Authorization: Bearer $token"
+            arguments+=(--header @/dev/fd/3)
+        fi
+        if [[ -n "$body" ]]; then
+            exec 4<<<"$body"
+            arguments+=(--header 'Content-Type: application/json' --data-binary @/dev/fd/4)
+        fi
+        if [[ -n "$idempotency_key_value" ]]; then
+            exec 5<<<"Idempotency-Key: $idempotency_key_value"
+            arguments+=(--header @/dev/fd/5)
+            sensitive_variables+=("$idempotency_key_variable")
+        fi
+        if ! soak_child_environment_is_secret_free "${sensitive_variables[@]}"; then
+            echo "ERROR: refusing to launch curl with credentials present in its child environment" >&2
+            return 1
+        fi
+        for attempt in 1 2; do
+            [[ -z "$token" ]] || exec 3<<<"Authorization: Bearer $token"
+            [[ -z "$body" ]] || exec 4<<<"$body"
+            [[ -z "$idempotency_key_value" ]] ||
+                exec 5<<<"Idempotency-Key: $idempotency_key_value"
+            curl_exit=0
+            curl_output="$("$curl_bin" "${arguments[@]}" \
+                --write-out $'\n%{http_code}' "$url")" || curl_exit=$?
+            ((curl_exit != 0)) || break
+            [[ -n "$idempotency_key_value" && "$attempt" -lt 2 ]] || break
+            sleep 1
+        done
+        http_status="${curl_output##*$'\n'}"
+        response_body="${curl_output%$'\n'*}"
+        [[ "$curl_output" == *$'\n'* ]] || {
+            http_status="000"
+            response_body="$curl_output"
+        }
+        jq -cn \
+            --argjson curlExit "$curl_exit" \
+            --argjson curlAttempts "$attempt" \
+            --arg httpStatus "$http_status" \
+            --arg body "$response_body" \
+            '{curlExit:$curlExit,curlAttempts:$curlAttempts,httpStatus:$httpStatus,body:$body}'
+    )
+}
+
+soak_curl_status_envelope_into() {
+    local response_variable="$1" status_variable="$2" envelope="$3"
+    local attempts_variable="${4:-}"
+    local parsed_curl_exit parsed_curl_attempts parsed_http_status parsed_response_body
+    parsed_curl_exit="$(jq -er '.curlExit' <<<"$envelope")" || return 1
+    parsed_curl_attempts="$(jq -er '.curlAttempts // 1' <<<"$envelope")" || return 1
+    parsed_http_status="$(jq -er '.httpStatus' <<<"$envelope")" || return 1
+    parsed_response_body="$(jq -r '.body' <<<"$envelope")" || return 1
+    printf -v "$response_variable" '%s' "$parsed_response_body"
+    printf -v "$status_variable" '%s' "$parsed_http_status"
+    [[ -z "$attempts_variable" ]] ||
+        printf -v "$attempts_variable" '%s' "$parsed_curl_attempts"
+    ((parsed_curl_exit == 0)) || return "$parsed_curl_exit"
+    [[ "$parsed_http_status" =~ ^[0-9]{3}$ ]] || return 1
+    ((10#$parsed_http_status < 400)) || return 22
+}
+
+soak_sanitize_response_body() {
+    local body="$1"
+    if jq -e . >/dev/null 2>&1 <<<"$body"; then
+        jq -c '
+          walk(
+            if type == "object" then
+              with_entries(
+                if (.key | test("token|password|secret|authorization"; "i"))
+                then .value = "[REDACTED]"
+                else .
+                end
+              )
+            else .
+            end
+          )
+        ' <<<"$body"
+    else
+        jq -cn --arg raw "$body" '{raw:$raw}'
+    fi
+}
+
+soak_append_submit_failure() {
+    local output_file="$1" timestamp="$2" stage="$3" command_status="$4"
+    local http_status="$5" response_body="$6" context_json="$7"
+    local sanitized_response
+    sanitized_response="$(soak_sanitize_response_body "$response_body")" || return 1
+    jq -cn \
+        --arg timestampUtc "$timestamp" \
+        --arg stage "$stage" \
+        --argjson commandStatus "$command_status" \
+        --arg httpStatus "$http_status" \
+        --argjson responseBody "$sanitized_response" \
+        --argjson requestContext "$context_json" \
+        '{
+          timestampUtc:$timestampUtc,
+          stage:$stage,
+          commandStatus:$commandStatus,
+          httpStatus:(
+            if $httpStatus == "" or $httpStatus == "000"
+            then null
+            else ($httpStatus | tonumber)
+            end
+          ),
+          responseBody:$responseBody,
+          requestContext:$requestContext
+        }' >>"$output_file"
 }
 
 soak_metric_sample() {
@@ -111,12 +382,88 @@ soak_validate_strict_refresh_timing() {
         ((interval_seconds + margin_seconds < max_age_seconds))
 }
 
+soak_resolve_marketable_limit() {
+    local side="$1" reference="$2" tick="$3" spread_ticks="$4"
+    local skew_ticks="$5" volatility_ticks="$6" extra_ticks="$7"
+    local collar_percent="$8" collar_absolute="$9"
+
+    awk \
+        -v side="$side" \
+        -v reference="$reference" \
+        -v tick="$tick" \
+        -v spread="$spread_ticks" \
+        -v skew="$skew_ticks" \
+        -v volatility="$volatility_ticks" \
+        -v extra="$extra_ticks" \
+        -v collar_percent="$collar_percent" \
+        -v collar_absolute="$collar_absolute" '
+          BEGIN {
+            if (reference <= 0 || tick <= 0 ||
+                (side != "Buy" && side != "Sell"))
+              exit 2
+
+            lower = -1.0e100
+            upper = 1.0e100
+            if (collar_percent != "") {
+              percent_lower = reference * (1 - collar_percent / 100)
+              percent_upper = reference * (1 + collar_percent / 100)
+              if (percent_lower > lower) lower = percent_lower
+              if (percent_upper < upper) upper = percent_upper
+            }
+            if (collar_absolute != "" && collar_absolute > 0) {
+              absolute_lower = reference - collar_absolute
+              absolute_upper = reference + collar_absolute
+              if (absolute_lower > lower) lower = absolute_lower
+              if (absolute_upper < upper) upper = absolute_upper
+            }
+
+            offset = tick * (spread + skew + volatility + extra)
+            required = side == "Buy" ? reference + offset : reference - offset
+            if ((side == "Buy" && required > upper) ||
+                (side == "Sell" && required < lower))
+              exit 3
+
+            ticks = required / tick
+            rounded_ticks = side == "Buy" ? int(ticks + 0.999999999) : int(ticks)
+            resolved = rounded_ticks * tick
+            if (resolved < lower || resolved > upper)
+              exit 3
+
+            printf "%.8f\n", resolved
+          }
+        '
+}
+
+soak_reference_timestamp_is_fresh() {
+    local updated_epoch_ms="$1" now_epoch_ms="$2" max_age_seconds="$3"
+    [[ "$updated_epoch_ms" =~ ^[0-9]+$ &&
+       "$now_epoch_ms" =~ ^[0-9]+$ &&
+       "$max_age_seconds" =~ ^[0-9]+$ ]] || return 1
+    ((max_age_seconds > 0)) || return 1
+    ((updated_epoch_ms <= now_epoch_ms)) || return 1
+    ((now_epoch_ms - updated_epoch_ms < max_age_seconds * 1000))
+}
+
+soak_primary_reference_bootstrap_reset() {
+    soak_primary_live_reference_observed=false
+}
+
+soak_primary_reference_mark_live_observed() {
+    soak_primary_live_reference_observed=true
+}
+
+soak_primary_reference_fallback_allowed() {
+    [[ "$1" == "missing" &&
+       "${soak_primary_live_reference_observed:-false}" == "false" ]]
+}
+
 soak_evaluate_strict_freshness() {
     jq -c '
       . as $evidence |
       ($evidence.configuredSymbols // []) as $symbols |
       ($evidence.refreshes // []) as $refreshes |
       ($evidence.metricSamples // []) as $samples |
+      ($evidence.primarySymbol // "") as $primarySymbol |
       ($evidence.maxReferenceAgeSeconds // 0) as $maxAge |
       ($evidence.refreshIntervalSeconds // 0) as $interval |
       ($evidence.refreshMarginSeconds // 0) as $margin |
@@ -146,6 +493,7 @@ soak_evaluate_strict_freshness() {
           passed: (
             $eligible.value == 1 and
             ($ageRows | length) > 0 and
+            ($ageRows | map(.value) | min) >= 0 and
             ($ageRows | map(.value) | min) < $maxAge
           )
         }
@@ -167,7 +515,11 @@ soak_evaluate_strict_freshness() {
             ["pre-outage","post-recovery"][] as $segment |
             ([
               $refreshes[] |
-              select(.symbol == $symbol and .segment == $segment)
+              select(.symbol == $symbol and .segment == $segment) |
+              select(
+                $symbol != $primarySymbol or
+                .priceSource == "primary-workload-limit"
+              )
             ]) as $segmentRows |
             ($segmentRows | map(.timestampUtc | fromdateiso8601) | sort) as $times |
             ([
@@ -176,15 +528,27 @@ soak_evaluate_strict_freshness() {
               select(.phase as $phase | segment_phases($segment) | index($phase)) |
               (.timestampUtc | fromdateiso8601)
             ] | sort) as $windowTimes |
+            ([
+              $observations[] |
+              select(.symbol == $symbol and .passed) |
+              select(.phase as $phase | segment_phases($segment) | index($phase)) |
+              ((.timestampUtc | fromdateiso8601) - .referenceAgeSeconds)
+            ] | sort | unique) as $observedReferenceTimes |
+            (($times + $observedReferenceTimes) | sort | unique) as $effectiveTimes |
             (
-              if ($times | length) == 0 or ($windowTimes | length) == 0 then []
+              if ($effectiveTimes | length) == 0 or ($windowTimes | length) == 0 then []
               else
-                ([range(1; $times | length) |
-                  $times[.] - $times[. - 1]]) +
-                [([0, ($times[0] - $windowTimes[0])] | max)] +
-                [([0, (($windowTimes | last) - ($times | last))] | max)]
+                ([range(1; $effectiveTimes | length) |
+                  $effectiveTimes[.] - $effectiveTimes[. - 1]]) +
+                [([0, ($effectiveTimes[0] - $windowTimes[0])] | max)] +
+                [([0, (($windowTimes | last) - ($effectiveTimes | last))] | max)]
               end
             ) as $gaps |
+            (
+              if ($times | length) < 2 then []
+              else [range(1; $times | length) | $times[.] - $times[. - 1]]
+              end
+            ) as $recordedGaps |
             {
               segment: $segment,
               count: ($times | length),
@@ -210,18 +574,36 @@ soak_evaluate_strict_freshness() {
               maxGapSeconds: (
                 if ($gaps | length) == 0 then null else ($gaps | max) end
               ),
+              recordedEvidenceMaxGapSeconds: (
+                if ($recordedGaps | length) == 0 then null else ($recordedGaps | max) end
+              ),
+              observedReferenceTimestampCount: ($observedReferenceTimes | length),
               passed: (
                 ($times | length) > 0 and
                 ($windowTimes | length) > 0 and
-                ($gaps | length) > 0 and
-                ($gaps | max) <= ($interval + $margin) and
-                ($gaps | max) < $maxAge and
+                (
+                  $symbol == $primarySymbol or
+                  (
+                    ($gaps | length) > 0 and
+                    ($gaps | max) <= ($interval + $margin) and
+                    ($gaps | max) < $maxAge
+                  )
+                ) and
                 (([
                   ([$segmentRows[] | select(.direction == "trading-buys")] | length) -
                     ([$segmentRows[] | select(.direction == "counterparty-buys")] | length),
                   ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) -
                     ([$segmentRows[] | select(.direction == "trading-buys")] | length)
-                ] | max) <= 1)
+                ] | max) <= 1) and
+                ([$segmentRows[] | select(.direction == "trading-buys")] | length) > 0 and
+                ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) > 0 and
+                (
+                    $symbol != $primarySymbol or
+                  (
+                    ([$segmentRows[] | select(.direction == "trading-buys")] | length) > 0 and
+                    ([$segmentRows[] | select(.direction == "counterparty-buys")] | length) > 0
+                  )
+                )
               )
             }
           ]
@@ -257,9 +639,10 @@ soak_evaluate_strict_freshness() {
           refreshIntervalSeconds: $interval,
           refreshMarginSeconds: $margin,
           maximumPermittedObservedGapSeconds: ($interval + $margin),
+          primarySymbol: $primarySymbol,
           excludedIntentionalPhases: $excludedPhases,
           requirement:
-            "every configured symbol remains eligible and below MaxReferenceAge outside intentional outage/reconnect phases"
+            "the primary symbol has balanced workload fills in both active segments; synthetic-refresh symbols stay within the gap bound using fill evidence plus telemetry-derived reference timestamps; every symbol remains eligible and below MaxReferenceAge outside intentional outage/reconnect phases"
         },
         refreshSummary: $refreshSummary,
         symbolFreshness: $symbolFreshness,

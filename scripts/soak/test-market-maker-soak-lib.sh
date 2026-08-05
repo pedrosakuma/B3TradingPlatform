@@ -38,6 +38,254 @@ if soak_validate_strict_refresh_timing 12 6 6 6; then
     exit 1
 fi
 
+[[ "$(soak_normalize_brl_amount 1250000)" == "1250000.00" ]]
+[[ "$(soak_normalize_brl_amount 1250000.5)" == "1250000.50" ]]
+[[ "$(soak_normalize_brl_amount 1250000.50)" == "1250000.50" ]]
+for invalid_amount in 1.234 malformed 1e3 -1 0 0.00; do
+    if soak_normalize_brl_amount "$invalid_amount" >/dev/null; then
+        echo "ERROR: invalid BRL amount '$invalid_amount' was accepted" >&2
+        exit 1
+    fi
+done
+[[ "$(soak_resolve_sandbox_max_deposit 1250000 1250000.0)" == "1250000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1500000.00)" == "1500000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1500000.00 1250000.00)" == "1500000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1250000.01 1250000.02)" == "1250000.02" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1750000.00)" == "1750000.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00)" == "9223372036854775808.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 1.00 9223372036854775808.00)" == "9223372036854775808.00" ]]
+[[ "$(soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00 9223372036854775808.00)" == "9223372036854775808.00" ]]
+if soak_resolve_sandbox_max_deposit 1250000.00 1500000.00 1499999.99 >/dev/null; then
+    echo "ERROR: explicit sandbox cap below the counterparty deposit was accepted" >&2
+    exit 1
+fi
+if soak_resolve_sandbox_max_deposit 1500000.00 1250000.00 1499999.99 >/dev/null; then
+    echo "ERROR: explicit sandbox cap below the primary deposit was accepted" >&2
+    exit 1
+fi
+if soak_resolve_sandbox_max_deposit 9223372036854775808.00 1.00 9223372036854775807.99 >/dev/null; then
+    echo "ERROR: explicit sandbox cap below a large primary deposit was accepted" >&2
+    exit 1
+fi
+
+compatibility_workload_file="$(mktemp)"
+trap 'rm -f "$compatibility_workload_file"' EXIT
+cat >"$compatibility_workload_file" <<'EOF'
+{
+  "workload": {
+    "strictRefresh": {
+      "configuredInstruments": [{
+        "symbol": "PETR4",
+        "maxSkewTicks": 5,
+        "maxVolatilityAdditionalSpreadTicks": 20
+      }]
+    },
+    "recoveryCrosses": [{
+      "symbol": "PETR4",
+      "maxSkewTicks": 5,
+      "maxVolatilityAdditionalSpreadTicks": 20
+    }]
+  }
+}
+EOF
+compatibility_workload="$(
+    soak_suite_compatibility_workload "$compatibility_workload_file"
+)"
+[[ "$(jq -r '.strictRefresh.configuredInstruments[0].symbol' <<<"$compatibility_workload")" == "PETR4" ]]
+[[ "$(jq -r '.strictRefresh.configuredInstruments[0] | has("maxSkewTicks")' <<<"$compatibility_workload")" == "false" ]]
+[[ "$(jq -r '.strictRefresh.configuredInstruments[0] | has("maxVolatilityAdditionalSpreadTicks")' <<<"$compatibility_workload")" == "false" ]]
+[[ "$(jq -r '.recoveryCrosses[0] | has("maxSkewTicks")' <<<"$compatibility_workload")" == "false" ]]
+[[ "$(jq -r '.recoveryCrosses[0] | has("maxVolatilityAdditionalSpreadTicks")' <<<"$compatibility_workload")" == "false" ]]
+rm -f "$compatibility_workload_file"
+trap - EXIT
+
+[[ "$(soak_conservative_profile_funding_bound baseline)" == "232719" ]]
+[[ "$(soak_conservative_profile_funding_bound inventory-skew)" == "1120238" ]]
+[[ "$(soak_conservative_profile_funding_bound volatility-spread)" == "886408" ]]
+[[ "$(soak_conservative_profile_funding_bound pause-and-cancel)" == "293666" ]]
+maximum_funding_bound=0
+for funding_profile in baseline inventory-skew volatility-spread pause-and-cancel; do
+    funding_bound="$(soak_conservative_profile_funding_bound "$funding_profile")"
+    ((funding_bound <= maximum_funding_bound)) ||
+        maximum_funding_bound="$funding_bound"
+done
+awk \
+    -v deposit="$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT" \
+    -v sandbox_max="$SOAK_ACCEPTANCE_DEPOSIT_AMOUNT_DEFAULT" \
+    -v required="$maximum_funding_bound" \
+    'BEGIN { exit !(deposit >= required && sandbox_max >= deposit) }'
+
+[[ "$(soak_resolve_marketable_limit Buy 32.70 0.01 5 5 0 1 10 "")" == "32.81000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 32.70 0.01 5 5 0 1 10 "")" == "32.59000000" ]]
+# Volatility widening is an additional half-spread: reserve its configured cap
+# so a current adaptive value larger than crossingExtraTicks still crosses.
+[[ "$(soak_resolve_marketable_limit Buy 32.70 0.01 5 0 20 1 10 "")" == "32.96000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 32.70 0.01 5 0 20 1 10 "")" == "32.44000000" ]]
+[[ "$(soak_resolve_marketable_limit Buy 100 1 2 0 2 1 5 "")" == "105.00000000" ]]
+[[ "$(soak_resolve_marketable_limit Sell 100 1 2 0 2 1 5 "")" == "95.00000000" ]]
+if soak_resolve_marketable_limit Buy 100 1 2 0 3 1 5 "" >/dev/null 2>&1; then
+    echo "ERROR: buy outside the configured collar was accepted" >&2
+    exit 1
+fi
+if soak_resolve_marketable_limit Sell 100 1 2 0 3 1 5 "" >/dev/null 2>&1; then
+    echo "ERROR: sell outside the configured collar was accepted" >&2
+    exit 1
+fi
+
+soak_reference_timestamp_is_fresh 970001 1000000 30
+if soak_reference_timestamp_is_fresh 970000 1000000 30; then
+    echo "ERROR: reference exactly at MaxReferenceAge was accepted" >&2
+    exit 1
+fi
+if soak_reference_timestamp_is_fresh 1000001 1000000 30; then
+    echo "ERROR: future live-reference timestamp was accepted" >&2
+    exit 1
+fi
+soak_primary_reference_bootstrap_reset
+soak_primary_reference_fallback_allowed missing
+soak_primary_reference_mark_live_observed
+if soak_primary_reference_fallback_allowed missing; then
+    echo "ERROR: missing live reference re-enabled fallback after a valid observation" >&2
+    exit 1
+fi
+if soak_primary_reference_fallback_allowed stale; then
+    echo "ERROR: stale live reference was allowed to use the bootstrap fallback" >&2
+    exit 1
+fi
+soak_primary_reference_bootstrap_reset
+if soak_primary_reference_fallback_allowed stale; then
+    echo "ERROR: stale initial live reference was allowed to use the bootstrap fallback" >&2
+    exit 1
+fi
+
+mock_status_curl() {
+    local header request_body
+    header="$(cat <&3)"
+    request_body="$(cat <&4)"
+    [[ "$header" == "Authorization: Bearer status-test-token" ]]
+    [[ "$request_body" == '{"symbol":"PETR4"}' ]]
+    printf '%s\n' '{"status":"Rejected","code":"cash_limit","token":"must-redact"}' 422
+    return 22
+}
+status_test_token='status-test-token'
+status_test_body='{"symbol":"PETR4"}'
+status_envelope="$(SOAK_CURL_BIN=mock_status_curl \
+    soak_curl_json_request_with_status POST https://example.invalid \
+        status_test_token status_test_body)"
+[[ "$(jq -r '.curlExit' <<<"$status_envelope")" == "22" ]]
+[[ "$(jq -r '.httpStatus' <<<"$status_envelope")" == "422" ]]
+mock_idempotent_status_curl() {
+    local idempotency_header arguments
+    idempotency_header="$(cat <&5)"
+    arguments="$(printf '%s\n' "$@")"
+    [[ "$idempotency_header" == "Idempotency-Key: soak-run-alice-3181" ]]
+    grep -Fxq '@/dev/fd/5' <<<"$arguments"
+    ! grep -Fxq -- '--retry-all-errors' <<<"$arguments"
+    ! grep -Fxq -- '--retry' <<<"$arguments"
+    printf '%s\n' '{"status":"Pending","clOrdId":"3181","replayed":true}' 202
+}
+idempotency_key='soak-run-alice-3181'
+idempotent_status_envelope="$(SOAK_CURL_BIN=mock_idempotent_status_curl \
+    soak_curl_json_request_with_status POST https://example.invalid \
+        status_test_token status_test_body idempotency_key)"
+[[ "$(jq -r '.curlExit' <<<"$idempotent_status_envelope")" == "0" ]]
+[[ "$(jq -r '.curlAttempts' <<<"$idempotent_status_envelope")" == "1" ]]
+[[ "$(jq -r '.httpStatus' <<<"$idempotent_status_envelope")" == "202" ]]
+[[ "$(jq -r '.body | fromjson | .replayed' <<<"$idempotent_status_envelope")" == "true" ]]
+status_retry_count_file="${TMPDIR:-/tmp}/b3tp-soak-retry-count-$$"
+printf '0\n' >"$status_retry_count_file"
+mock_transport_retry_curl() {
+    local count header request_body idempotency_header
+    count="$(cat "$status_retry_count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$status_retry_count_file"
+    header="$(cat <&3)"
+    request_body="$(cat <&4)"
+    idempotency_header="$(cat <&5)"
+    [[ "$header" == "Authorization: Bearer status-test-token" ]]
+    [[ "$request_body" == '{"symbol":"PETR4"}' ]]
+    [[ "$idempotency_header" == "Idempotency-Key: soak-run-alice-3181" ]]
+    if ((count == 1)); then
+        return 28
+    fi
+    printf '%s\n' '{"status":"Pending","clOrdId":"3181","replayed":true}' 202
+}
+transport_retry_envelope="$(SOAK_CURL_BIN=mock_transport_retry_curl \
+    soak_curl_json_request_with_status POST https://example.invalid \
+        status_test_token status_test_body idempotency_key)"
+[[ "$(cat "$status_retry_count_file")" == "2" ]]
+[[ "$(jq -r '.curlExit' <<<"$transport_retry_envelope")" == "0" ]]
+[[ "$(jq -r '.curlAttempts' <<<"$transport_retry_envelope")" == "2" ]]
+[[ "$(jq -r '.httpStatus' <<<"$transport_retry_envelope")" == "202" ]]
+rm -f "$status_retry_count_file"
+status_body=""
+http_status=""
+set +e
+soak_curl_status_envelope_into status_body http_status "$status_envelope"
+status_unpack_exit=$?
+set -e
+[[ "$status_unpack_exit" == "22" ]]
+[[ "$http_status" == "422" ]]
+[[ "$(jq -r '.code' <<<"$status_body")" == "cash_limit" ]]
+submit_failure_file="$ROOT/soak-artifacts/submit-failure-self-test-$$.jsonl"
+mkdir -p "$(dirname "$submit_failure_file")"
+submit_context='{"profile":"inventory-skew","phase":"duration","side":"Sell","quantity":100,"expectedSequence":3181}'
+soak_append_submit_failure \
+    "$submit_failure_file" "2026-07-31T14:46:05Z" http-post \
+    "$status_unpack_exit" "$http_status" \
+    "$status_body" "$submit_context"
+[[ "$(jq -r '.httpStatus' "$submit_failure_file")" == "422" ]]
+[[ "$(jq -r '.responseBody.code' "$submit_failure_file")" == "cash_limit" ]]
+[[ "$(jq -r '.responseBody.token' "$submit_failure_file")" == "[REDACTED]" ]]
+[[ "$(jq -r '.requestContext.phase' "$submit_failure_file")" == "duration" ]]
+[[ "$(jq -r '.requestContext.expectedSequence' "$submit_failure_file")" == "3181" ]]
+rm -f "$submit_failure_file"
+
+suite_test_root="$ROOT/soak-artifacts/suite-control-flow-test-$$"
+mkdir -p "$suite_test_root"
+trap 'rm -rf "$suite_test_root"' EXIT
+cat >"$suite_test_root/fake-runner.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mode=build
+while (($#)); do
+    if [[ "$1" == "--profile" ]]; then
+        profile="$2"
+        shift 2
+    elif [[ "$1" == "--no-build" ]]; then
+        mode=no-build
+        shift
+    else
+        shift
+    fi
+done
+printf '%s:%s:%s:%s:%s:%s\n' \
+    "$profile" "$mode" "$SOAK_BUILD_IMAGES" "$SOAK_TRADING_IMAGE" \
+    "$SOAK_MARKET_MAKER_BOT_IMAGE" "$SOAK_ALERT_RECEIVER_IMAGE" \
+    >>"$SOAK_SUITE_TEST_LOG"
+printf 'stdout:%s\n' "$profile"
+printf 'stderr:%s\n' "$profile" >&2
+[[ "$profile" != "inventory-skew" ]] || exit 23
+EOF
+chmod +x "$suite_test_root/fake-runner.sh"
+suite_status=0
+SOAK_SUITE_TEST_LOG="$suite_test_root/calls.log" \
+    SOAK_SUITE_PROFILE_RUNNER="$suite_test_root/fake-runner.sh" \
+    SOAK_SUITE_MANIFEST="$suite_test_root/suite/suite-manifest.json" \
+    SOAK_SUITE_ID="suite-control-flow-test" \
+    "$ROOT/scripts/soak/run-market-maker-soak-suite.sh" ||
+    suite_status=$?
+if [[ "$suite_status" != "23" ]]; then
+    echo "ERROR: suite orchestrator changed profile exit 23 to $suite_status" >&2
+    exit 1
+fi
+[[ "$(cat "$suite_test_root/calls.log")" == \
+    $'baseline:build:true:suite-control-flow-test-baseline-trading-host:dev:suite-control-flow-test-baseline-market-maker-bot:dev:suite-control-flow-test-baseline-alert-receiver:dev\ninventory-skew:no-build:true:suite-control-flow-test-baseline-trading-host:dev:suite-control-flow-test-baseline-market-maker-bot:dev:suite-control-flow-test-baseline-alert-receiver:dev' ]]
+grep -Fq 'stdout:inventory-skew' "$suite_test_root/suite/suite-run.log"
+grep -Fq 'stderr:inventory-skew' "$suite_test_root/suite/suite-run.log"
+grep -Fq 'finished profile=inventory-skew exit=23' \
+    "$suite_test_root/suite/suite-run.log"
+
 accelerated_freshness="$(jq -n '
   ["PETR4","VALE3","ITUB4"] as $symbols |
   def refresh($timestamp; $segment; $symbol; $direction):
@@ -85,12 +333,63 @@ accelerated_freshness="$(jq -n '
 accelerated_freshness_report="$(soak_evaluate_strict_freshness <<<"$accelerated_freshness")"
 [[ "$(jq -r '.passed' <<<"$accelerated_freshness_report")" == "true" ]]
 [[ "$(jq -r '.refreshSummary | length' <<<"$accelerated_freshness_report")" == "3" ]]
+primary_freshness="$(jq '
+  .primarySymbol = "PETR4" |
+  .refreshes |= map(
+    if .symbol == "PETR4" then .priceSource = "primary-workload-limit"
+    else .priceSource = "trading-host-live-reference"
+    end
+  )
+' <<<"$accelerated_freshness")"
+[[ "$(soak_evaluate_strict_freshness <<<"$primary_freshness" | jq -r '.passed')" == "true" ]]
+configured_primary_only="$(jq '
+  .refreshes |= map(
+    if .symbol == "PETR4" then .priceSource = "configured-reference"
+    else . end
+  )
+' <<<"$primary_freshness")"
+[[ "$(soak_evaluate_strict_freshness <<<"$configured_primary_only" | jq -r '.passed')" == "false" ]]
 unbounded_direction="$(jq '
   .refreshes |= map(
     if .segment == "pre-outage" then .direction = "trading-buys" else . end
   )
 ' <<<"$accelerated_freshness")"
 [[ "$(soak_evaluate_strict_freshness <<<"$unbounded_direction" | jq -r '.passed')" == "false" ]]
+
+delayed_refresh_confirmation="$(jq '
+  .refreshes |= map(
+    if .segment == "post-recovery" and
+       (.symbol == "VALE3" or .symbol == "ITUB4") and
+       .timestampUtc == "2026-07-24T00:00:23Z"
+    then .timestampUtc = "2026-07-24T00:00:30Z"
+    else . end
+  )
+' <<<"$accelerated_freshness")"
+delayed_refresh_report="$(soak_evaluate_strict_freshness <<<"$delayed_refresh_confirmation")"
+[[ "$(jq -r '.passed' <<<"$delayed_refresh_report")" == "true" ]]
+[[ "$(jq '[.refreshSummary[] | select(.symbol != "PETR4") |
+    .segments[] | select(.segment == "post-recovery") |
+    .recordedEvidenceMaxGapSeconds] | max > 9' \
+    <<<"$delayed_refresh_report")" == "true" ]]
+[[ "$(jq '[.refreshSummary[] | select(.symbol != "PETR4") |
+    .segments[] | select(.segment == "post-recovery") |
+    .maxGapSeconds] | max <= 9' <<<"$delayed_refresh_report")" == "true" ]]
+single_direction_with_fresh_telemetry="$(jq '
+  .refreshes |= map(select(
+    .symbol == "PETR4" or .direction == "trading-buys"
+  ))
+' <<<"$accelerated_freshness")"
+[[ "$(soak_evaluate_strict_freshness \
+    <<<"$single_direction_with_fresh_telemetry" | jq -r '.passed')" == "false" ]]
+negative_reference_age="$(jq '
+  .metricSamples |= map(
+    if .metric == "bot_market_data_reference_age_seconds"
+    then .value = -1
+    else . end
+  )
+' <<<"$accelerated_freshness")"
+[[ "$(soak_evaluate_strict_freshness \
+    <<<"$negative_reference_age" | jq -r '.passed')" == "false" ]]
 
 stopped_refresh="$(jq '
   .refreshes |= map(select(
