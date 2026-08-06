@@ -119,6 +119,88 @@ public class TradingHostCrashRestartSpecTests
         Assert.Equal(expectedAverageEntryPrice, buyerAfterRestart.PositionAverageEntryPrice);
     }
 
+    /// <summary>
+    /// Reproduces the 2026-07-25/26 FIRM01 production incident: a burst of
+    /// orders reaches full venue acknowledgement (Working/Filled) with a
+    /// perfectly healthy session, and only afterwards — with no crash
+    /// during the burst itself — the host is restarted for an unrelated,
+    /// benign reason (redeploy / pod eviction). <see cref="SessionVerIdResolver"/>
+    /// forces the reconnect's SessionVerId to strictly advance past the
+    /// persisted value, and the venue was observed (via direct WAL/journal
+    /// inspection on the sandbox incident) to reply with a NotApplied
+    /// covering the already-terminal outbound range shortly after that
+    /// reconnect, which OutboundMutationLedger correctly treats as a
+    /// fail-closed conflict — but for which no automatic resolution path
+    /// exists, wedging /ready at 503 indefinitely. This test asserts the
+    /// desired end-to-end behaviour (a benign post-settlement restart must
+    /// not resurrect already-terminal mutations as reconciliation blockers)
+    /// and is expected to go red until the SessionVerId-bump / retransmit
+    /// handshake race is fixed upstream (either in this host's reconnect
+    /// sequencing or in B3EntryPointClient's session-state persistence).
+    /// </summary>
+    [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
+    public async Task SigKillRestart_AfterAckedBurstSettles_DoesNotWedgeReadinessOnReconnect()
+    {
+        var peer = PlatformEndpoint.TryResolve()!;
+        using var http = new HttpClient { BaseAddress = peer.BaseUrl };
+        var firmAuth = await LoginWithRetryAsync(http, Firm02User, peer.Password);
+        var adminAuth = await LoginWithRetryAsync(http, peer.AdminUsername!, peer.AdminPassword!);
+        var docker = new DockerVenueTransportController();
+
+        await WaitForReadyAsync(http);
+        _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
+
+        var burstPrice = SessionRollSpecSupport.PriceNearLowerCollar(
+            await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, OutageFillSymbol));
+
+        // Burst: several orders submitted back-to-back and fully
+        // acknowledged by the venue BEFORE any restart — mirrors the
+        // FIRM01 ClOrdId 5..12 sequence from the incident (all reached
+        // VenueAcknowledged hours before the reconnect that later
+        // resurrected them).
+        var burstClOrdIds = new List<ulong>();
+        for (var i = 0; i < 5; i++)
+        {
+            var clOrdId = await SubmitOrderAsync(
+                http, firmAuth, OutageFillSymbol, burstPrice, side: i % 2 == 0 ? "Buy" : "Sell");
+            await WaitForOrderAsync(
+                http,
+                firmAuth,
+                clOrdId,
+                order => order.Status is "Working" or "Filled" && !order.IsStale,
+                OrderTimeout,
+                "burst order to be fully acknowledged by the venue before the unrelated restart");
+            burstClOrdIds.Add(clOrdId);
+        }
+
+        // Unrelated, benign restart: nothing crashed mid-flight, the burst
+        // had already fully settled. This is the scenario that is NOT
+        // covered by SigKillRestart_FillDuringOutage_ReplaysMissedExecutionReport
+        // above (that test crashes *during* an in-flight fill; this one
+        // crashes well *after* settlement and exercises the SessionVerId
+        // bump + reconnect handshake in isolation).
+        var restartStartedUtc = DateTimeOffset.UtcNow;
+        await docker.KillTradingHostAsync();
+        await docker.WaitForTradingHostNotRunningAsync(TimeSpan.FromSeconds(10));
+        await docker.StartTradingHostAsync();
+        await docker.WaitForTradingHostRestartAsync(restartStartedUtc, ReadyTimeout);
+
+        // The regression under test: readiness must recover to 200 even
+        // though the reconnect bumped SessionVerId across an already-
+        // settled burst. If the venue replies with a NotApplied covering
+        // that terminal range (as observed in the sandbox incident), this
+        // times out with /ready stuck at 503 — reproducing the outage.
+        await WaitForReadyAsync(http);
+        _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
+
+        foreach (var clOrdId in burstClOrdIds)
+        {
+            var order = await TryGetOrderAsync(http, firmAuth, clOrdId);
+            Assert.True(order is not null && order.Status is "Working" or "Filled" && !order.IsStale,
+                $"burst order {clOrdId} must remain in its pre-restart terminal state after the benign reconnect, observed={Format(order)}");
+        }
+    }
+
     private static async Task WaitForServiceUnavailableReadinessAsync(HttpClient http)
     {
         var deadline = DateTimeOffset.UtcNow + ReadyTimeout;
