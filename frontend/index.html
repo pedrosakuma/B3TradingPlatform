@@ -789,9 +789,10 @@
       <form id="outbound-mutations-filter-form" class="admin-inline-form form-surface">
         <select id="outbound-mutations-state" aria-label="Mutation state filter">
           <option value="">any state</option>
-          <option value="conflicting">Conflicting</option>
           <option value="ambiguous">Ambiguous</option>
-          <option value="resolved">Resolved</option>
+          <option value="recorded_pending_approval">Pending approval</option>
+          <option value="venue_acknowledged">Venue acknowledged</option>
+          <option value="operator_resolved">Operator resolved</option>
         </select>
         <label>
           <input id="outbound-mutations-requires-reconciliation" type="checkbox" checked />

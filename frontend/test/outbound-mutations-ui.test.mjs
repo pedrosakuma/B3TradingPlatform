@@ -37,7 +37,7 @@ test("outbound mutation protocol calls hit the expected admin routes", async () 
   try {
     assert.deepEqual(
       await listOutboundMutations("http://host", "tok", {
-        firmId: "FIRM01", state: "conflicting", requiresReconciliation: true,
+        firmId: "FIRM01", state: "ambiguous", requiresReconciliation: true,
       }),
       fixture.list,
     );
@@ -74,7 +74,7 @@ test("outbound mutation protocol calls hit the expected admin routes", async () 
     globalThis.fetch = originalFetch;
   }
 
-  assert.match(requests[0].url, /\/api\/admin\/outbound-mutations\/\?firmId=FIRM01&state=conflicting&requiresReconciliation=true$/);
+  assert.match(requests[0].url, /\/api\/admin\/outbound-mutations\/\?firmId=FIRM01&state=ambiguous&requiresReconciliation=true$/);
   assert.match(requests[1].url, /\/api\/admin\/outbound-mutations\/22222222-2222-2222-2222-222222222222$/);
   assert.equal(requests[2].url, "http://host/api/admin/outbound-mutations/22222222-2222-2222-2222-222222222222/evidence");
   assert.equal(requests[2].init.method, "POST");

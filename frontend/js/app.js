@@ -890,8 +890,14 @@ function startSession(next) {
     firm: next.firm,
   });
   // #785. Client-side self-approval hint for outbound-mutation resolution
-  // proposals (server independently enforces the real rejection).
-  adminUi.setAdminHandlers({ currentUsername: next.username });
+  // proposals (server independently enforces the real rejection). The
+  // server derives `makerRef` from the JWT `sub` claim (see
+  // AdminOutboundMutationEndpoints.ResolveOperator), which is NOT always
+  // the same as `session.username` — the local-login path overwrites
+  // `next.username` with the raw, possibly differently-cased, login
+  // form input (see finishLoginWithToken). Compare against the JWT
+  // subject directly so the hint can't silently mismatch the server.
+  adminUi.setAdminHandlers({ currentUsername: claimsFromToken(next.token).sub ?? next.username });
   state.clearAll();
   clearInstrumentRules();
   ui.clearTicket();
