@@ -212,7 +212,13 @@ jobs:
           platforms: linux/arm64
           load: true
           tags: b3-trading-host:identity-arm64-smoke
-          cache-from: type=gha,scope=trading-host-arm64-smoke
+          # The prerequisite candidate job has already populated this
+          # multi-arch cache, including linux/arm64 layers. Consume it before
+          # the smoke-specific cache so this job only exports/loads the image
+          # needed by its runtime assertions instead of rebuilding the host.
+          cache-from: |
+            type=gha,scope=trading-host
+            type=gha,scope=trading-host-arm64-smoke
           cache-to:   type=gha,scope=trading-host-arm64-smoke,mode=max
 
       - name: Log in to GHCR
