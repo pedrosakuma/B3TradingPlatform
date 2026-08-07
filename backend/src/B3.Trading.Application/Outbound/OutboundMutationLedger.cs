@@ -38,6 +38,8 @@ public sealed class OutboundMutationLedger
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _inboundEvidenceIdentity =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, uint> _confirmedLiveSessionVerIds =
+        new(StringComparer.Ordinal);
     private readonly Queue<string> _unmatchedEvidenceOrder = new();
     private readonly IOutboundCommandProtector? _protector;
     private bool _legacyMigrationCompleted;
@@ -59,7 +61,8 @@ public sealed class OutboundMutationLedger
             lock (_gate)
                 return _mutations.Values.Count(IsReadinessBlocking)
                     + _inboundEvidence.Values.Count(e =>
-                        e.Disposition != InboundVenueEvidenceDisposition.Matched
+                        e.Disposition is not InboundVenueEvidenceDisposition.Matched
+                            and not InboundVenueEvidenceDisposition.SupersededSession
                         && (e.MatchedMutationIds.Count == 0
                             || !e.MatchedMutationIds.Any(_mutations.ContainsKey)));
         }
@@ -73,7 +76,8 @@ public sealed class OutboundMutationLedger
             foreach (var mutation in _mutations.Values.Where(IsReadinessBlocking))
                 Increment(counts, string.IsNullOrWhiteSpace(mutation.FirmId) ? UnknownFirm : mutation.FirmId);
             foreach (var evidence in _inboundEvidence.Values.Where(e =>
-                         e.Disposition != InboundVenueEvidenceDisposition.Matched
+                         e.Disposition is not InboundVenueEvidenceDisposition.Matched
+                             and not InboundVenueEvidenceDisposition.SupersededSession
                          && (e.MatchedMutationIds.Count == 0
                              || !e.MatchedMutationIds.Any(_mutations.ContainsKey))))
             {
@@ -1149,6 +1153,20 @@ public sealed class OutboundMutationLedger
             var activeAttempt = mutation.Attempts.LastOrDefault();
             if (IsTerminal(mutation.State))
             {
+                if (IsConfirmedSupersededSessionGenerationUnsafe(
+                        mutation.FirmId,
+                        evt.SessionVerId))
+                {
+                    AddInboundEvidenceUnsafe(
+                        CreateBusinessRejectEvidence(
+                            evt,
+                            evidenceId,
+                            InboundVenueEvidenceDisposition.SupersededSession,
+                            [id]),
+                        evidenceIdentity);
+                    return new(InboundVenueEvidenceApplyStatus.RecordedSuperseded);
+                }
+
                 if (string.Equals(
                         mutation.Resolution?.EvidenceKind,
                         "ExecutionReport",
@@ -1254,12 +1272,20 @@ public sealed class OutboundMutationLedger
             }
 
             var disposition = InboundVenueEvidenceDisposition.Matched;
+            var sawSupersededTerminal = false;
             foreach (var id in matched)
             {
                 if (!_mutations.TryGetValue(id, out var mutation))
                     continue;
                 if (IsTerminal(mutation.State))
                 {
+                    if (IsConfirmedSupersededSessionGenerationUnsafe(
+                            mutation.FirmId,
+                            evt.SessionVerId))
+                    {
+                        sawSupersededTerminal = true;
+                        continue;
+                    }
                     MarkTerminalEvidenceConflict(mutation, evt.TimestampUtc);
                     disposition = InboundVenueEvidenceDisposition.Conflicting;
                     continue;
@@ -1289,12 +1315,38 @@ public sealed class OutboundMutationLedger
                     requiresReconciliation: true);
             }
 
+            if (disposition != InboundVenueEvidenceDisposition.Conflicting
+                && sawSupersededTerminal)
+            {
+                var anyActiveMatched = matched.Any(id =>
+                    _mutations.TryGetValue(id, out var mutation)
+                    && !IsTerminal(mutation.State));
+                disposition = anyActiveMatched
+                    ? InboundVenueEvidenceDisposition.Matched
+                    : InboundVenueEvidenceDisposition.SupersededSession;
+            }
+
             AddInboundEvidenceUnsafe(
                 CreateNotAppliedEvidence(evt, evidenceId, disposition, matched),
                 evidenceIdentity);
-            return new(disposition == InboundVenueEvidenceDisposition.Conflicting
-                ? InboundVenueEvidenceApplyStatus.RecordedConflicting
-                : InboundVenueEvidenceApplyStatus.RecordedMatched);
+            return new(MapApplyStatus(disposition));
+        }
+    }
+
+    public void ConfirmSessionRolled(string firmId, uint fromVerId, uint toVerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        if (toVerId == 0)
+            throw new ArgumentOutOfRangeException(nameof(toVerId));
+        _ = fromVerId;
+        lock (_gate)
+        {
+            if (_confirmedLiveSessionVerIds.TryGetValue(firmId, out var current)
+                && current >= toVerId)
+            {
+                return;
+            }
+            _confirmedLiveSessionVerIds[firmId] = toVerId;
         }
     }
 
@@ -1935,6 +1987,12 @@ public sealed class OutboundMutationLedger
         }
     }
 
+    public IReadOnlyDictionary<string, uint> SnapshotConfirmedLiveSessionVerIds()
+    {
+        lock (_gate)
+            return new Dictionary<string, uint>(_confirmedLiveSessionVerIds, StringComparer.Ordinal);
+    }
+
     public IReadOnlyList<OutboundMutationDiagnostic> GetDiagnostics()
     {
         lock (_gate)
@@ -2154,13 +2212,15 @@ public sealed class OutboundMutationLedger
             mutations,
             correlations,
             Array.Empty<InboundVenueEvidenceSnapshot>(),
-            legacyMigrationCompleted);
+            legacyMigrationCompleted,
+            null);
 
     public void Restore(
         IEnumerable<OutboundMutationSnapshot> mutations,
         IEnumerable<OutboundCorrelationTombstone> correlations,
         IEnumerable<InboundVenueEvidenceSnapshot> inboundEvidence,
-        bool legacyMigrationCompleted = false)
+        bool legacyMigrationCompleted = false,
+        IReadOnlyDictionary<string, uint>? confirmedLiveSessionVerIds = null)
     {
         ArgumentNullException.ThrowIfNull(mutations);
         ArgumentNullException.ThrowIfNull(correlations);
@@ -2175,8 +2235,21 @@ public sealed class OutboundMutationLedger
             _correlations.Clear();
             _inboundEvidence.Clear();
             _inboundEvidenceIdentity.Clear();
+            _confirmedLiveSessionVerIds.Clear();
             _unmatchedEvidenceOrder.Clear();
             _legacyMigrationCompleted = legacyMigrationCompleted;
+            if (confirmedLiveSessionVerIds is not null)
+            {
+                foreach (var pair in confirmedLiveSessionVerIds)
+                {
+                    if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value == 0)
+                    {
+                        throw new OutboundLedgerRecoveryException(
+                            "Confirmed live session generation snapshot is invalid.");
+                    }
+                    _confirmedLiveSessionVerIds[pair.Key] = pair.Value;
+                }
+            }
             foreach (var source in mutations.OrderBy(m => m.MutationId.Value))
             {
                 var mutation = Clone(source);
@@ -2947,6 +3020,26 @@ public sealed class OutboundMutationLedger
             RestoreActiveOriginalGuard(updated);
         }
     }
+
+    private bool IsConfirmedSupersededSessionGenerationUnsafe(
+        string firmId,
+        uint? evidenceSessionVerId) =>
+        evidenceSessionVerId is > 0
+        && _confirmedLiveSessionVerIds.TryGetValue(firmId, out var currentLiveSessionVerId)
+        && evidenceSessionVerId.Value < currentLiveSessionVerId;
+
+    private static InboundVenueEvidenceApplyStatus MapApplyStatus(
+        InboundVenueEvidenceDisposition disposition) =>
+        disposition switch
+        {
+            InboundVenueEvidenceDisposition.Unmatched =>
+                InboundVenueEvidenceApplyStatus.RecordedUnmatched,
+            InboundVenueEvidenceDisposition.Conflicting =>
+                InboundVenueEvidenceApplyStatus.RecordedConflicting,
+            InboundVenueEvidenceDisposition.SupersededSession =>
+                InboundVenueEvidenceApplyStatus.RecordedSuperseded,
+            _ => InboundVenueEvidenceApplyStatus.RecordedMatched,
+        };
 
     private void RestoreActiveOriginalGuard(OutboundMutationSnapshot mutation)
     {
