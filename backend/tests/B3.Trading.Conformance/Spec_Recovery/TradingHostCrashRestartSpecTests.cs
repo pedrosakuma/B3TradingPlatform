@@ -82,7 +82,10 @@ public class TradingHostCrashRestartSpecTests
         await docker.StartTradingHostAsync();
         await docker.WaitForTradingHostRestartAsync(crashStartedUtc, ReadyTimeout);
         _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
-        await WaitForServiceUnavailableReadinessAsync(http);
+        // #780: once cold-start classification completes, outbound
+        // reconciliation is scoped to the affected firm/end-client and no
+        // longer removes the whole pod from Service routing.
+        await WaitForReadyAsync(http);
 
         var recoveredOrder = await WaitForOrderAsync(
             http,
@@ -117,30 +120,6 @@ public class TradingHostCrashRestartSpecTests
 
         Assert.Equal(buyerBaseline.PositionNetQuantity + OrderQuantity, buyerAfterRestart.PositionNetQuantity);
         Assert.Equal(expectedAverageEntryPrice, buyerAfterRestart.PositionAverageEntryPrice);
-    }
-
-    private static async Task WaitForServiceUnavailableReadinessAsync(HttpClient http)
-    {
-        var deadline = DateTimeOffset.UtcNow + ReadyTimeout;
-        HttpStatusCode? lastStatus = null;
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            try
-            {
-                using var response = await http.GetAsync("/ready");
-                lastStatus = response.StatusCode;
-                if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-                    return;
-            }
-            catch (HttpRequestException)
-            {
-            }
-
-            await Task.Delay(PollInterval);
-        }
-
-        Assert.Fail(
-            $"Timed out after {ReadyTimeout.TotalSeconds:F0}s waiting for /ready to remain fail-closed. Last status={(int?)lastStatus}.");
     }
 
     private static async Task<AuthenticationHeaderValue> LoginWithRetryAsync(
