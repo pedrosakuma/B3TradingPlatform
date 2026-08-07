@@ -295,6 +295,10 @@ public sealed class StateSnapshotter
             Mutations = capture?.Mutations.ToList() ?? new(),
             CorrelationTombstones = capture?.Correlations.ToList() ?? new(),
             InboundEvidence = capture?.InboundEvidence.ToList() ?? new(),
+            ConfirmedLiveSessionVerIds =
+                _outboundLedger is null
+                    ? new()
+                    : new(_outboundLedger.SnapshotConfirmedLiveSessionVerIds()),
         };
     }
 
@@ -616,7 +620,8 @@ public sealed class StateSnapshotter
                 outbound.Mutations,
                 outbound.CorrelationTombstones,
                 outbound.InboundEvidence,
-                outbound.LegacyMigrationCompleted);
+                outbound.LegacyMigrationCompleted,
+                outbound.ConfirmedLiveSessionVerIds);
         }
         _restOrderIdempotency?.Restore(snap.RestOrderIdempotency);
         _orders.Restore(snap.WorkingOrders);

@@ -2038,6 +2038,104 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void NotApplied_AfterConfirmedSessionRoll_OnSupersededTerminalGeneration_IsRecordedMoot()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2));
+        fixture.Ledger.ConfirmSessionRolled("F1", fromVerId: 2, toVerId: 3);
+
+        var result = fixture.Ledger.ApplyNotApplied(new NotAppliedReceivedEvent
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            FromSeqNo = 77,
+            Count = 1,
+            ObservedAtUtc = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedSuperseded, result.Status);
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Null(Assert.Single(mutation.Attempts).AmbiguityReason);
+        Assert.False(mutation.RequiresReconciliation);
+        Assert.Equal(0, fixture.Ledger.ReadinessBlockingCount);
+        Assert.Contains(
+            fixture.Ledger.CaptureSnapshot().InboundEvidence,
+            evidence => evidence.Kind == InboundVenueEvidenceKind.NotApplied
+                && evidence.Disposition == InboundVenueEvidenceDisposition.SupersededSession
+                && evidence.MatchedMutationIds.Contains(fixture.MutationId));
+    }
+
+    [Fact]
+    public void NotApplied_OnCurrentLiveTerminalGeneration_RemainsConflictingAfterRoll()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame with
+        {
+            SessionVerId = 3,
+        });
+        fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 3));
+        fixture.Ledger.ConfirmSessionRolled("F1", fromVerId: 2, toVerId: 3);
+
+        var result = fixture.Ledger.ApplyNotApplied(new NotAppliedReceivedEvent
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 3,
+            FromSeqNo = 77,
+            Count = 1,
+            ObservedAtUtc = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedConflicting, result.Status);
+        AssertTerminalConflict(fixture, expectedEvidenceKind: "ExecutionReport");
+    }
+
+    [Fact]
+    public void NotApplied_SupersededTerminalGeneration_RemainsMootAfterSnapshotRestore()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        fixture.Ledger.ApplyVenueAcknowledgement(Acknowledgement(
+            fixture,
+            firmId: "F1",
+            sessionId: 11,
+            sessionVerId: 2));
+        fixture.Ledger.ConfirmSessionRolled("F1", fromVerId: 2, toVerId: 3);
+        var restored = RestoreLedger(fixture);
+
+        var result = restored.ApplyNotApplied(new NotAppliedReceivedEvent
+        {
+            FirmId = "F1",
+            SessionId = 11,
+            SessionVerId = 2,
+            FromSeqNo = 77,
+            Count = 1,
+            ObservedAtUtc = T0.AddMinutes(1),
+            TimestampUtc = T0.AddMinutes(1),
+        });
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedSuperseded, result.Status);
+        AssertState(restored, fixture.MutationId, OutboundMutationState.VenueAcknowledged);
+        var mutation = Assert.Single(restored.SnapshotMutations());
+        Assert.Null(Assert.Single(mutation.Attempts).AmbiguityReason);
+        Assert.False(mutation.RequiresReconciliation);
+        Assert.Equal(0, restored.ReadinessBlockingCount);
+    }
+
+    [Fact]
     public void NotAppliedThenExecutionReport_IsMonotonicConflictAndSuppressesDomain()
     {
         var fixture = Fixture.Create();
@@ -2317,6 +2415,37 @@ public sealed class OutboundMutationLedgerTests
                 {
                     PossibleResend = true,
                 }).Status);
+    }
+
+    [Fact]
+    public void BusinessReject_AfterConfirmedSessionRoll_OnSupersededTerminalGeneration_IsRecordedMoot()
+    {
+        var fixture = Fixture.Create();
+        ApplyPrepared(fixture.Ledger, fixture, fixture.Frame);
+        Assert.Equal(
+            InboundVenueEvidenceApplyStatus.RecordedMatched,
+            fixture.Ledger.ApplyVenueAcknowledgement(
+                Acknowledgement(
+                    fixture,
+                    firmId: "F1",
+                    sessionId: 11,
+                    sessionVerId: 2)).Status);
+        fixture.Ledger.ConfirmSessionRolled("F1", fromVerId: 2, toVerId: 3);
+
+        var result = fixture.Ledger.ApplyBusinessReject(
+            BusinessReject("F1", 11, 2, refSeqNum: 77, inboundSeqNum: 91));
+
+        Assert.Equal(InboundVenueEvidenceApplyStatus.RecordedSuperseded, result.Status);
+        AssertState(fixture, OutboundMutationState.VenueAcknowledged);
+        var mutation = Assert.Single(fixture.Ledger.SnapshotMutations());
+        Assert.Null(Assert.Single(mutation.Attempts).AmbiguityReason);
+        Assert.False(mutation.RequiresReconciliation);
+        Assert.Equal(0, fixture.Ledger.ReadinessBlockingCount);
+        Assert.Contains(
+            fixture.Ledger.CaptureSnapshot().InboundEvidence,
+            evidence => evidence.Kind == InboundVenueEvidenceKind.BusinessReject
+                && evidence.Disposition == InboundVenueEvidenceDisposition.SupersededSession
+                && evidence.MatchedMutationIds.Contains(fixture.MutationId));
     }
 
     [Fact]
@@ -4634,7 +4763,8 @@ public sealed class OutboundMutationLedgerTests
         restored.Restore(
             capture.Mutations,
             capture.Correlations,
-            capture.InboundEvidence);
+            capture.InboundEvidence,
+            confirmedLiveSessionVerIds: source.SnapshotConfirmedLiveSessionVerIds());
         return restored;
     }
 

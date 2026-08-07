@@ -223,6 +223,7 @@ public enum InboundVenueEvidenceDisposition
     Matched,
     Unmatched,
     Conflicting,
+    SupersededSession,
 }
 
 public enum InboundVenueEvidenceApplyStatus
@@ -230,6 +231,7 @@ public enum InboundVenueEvidenceApplyStatus
     RecordedMatched,
     RecordedUnmatched,
     RecordedConflicting,
+    RecordedSuperseded,
     Duplicate,
 }
 

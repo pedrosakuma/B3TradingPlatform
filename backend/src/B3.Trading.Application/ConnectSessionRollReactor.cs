@@ -168,6 +168,7 @@ public sealed class PendingNewReapingConnectRollReactor : IConnectSessionRollRea
     public void OnSessionRolled(string firmId, uint fromVerId, uint toVerId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        _outboundLedger?.ConfirmSessionRolled(firmId, fromVerId, toVerId);
 
         // Phase 1: preserve un-acked PendingNew under the dispatcher lock.
         _dispatcher.RunExclusive(() =>

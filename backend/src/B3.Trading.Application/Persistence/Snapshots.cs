@@ -368,6 +368,7 @@ public sealed class OutboundLedgerSnapshot
     public List<B3.Trading.Application.Outbound.OutboundMutationSnapshot> Mutations { get; init; } = new();
     public List<B3.Trading.Application.Outbound.OutboundCorrelationTombstone> CorrelationTombstones { get; init; } = new();
     public List<B3.Trading.Application.Outbound.InboundVenueEvidenceSnapshot> InboundEvidence { get; init; } = new();
+    public Dictionary<string, uint> ConfirmedLiveSessionVerIds { get; init; } = new();
 }
 
 /// <summary>
