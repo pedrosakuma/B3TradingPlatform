@@ -59,12 +59,14 @@ public static class AlgoEndpoints
             EventDispatcher dispatcher,
             DrainState drain,
             IOutboundRecoveryGate recovery,
+            IOutboundCommandProtector protector,
             SymbolDirectory symbols,
             IAlgoSignalQueue signals,
             ITickSizeProvider tickSizes) =>
         {
             var firm = ResolveFirm(ctx);
-            if (!recovery.IsBusinessIngressOpen(firm))
+            var owner = ResolveOwner(ctx, registry);
+            if (!recovery.IsBusinessIngressOpen(firm, protector.CreateStableEndClientRefCandidates(firm, owner.Value)))
                 return RecoveryUnavailable();
             if (drain.IsDraining)
             {
@@ -304,7 +306,6 @@ public static class AlgoEndpoints
                 default:
                     return Results.BadRequest(new { error = $"unsupported algo type '{type}'" });
             }
-            var owner = ResolveOwner(ctx, registry);
             var algoId = algoIds.Generate(firm);
             var createdAt = DateTimeOffset.UtcNow;
             var algo = new Algo(algoId, owner, firm, req.Symbol, securityId,
@@ -396,10 +397,12 @@ public static class AlgoEndpoints
             AlgoBook algos,
             DrainState drain,
             IOutboundRecoveryGate recovery,
+            IOutboundCommandProtector protector,
             IAlgoSignalQueue signals) =>
         {
             var firm = ResolveFirm(ctx);
-            if (!recovery.IsBusinessIngressOpen(firm))
+            var owner = ResolveOwner(ctx, registry);
+            if (!recovery.IsBusinessIngressOpen(firm, protector.CreateStableEndClientRefCandidates(firm, owner.Value)))
                 return RecoveryUnavailable();
             if (drain.IsDraining)
             {
@@ -418,7 +421,6 @@ public static class AlgoEndpoints
                 return Results.BadRequest(new { error = "at least one of newQuantity or newPrice must be set" });
             if (req.NewQuantity is { } q && q <= 0)
                 return Results.BadRequest(new { error = "newQuantity must be positive" });
-            var owner = ResolveOwner(ctx, registry);
             if (!algos.TryGet(firm, id, out var algo) || algo is null || algo.Owner != owner)
                 return Results.NotFound();
             if (algo.IsTerminal)
@@ -479,10 +481,12 @@ public static class AlgoEndpoints
             EventDispatcher dispatcher,
             DrainState drain,
             IOutboundRecoveryGate recovery,
+            IOutboundCommandProtector protector,
             IAlgoSignalQueue signals) =>
         {
             var firm = ResolveFirm(ctx);
-            if (!recovery.IsBusinessIngressOpen(firm))
+            var owner = ResolveOwner(ctx, registry);
+            if (!recovery.IsBusinessIngressOpen(firm, protector.CreateStableEndClientRefCandidates(firm, owner.Value)))
                 return RecoveryUnavailable();
             if (drain.IsDraining)
             {
@@ -495,7 +499,6 @@ public static class AlgoEndpoints
 
             if (!ulong.TryParse(algoId, out var id) || id == 0)
                 return Results.NotFound();
-            var owner = ResolveOwner(ctx, registry);
             if (!algos.TryGet(firm, id, out var algo) || algo is null || algo.Owner != owner)
                 return Results.NotFound();
 

@@ -47,7 +47,11 @@ public class FailClosedIngressTests
         Assert.True(body.RootElement.TryGetProperty("clOrdId", out var clOrdId), rawBody);
         Assert.NotEqual("0", clOrdId.GetString());
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await client.GetAsync("/ready")).StatusCode);
+        // #780: outbound-reconciliation drain reasons no longer 503 the
+        // whole pod's /ready — a single ambiguous mutation is a per-firm
+        // order-submission concern (still fail-closed above), not a reason
+        // to pull unaffected firms' traffic out of Service rotation.
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/ready")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/live")).StatusCode);
 
         using var health = JsonDocument.Parse(await client.GetStringAsync("/health"));

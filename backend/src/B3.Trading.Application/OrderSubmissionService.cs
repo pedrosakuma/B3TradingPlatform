@@ -62,6 +62,7 @@ public sealed class OrderSubmissionService
     private readonly TimeProvider _clock;
     private readonly IOutboundRecoveryGate _outboundRecovery;
     private readonly IOutboundSubmissionFaultInjector? _faultInjector;
+    private readonly IOutboundCommandProtector? _commandProtector;
 
     public OrderSubmissionService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -86,7 +87,8 @@ public sealed class OrderSubmissionService
         RestOrderIdempotencyStore? restIdempotency = null,
         TimeProvider? clock = null,
         IOutboundRecoveryGate? outboundRecovery = null,
-        IOutboundSubmissionFaultInjector? faultInjector = null)
+        IOutboundSubmissionFaultInjector? faultInjector = null,
+        IOutboundCommandProtector? commandProtector = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -111,6 +113,7 @@ public sealed class OrderSubmissionService
         _clock = clock ?? TimeProvider.System;
         _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
         _faultInjector = faultInjector;
+        _commandProtector = commandProtector;
     }
 
     /// <summary>
@@ -123,7 +126,9 @@ public sealed class OrderSubmissionService
     {
         if (req is null
                 ? !_outboundRecovery.IsReady
-                : !_outboundRecovery.IsBusinessIngressOpen(req.FirmId))
+                : !_outboundRecovery.IsBusinessIngressOpen(
+                    req.FirmId,
+                    _commandProtector?.CreateStableEndClientRefCandidates(req.FirmId, req.Owner.Value)))
         {
             return OrderSubmissionResult.Drained;
         }

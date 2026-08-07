@@ -141,6 +141,40 @@ public class HealthAndDrainTests : IClassFixture<TestAppFactory>
     }
 
     [Fact]
+    public void BlocksPodRouting_ExcludesOutboundReconciliationReasons_ButNotOthers()
+    {
+        // #780: an outbound-reconciliation drain (new-order, cancel/replace,
+        // or the cold-start unresolved-lifecycle-intents latch) is a
+        // per-firm/per-end-client order-submission concern, not a reason to
+        // pull the whole pod out of Service rotation.
+        foreach (var reconciliationReason in new[]
+                 {
+                     "outbound_new_order_reconciliation_required",
+                     "outbound_cancel_replace_reconciliation_required",
+                     "cold_start_unresolved_lifecycle_intents",
+                 })
+        {
+            var drain = new DrainState();
+            drain.BeginDrain(reconciliationReason);
+            Assert.True(drain.IsDraining);
+            Assert.False(drain.BlocksPodRouting);
+        }
+
+        // A genuinely pod-unfit reason (shutdown, unclassified fault) must
+        // still block routing.
+        var stopping = new DrainState();
+        stopping.BeginDrain("host_stopping");
+        Assert.True(stopping.BlocksPodRouting);
+
+        // Mixing a reconciliation reason with a hard reason must still
+        // block routing (the hard reason dominates).
+        var mixed = new DrainState();
+        mixed.BeginDrain("cold_start_unresolved_lifecycle_intents");
+        mixed.BeginDrain("wal_execution_report_rejected");
+        Assert.True(mixed.BlocksPodRouting);
+    }
+
+    [Fact]
     public async Task WalFault_Causes_Ready503_While_LiveRemainsOk()
     {
         using var factory = TestAppFactory.WithOverrides(

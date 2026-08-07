@@ -1853,9 +1853,12 @@ public class PeggedAlgoEndpointTests
                     recovery.Phase);
 
                 // The unresolved outbound mutation keeps the algo engine
-                // behind the cold-start gate, so new scheduling cannot race
-                // the operator's venue-evidence decision.
-                Assert.Equal(HttpStatusCode.ServiceUnavailable, (await http2.GetAsync("/ready")).StatusCode);
+                // behind the per-firm business-ingress gate, so new
+                // scheduling cannot race the operator's venue-evidence
+                // decision. #780: this no longer 503s /ready itself —
+                // reconciliation-pending is a per-firm order-submission
+                // concern, not a pod-routing concern.
+                Assert.Equal(HttpStatusCode.OK, (await http2.GetAsync("/ready")).StatusCode);
                 Assert.Equal(HttpStatusCode.OK, (await http2.GetAsync("/live")).StatusCode);
 
                 // Diagnostic reads remain available while business scheduling
