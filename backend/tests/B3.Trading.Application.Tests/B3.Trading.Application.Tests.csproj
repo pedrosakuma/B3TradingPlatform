@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="B3.EntryPoint.Client.TestPeer" />
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="FsCheck" />
     <PackageReference Include="FsCheck.Xunit" />
