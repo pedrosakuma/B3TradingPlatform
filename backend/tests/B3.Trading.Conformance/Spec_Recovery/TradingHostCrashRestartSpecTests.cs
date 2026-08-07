@@ -10,6 +10,7 @@ namespace B3.Trading.Conformance.Spec_Recovery;
 [Trait("Category", "Conformance")]
 public class TradingHostCrashRestartSpecTests
 {
+    private const string Firm01 = "FIRM01";
     private const string Firm02 = "FIRM02";
     private const string Firm02User = "bob-firm02";
     private const string OutageFillSymbol = "PETR4";
@@ -143,12 +144,16 @@ public class TradingHostCrashRestartSpecTests
     {
         var peer = PlatformEndpoint.TryResolve()!;
         using var http = new HttpClient { BaseAddress = peer.BaseUrl };
-        var firmAuth = await LoginWithRetryAsync(http, Firm02User, peer.Password);
+        // Use alice/FIRM01 (not bob-firm02/FIRM02): this overlay only opts
+        // alice out of the no_naked_short and self-trade-prevention gates
+        // (docker-compose.real-conformance.yml), and FIRM01 also matches
+        // the actual incident firm being reproduced.
+        var firmAuth = await LoginWithRetryAsync(http, peer.Username, peer.Password);
         var adminAuth = await LoginWithRetryAsync(http, peer.AdminUsername!, peer.AdminPassword!);
         var docker = new DockerVenueTransportController();
 
         await WaitForReadyAsync(http);
-        _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
+        _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm01);
 
         var burstPrice = SessionRollSpecSupport.PriceNearLowerCollar(
             await SessionRollSpecSupport.GetEffectiveReferencePriceAsync(http, adminAuth, OutageFillSymbol));
@@ -191,7 +196,7 @@ public class TradingHostCrashRestartSpecTests
         // that terminal range (as observed in the sandbox incident), this
         // times out with /ready stuck at 503 — reproducing the outage.
         await WaitForReadyAsync(http);
-        _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm02);
+        _ = await WaitForFirmEstablishedAsync(http, adminAuth, Firm01);
 
         foreach (var clOrdId in burstClOrdIds)
         {
