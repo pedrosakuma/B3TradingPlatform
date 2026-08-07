@@ -112,6 +112,13 @@ const state = {
   killStatus: null,        // { endClients: [], firms: [], fetchedAt } | null — admin-only
   haltStatus: null,        // { symbols: [], fetchedAt } | null — admin-only
   eodReport: null,         // { ranAt, report } | null — last EOD response in this session
+  // #785. Outbound mutation reconciliation (admin-only). `outboundMutations`
+  // is the requiresReconciliation=true list; `outboundMutationDetail` is the
+  // currently expanded row's full timeline (attempts/evidence/proposals),
+  // keyed by mutationId so a stale detail response can't clobber a newer
+  // selection.
+  outboundMutations: null,       // { firmId, mutations: [], fetchedAt } | null
+  outboundMutationDetail: null,  // { mutationId, detail, fetchedAt } | null
   currentView: "trader",   // "trader" | "algos" | "history" | "settings" | "admin" | "compliance" — which view is mounted
   // Fase 3 (#399). Settings is now a shell with 4 inline sub-tabs.
   // The legacy `bot-credentials` view collapses into this slice as
@@ -894,6 +901,16 @@ export function setHaltStatus(value) {
 export function setEodReport(value) {
   state.eodReport = value;
   notify("eodReport");
+}
+
+export function setOutboundMutations(value) {
+  state.outboundMutations = value;
+  notify("outboundMutations");
+}
+
+export function setOutboundMutationDetail(value) {
+  state.outboundMutationDetail = value;
+  notify("outboundMutationDetail");
 }
 
 export function setCurrentView(view) {

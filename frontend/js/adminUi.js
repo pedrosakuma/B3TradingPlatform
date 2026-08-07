@@ -15,6 +15,12 @@ let onToggleHalt = () => {};
 let onAddHalt = () => {};
 let onRunEod = () => {};
 let onRefresh = () => {};
+let onLoadOutboundMutations = () => {};
+let onLoadOutboundMutationDetail = () => {};
+let onRegisterOutboundEvidence = () => {};
+let onResolveOutboundMutation = () => {};
+let onApproveOutboundMutation = () => {};
+let currentUsername = null;
 
 export function setAdminHandlers(handlers) {
   onToggleFirm      = handlers.onToggleFirm      ?? onToggleFirm;
@@ -24,6 +30,15 @@ export function setAdminHandlers(handlers) {
   onAddHalt         = handlers.onAddHalt         ?? onAddHalt;
   onRunEod          = handlers.onRunEod          ?? onRunEod;
   onRefresh         = handlers.onRefresh         ?? onRefresh;
+  onLoadOutboundMutations       = handlers.onLoadOutboundMutations       ?? onLoadOutboundMutations;
+  onLoadOutboundMutationDetail  = handlers.onLoadOutboundMutationDetail  ?? onLoadOutboundMutationDetail;
+  onRegisterOutboundEvidence    = handlers.onRegisterOutboundEvidence    ?? onRegisterOutboundEvidence;
+  onResolveOutboundMutation     = handlers.onResolveOutboundMutation     ?? onResolveOutboundMutation;
+  onApproveOutboundMutation     = handlers.onApproveOutboundMutation     ?? onApproveOutboundMutation;
+  // Used only as a client-side UX hint (hide/disable Approve for the
+  // proposer's own session) — the server independently rejects
+  // self-approval regardless of what the UI shows (#785).
+  if (handlers.currentUsername !== undefined) currentUsername = handlers.currentUsername;
 }
 
 export function bindAdminUi() {
@@ -119,6 +134,8 @@ export function bindAdminUi() {
     }
   });
 
+  bindOutboundMutationsUi();
+
   subscribe(renderForSlice);
 }
 
@@ -126,11 +143,97 @@ function confirmTwice(first, second) {
   return window.confirm(first) && window.confirm(second);
 }
 
+// #785. Outbound mutation reconciliation panel wiring. Kept in its own
+// function (rather than inlined into bindAdminUi) because it owns a
+// small amount of local UI state — which mutationId is currently
+// expanded — that the other admin panels don't need.
+let expandedMutationId = null;
+
+function bindOutboundMutationsUi() {
+  $("outbound-mutations-filter-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    loadOutboundMutations();
+  });
+
+  $("outbound-mutations-body").addEventListener("click", (e) => {
+    const btn = e.target.closest(".outbound-mutation-expand");
+    if (!btn) return;
+    const mutationId = btn.dataset.mutationId;
+    expandedMutationId = expandedMutationId === mutationId ? null : mutationId;
+    if (expandedMutationId) onLoadOutboundMutationDetail(expandedMutationId);
+    renderOutboundMutations();
+    renderOutboundMutationDetail();
+  });
+
+  $("outbound-evidence-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!expandedMutationId) return;
+    const payload = {
+      sourceType: $("outbound-evidence-source-type").value,
+      evidenceReference: $("outbound-evidence-reference").value.trim(),
+      coverageStartUtc: toUtcIso($("outbound-evidence-coverage-start").value),
+      coverageEndUtc: toUtcIso($("outbound-evidence-coverage-end").value),
+      attestationReference: $("outbound-evidence-attestation").value.trim(),
+    };
+    await onRegisterOutboundEvidence(expandedMutationId, payload);
+  });
+
+  $("outbound-resolve-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!expandedMutationId) return;
+    const decision = $("outbound-resolve-decision").value;
+    if (!confirmTwice(
+      `Resolve mutation ${expandedMutationId} as "${decision}"?`,
+      decision === "venue_absent"
+        ? "Confirm: this requires a SECOND, DIFFERENT admin to approve before capacity is released."
+        : `Confirm: this decision applies immediately and cannot be un-sent.`,
+    )) return;
+    const payload = {
+      decision,
+      evidenceType: $("outbound-resolve-evidence-type").value,
+      evidenceReference: $("outbound-resolve-evidence-reference").value.trim(),
+      reason: $("outbound-resolve-reason").value.trim(),
+    };
+    await onResolveOutboundMutation(expandedMutationId, payload);
+  });
+
+  $("outbound-pending-proposals").addEventListener("click", (e) => {
+    const btn = e.target.closest(".outbound-approve-proposal");
+    if (!btn) return;
+    const mutationId = btn.dataset.mutationId;
+    const proposalId = btn.dataset.proposalId;
+    if (!confirmTwice(
+      `Approve resolution proposal ${proposalId}?`,
+      "Confirm: approving releases capacity for this mutation. This is a maker/checker step — you must be a DIFFERENT admin from the one who proposed it.",
+    )) return;
+    onApproveOutboundMutation(mutationId, proposalId);
+  });
+}
+
+function toUtcIso(datetimeLocalValue) {
+  if (!datetimeLocalValue) return null;
+  // <input type="datetime-local"> has no timezone; the operator is
+  // expected to enter the UTC wall-clock time directly (mirrors
+  // docs/RUNBOOK.md §0.1's evidence-registration examples, which are
+  // always expressed in UTC).
+  return `${datetimeLocalValue}:00Z`;
+}
+
+async function loadOutboundMutations() {
+  const stateFilter = $("outbound-mutations-state").value || undefined;
+  const requiresReconciliation = $("outbound-mutations-requires-reconciliation").checked
+    ? true
+    : undefined;
+  await onLoadOutboundMutations({ state: stateFilter, requiresReconciliation });
+}
+
 function renderForSlice(slice) {
   if (slice === "firmsHealth" || slice === "killStatus" || slice === "all") renderFirms();
   if (slice === "killStatus"  || slice === "all") renderEndClients();
   if (slice === "haltStatus"  || slice === "all") renderHalts();
   if (slice === "eodReport"   || slice === "all") renderEod();
+  if (slice === "outboundMutations"       || slice === "all") renderOutboundMutations();
+  if (slice === "outboundMutationDetail"  || slice === "all") renderOutboundMutationDetail();
   if (slice === "currentView") onViewChanged();
 }
 
@@ -143,6 +246,8 @@ function onViewChanged() {
     renderEndClients();
     renderHalts();
     renderEod();
+    renderOutboundMutations();
+    renderOutboundMutationDetail();
   }
 }
 
@@ -151,6 +256,8 @@ export function renderAdminAll() {
   renderEndClients();
   renderHalts();
   renderEod();
+  renderOutboundMutations();
+  renderOutboundMutationDetail();
 }
 
 function renderFirms() {
@@ -233,6 +340,84 @@ function renderHalts() {
   </tr>`).join("");
 }
 
+function renderOutboundMutations() {
+  const body = $("outbound-mutations-body");
+  if (!body) return;
+  const om = getState().outboundMutations;
+  if (!om) {
+    body.innerHTML = `<tr><td colspan="7" class="muted">awaiting /api/admin/outbound-mutations…</td></tr>`;
+    return;
+  }
+  const list = om.mutations ?? [];
+  if (list.length === 0) {
+    body.innerHTML = `<tr><td colspan="7" class="muted">no matching mutations</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map(m => {
+    const isExpanded = expandedMutationId === m.mutationId;
+    const pendingBadge = m.pendingApproval
+      ? `<span class="badge badge-warning badge-square badge-uppercase">pending approval</span>`
+      : "";
+    return `<tr${isExpanded ? ' class="firm-row-bad"' : ""}>
+      <td><code>${escapeHtml(m.mutationId)}</code></td>
+      <td>${escapeHtml(m.kind ?? "—")}</td>
+      <td>${escapeHtml(m.state ?? "—")} ${pendingBadge}</td>
+      <td>${escapeHtml(m.primaryClOrdId ?? m.PrimaryClOrdId ?? "—")}</td>
+      <td>${escapeHtml(formatUtcTime(m.recordedAtUtc ?? m.RecordedAtUtc))}</td>
+      <td>${escapeHtml(m.ambiguityReason ?? "—")}</td>
+      <td><button type="button" class="outbound-mutation-expand btn btn-secondary btn-sm"
+                  data-mutation-id="${escapeHtml(m.mutationId)}">
+        ${isExpanded ? "Hide" : "Details"}
+      </button></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderOutboundMutationDetail() {
+  const panel = $("outbound-mutation-detail");
+  if (!panel) return;
+  if (!expandedMutationId) { panel.hidden = true; return; }
+  panel.hidden = false;
+  setText("outbound-detail-id", expandedMutationId);
+  const detail = getState().outboundMutationDetail;
+  const summaryEl = $("outbound-detail-summary");
+  if (!detail || detail.mutationId !== expandedMutationId) {
+    if (summaryEl) summaryEl.textContent = "loading…";
+    $("outbound-pending-proposals").innerHTML = "";
+    return;
+  }
+  if (summaryEl) summaryEl.textContent = JSON.stringify(detail.detail, null, 2);
+
+  const proposals = detail.detail?.proposals ?? [];
+  const pending = proposals.filter(p => p.approvedAtUtc == null);
+  const proposalsEl = $("outbound-pending-proposals");
+  if (pending.length === 0) {
+    proposalsEl.innerHTML = "";
+    return;
+  }
+  proposalsEl.innerHTML = pending.map(p => {
+    // Client-side UX hint only (#785): a same-admin can't meaningfully
+    // "checker"-approve their own proposal, so hide the button when we
+    // know the current session is the maker. The server independently
+    // rejects self-approval regardless of what this renders.
+    const isSelf = currentUsername != null && p.makerRef === currentUsername;
+    if (isSelf) {
+      return `<p class="feedback">Proposal <code>${escapeHtml(p.proposalId)}</code>
+        (decision: ${escapeHtml(p.decision)}) awaits approval from a
+        <strong>different</strong> admin — you proposed it.</p>`;
+    }
+    return `<p>
+      Proposal <code>${escapeHtml(p.proposalId)}</code>
+      — decision: ${escapeHtml(p.decision)}, maker: ${escapeHtml(p.makerRef)}
+      <button type="button" class="outbound-approve-proposal btn btn-danger btn-sm"
+              data-mutation-id="${escapeHtml(expandedMutationId)}"
+              data-proposal-id="${escapeHtml(p.proposalId)}">
+        Approve
+      </button>
+    </p>`;
+  }).join("");
+}
+
 function renderEod() {
   const el = $("admin-eod-output");
   if (!el) return;
@@ -245,6 +430,15 @@ function renderEod() {
 
 export function setAdminFeedback(message, kind) {
   const el = $("admin-feedback");
+  if (!el) return;
+  if (!message) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = message;
+  el.className = `feedback ${kind === "ok" ? "ok" : kind === "error" ? "error" : ""}`;
+}
+
+export function setOutboundMutationsFeedback(message, kind) {
+  const el = $("outbound-mutations-feedback");
   if (!el) return;
   if (!message) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false;
