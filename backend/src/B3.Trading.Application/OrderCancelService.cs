@@ -41,6 +41,7 @@ public sealed class OrderCancelService
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
     private readonly IOutboundRecoveryGate _outboundRecovery;
+    private readonly Outbound.IOutboundCommandProtector? _commandProtector;
 
     public OrderCancelService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -58,7 +59,8 @@ public sealed class OrderCancelService
         CancelReplaceOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
         TimeProvider? clock = null,
-        IOutboundRecoveryGate? outboundRecovery = null)
+        IOutboundRecoveryGate? outboundRecovery = null,
+        Outbound.IOutboundCommandProtector? commandProtector = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -80,6 +82,7 @@ public sealed class OrderCancelService
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
         _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
+        _commandProtector = commandProtector;
     }
 
     /// <summary>
@@ -101,7 +104,9 @@ public sealed class OrderCancelService
         AlgoOutboundOriginIdentity? algoOriginIdentity = null)
     {
         if (firmId is { } recoveryFirm
-                ? !_outboundRecovery.IsBusinessIngressOpen(recoveryFirm)
+                ? !_outboundRecovery.IsBusinessIngressOpen(
+                    recoveryFirm,
+                    _commandProtector?.CreateStableEndClientRefCandidates(recoveryFirm, owner.Value))
                 : !_outboundRecovery.IsReady)
         {
             return OrderCancelResult.ReconciliationRequired(

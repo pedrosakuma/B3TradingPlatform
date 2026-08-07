@@ -47,6 +47,7 @@ public sealed class OrderModifyService
     private readonly RestOrderIdempotencyStore? _restIdempotency;
     private readonly TimeProvider _clock;
     private readonly IOutboundRecoveryGate _outboundRecovery;
+    private readonly IOutboundCommandProtector? _commandProtector;
 
     public OrderModifyService(
         ClOrdIdPrefixRegistry clOrdIds,
@@ -69,7 +70,8 @@ public sealed class OrderModifyService
         CancelReplaceOutboundCoordinator? outboundCoordinator = null,
         RestOrderIdempotencyStore? restIdempotency = null,
         TimeProvider? clock = null,
-        IOutboundRecoveryGate? outboundRecovery = null)
+        IOutboundRecoveryGate? outboundRecovery = null,
+        IOutboundCommandProtector? commandProtector = null)
     {
         _clOrdIds = clOrdIds;
         _ownership = ownership;
@@ -96,6 +98,7 @@ public sealed class OrderModifyService
         _restIdempotency = restIdempotency;
         _clock = clock ?? TimeProvider.System;
         _outboundRecovery = outboundRecovery ?? ImmediateOutboundRecoveryGate.Instance;
+        _commandProtector = commandProtector;
     }
 
     /// <summary>
@@ -126,7 +129,9 @@ public sealed class OrderModifyService
     public async Task<OrderModifyResult> ModifyAsync(OrderModifyRequest req, CancellationToken ct)
     {
         if (req?.FirmId is { } recoveryFirm
-                ? !_outboundRecovery.IsBusinessIngressOpen(recoveryFirm)
+                ? !_outboundRecovery.IsBusinessIngressOpen(
+                    recoveryFirm,
+                    _commandProtector?.CreateStableEndClientRefCandidates(recoveryFirm, req.Owner.Value))
                 : !_outboundRecovery.IsReady)
         {
             return OrderModifyResult.Drained;

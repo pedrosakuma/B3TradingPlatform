@@ -28,6 +28,27 @@ public sealed class DrainState : IDrainController
     private string? _reason;
 
     public bool IsDraining => Interlocked.Read(ref _draining) == 1;
+
+    /// <summary>
+    /// Narrower than <see cref="IsDraining"/>: true only when at least one
+    /// *non*-outbound-reconciliation drain reason is active (e.g.
+    /// <c>host_stopping</c>, a WAL/persistence fault). Outbound-reconciliation
+    /// reasons (<see cref="IsOutboundReconciliationReason"/>) mean specific
+    /// order mutations/end-clients require attention — not that the process
+    /// itself is unfit to receive traffic (see #780). Order-submission paths
+    /// should keep using <see cref="IsDraining"/> (a pending reconciliation
+    /// must still block new order mutations); only pod-routing probes
+    /// (<c>/ready</c>) should use this narrower signal.
+    /// </summary>
+    public bool BlocksPodRouting
+    {
+        get
+        {
+            lock (_gate)
+                return _reasons.Any(reason => !IsOutboundReconciliationReason(reason));
+        }
+    }
+
     public string? Reason => Volatile.Read(ref _reason);
     public TimeSpan Uptime => _uptime.Elapsed;
     public DateTimeOffset StartedAt { get; } = DateTimeOffset.UtcNow;
@@ -52,7 +73,8 @@ public sealed class DrainState : IDrainController
         {
             var removed =
                 _reasons.Remove("outbound_new_order_reconciliation_required") |
-                _reasons.Remove("outbound_cancel_replace_reconciliation_required");
+                _reasons.Remove("outbound_cancel_replace_reconciliation_required") |
+                _reasons.Remove("outbound_reconciliation_marker_recovered");
             return TryEndDrainUnsafe(removed);
         }
     }
@@ -88,6 +110,7 @@ public sealed class DrainState : IDrainController
         reason is
             "outbound_new_order_reconciliation_required" or
             "outbound_cancel_replace_reconciliation_required" or
+            "outbound_reconciliation_marker_recovered" or
             "cold_start_unresolved_lifecycle_intents";
 }
 

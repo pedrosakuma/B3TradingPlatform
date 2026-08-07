@@ -25,8 +25,48 @@ public interface IOutboundRecoveryGate
     string? FailureReason { get; }
     IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot();
     bool IsBusinessIngressOpen(string firmId);
+
+    /// <summary>
+    /// Per-end-client business-ingress check (#781 layer 2): narrower than
+    /// <see cref="IsBusinessIngressOpen(string)"/> — only the specific
+    /// end-client with a pending mutation is blocked, not the whole firm.
+    /// <paramref name="endClientRef"/> should be the stable, privacy-safe ref
+    /// (see <c>IOutboundCommandProtector.CreateStableEndClientRef</c>), or
+    /// null/empty if the caller cannot resolve one yet (falls back to the
+    /// firm-level check).
+    /// </summary>
+    bool IsBusinessIngressOpen(string firmId, string? endClientRef);
+
+    /// <summary>
+    /// Candidate-aware counterpart of
+    /// <see cref="IsBusinessIngressOpen(string, string)"/>: a stable-reference
+    /// key rotation changes what <c>CreateStableEndClientRef</c> returns for
+    /// the same (firm, end-client) pair going forward, but a mutation
+    /// recorded before the rotation still carries the ref computed under the
+    /// previous key. Callers should pass every ref still produced by a
+    /// currently-loaded key (see
+    /// <c>IOutboundCommandProtector.CreateStableEndClientRefCandidates</c>)
+    /// so a pending blocker recorded under an older key is not silently
+    /// bypassed right after a rotation. The end-client is blocked if ANY
+    /// candidate has a pending blocker.
+    /// </summary>
+    bool IsBusinessIngressOpen(string firmId, IReadOnlyCollection<string>? endClientRefCandidates);
+
     ValueTask WaitUntilClassificationCompleteAsync(CancellationToken cancellationToken);
     ValueTask WaitUntilBusinessIngressOpenAsync(string firmId, CancellationToken cancellationToken);
+
+    /// <summary>Per-end-client counterpart of <see cref="WaitUntilBusinessIngressOpenAsync(string, CancellationToken)"/>.</summary>
+    ValueTask WaitUntilBusinessIngressOpenAsync(
+        string firmId,
+        string? endClientRef,
+        CancellationToken cancellationToken);
+
+    /// <summary>Candidate-aware counterpart, see <see cref="IsBusinessIngressOpen(string, IReadOnlyCollection{string})"/>.</summary>
+    ValueTask WaitUntilBusinessIngressOpenAsync(
+        string firmId,
+        IReadOnlyCollection<string>? endClientRefCandidates,
+        CancellationToken cancellationToken);
+
     ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(CancellationToken cancellationToken);
 }
 
@@ -48,12 +88,28 @@ public sealed class ImmediateOutboundRecoveryGate : IOutboundRecoveryGate
 
     public bool IsBusinessIngressOpen(string firmId) => true;
 
+    public bool IsBusinessIngressOpen(string firmId, string? endClientRef) => true;
+
+    public bool IsBusinessIngressOpen(string firmId, IReadOnlyCollection<string>? endClientRefCandidates) => true;
+
     public ValueTask WaitUntilClassificationCompleteAsync(
         CancellationToken cancellationToken) =>
         ValueTask.CompletedTask;
 
     public ValueTask WaitUntilBusinessIngressOpenAsync(
         string firmId,
+        CancellationToken cancellationToken) =>
+        ValueTask.CompletedTask;
+
+    public ValueTask WaitUntilBusinessIngressOpenAsync(
+        string firmId,
+        string? endClientRef,
+        CancellationToken cancellationToken) =>
+        ValueTask.CompletedTask;
+
+    public ValueTask WaitUntilBusinessIngressOpenAsync(
+        string firmId,
+        IReadOnlyCollection<string>? endClientRefCandidates,
         CancellationToken cancellationToken) =>
         ValueTask.CompletedTask;
 
@@ -189,20 +245,36 @@ public sealed class OutboundRecoveryState : IOutboundRecoveryGate
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(static firm => firm, StringComparer.Ordinal)
                 .ToArray();
-            var unknownBlockers = _recoveryHadUnknownBlockers
-                ? blockers.GetValueOrDefault(OutboundMutationLedger.UnknownFirmId)
-                : 0;
-            return firms.Select(firm =>
+            var statuses = firms.Select(firm =>
             {
-                var count = (_recoveryBlockingFirms.Contains(firm)
+                var count = _recoveryBlockingFirms.Contains(firm)
                     ? blockers.GetValueOrDefault(firm)
-                    : 0) + unknownBlockers;
+                    : 0;
                 return new FirmOutboundRecoveryStatus(
                     firm,
                     _requiredFirms.Contains(firm),
                     IsClassificationComplete && count == 0,
                     count);
-            }).ToArray();
+            });
+
+            // #781 layer 3: unattributed (unknown-firm) evidence is surfaced
+            // as its own line item for operator visibility, but must never
+            // be smeared into every firm's blocking count — that would
+            // reopen the cross-firm broadcast this fix removes from
+            // IsBusinessIngressOpen below.
+            var unknownCount = _recoveryHadUnknownBlockers
+                ? blockers.GetValueOrDefault(OutboundMutationLedger.UnknownFirmId)
+                : 0;
+            if (unknownCount > 0)
+            {
+                statuses = statuses.Append(new FirmOutboundRecoveryStatus(
+                    OutboundMutationLedger.UnknownFirmId,
+                    Required: false,
+                    BusinessIngressOpen: false,
+                    unknownCount));
+            }
+
+            return statuses.ToArray();
         }
     }
 
@@ -217,11 +289,58 @@ public sealed class OutboundRecoveryState : IOutboundRecoveryGate
             {
                 return false;
             }
+
+            // #781 layer 3: unattributed evidence for a *different* firm
+            // (unknown FirmId) no longer blocks this firm's ingress — it is
+            // surfaced separately via Snapshot() for operator investigation
+            // instead of broadcasting to every unrelated firm.
             var blockers = BlockingCountsUnsafe();
-            return (!_recoveryHadUnknownBlockers
-                    || blockers.GetValueOrDefault(OutboundMutationLedger.UnknownFirmId) == 0)
-                && (!_recoveryBlockingFirms.Contains(firmId)
-                    || blockers.GetValueOrDefault(firmId) == 0);
+            return !_recoveryBlockingFirms.Contains(firmId)
+                || blockers.GetValueOrDefault(firmId) == 0;
+        }
+    }
+
+    public bool IsBusinessIngressOpen(string firmId, string? endClientRef) =>
+        IsBusinessIngressOpen(
+            firmId,
+            string.IsNullOrWhiteSpace(endClientRef) ? null : new[] { endClientRef });
+
+    public bool IsBusinessIngressOpen(
+        string firmId, IReadOnlyCollection<string>? endClientRefCandidates)
+    {
+        if (endClientRefCandidates is null || endClientRefCandidates.Count == 0)
+            return IsBusinessIngressOpen(firmId);
+        if (string.IsNullOrWhiteSpace(firmId))
+            return false;
+        lock (_gate)
+        {
+            if (_phase is not (OutboundRecoveryPhase.Complete
+                    or OutboundRecoveryPhase.ReconciliationRequired))
+            {
+                return false;
+            }
+            if (!_recoveryBlockingFirms.Contains(firmId))
+                return true;
+
+            var byEndClient = _ledger.GetReadinessBlockingCountsByEndClient(firmId);
+            // Unmatched inbound evidence for this firm cannot be attributed
+            // to a specific end-client, so it is treated as blocking every
+            // end-client of the firm — we cannot safely rule any of them out.
+            if (byEndClient.GetValueOrDefault(OutboundMutationLedger.UnknownEndClientRef) > 0)
+                return false;
+
+            // A stable-reference key rotation changes what
+            // CreateStableEndClientRef returns for the same end-client going
+            // forward, but a mutation recorded under a previous key still
+            // carries that key's ref. Checking every currently-supported
+            // candidate (not just the active one) keeps a pending blocker
+            // from a pre-rotation mutation from being silently bypassed.
+            foreach (var candidate in endClientRefCandidates)
+            {
+                if (byEndClient.GetValueOrDefault(candidate) > 0)
+                    return false;
+            }
+            return true;
         }
     }
 
@@ -235,6 +354,26 @@ public sealed class OutboundRecoveryState : IOutboundRecoveryGate
     {
         await WaitUntilClassificationCompleteAsync(cancellationToken).ConfigureAwait(false);
         while (!IsBusinessIngressOpen(firmId))
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask WaitUntilBusinessIngressOpenAsync(
+        string firmId,
+        string? endClientRef,
+        CancellationToken cancellationToken)
+    {
+        await WaitUntilClassificationCompleteAsync(cancellationToken).ConfigureAwait(false);
+        while (!IsBusinessIngressOpen(firmId, endClientRef))
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask WaitUntilBusinessIngressOpenAsync(
+        string firmId,
+        IReadOnlyCollection<string>? endClientRefCandidates,
+        CancellationToken cancellationToken)
+    {
+        await WaitUntilClassificationCompleteAsync(cancellationToken).ConfigureAwait(false);
+        while (!IsBusinessIngressOpen(firmId, endClientRefCandidates))
             await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
     }
 

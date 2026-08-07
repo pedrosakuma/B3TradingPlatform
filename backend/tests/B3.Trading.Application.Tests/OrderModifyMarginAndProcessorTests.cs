@@ -379,12 +379,26 @@ public class OrderModifyMarginAndProcessorTests
         public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
 
         public bool IsBusinessIngressOpen(string firmId) => false;
+        public bool IsBusinessIngressOpen(string firmId, string? endClientRef) => false;
+        public bool IsBusinessIngressOpen(string firmId, IReadOnlyCollection<string>? endClientRefCandidates) => false;
 
         public async ValueTask WaitUntilClassificationCompleteAsync(CancellationToken cancellationToken) =>
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
 
         public async ValueTask WaitUntilBusinessIngressOpenAsync(
             string firmId,
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        public async ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            string? endClientRef,
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        public async ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            IReadOnlyCollection<string>? endClientRefCandidates,
             CancellationToken cancellationToken) =>
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
 

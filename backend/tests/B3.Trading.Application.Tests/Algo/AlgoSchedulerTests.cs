@@ -366,10 +366,22 @@ public class AlgoSchedulerTests
         public string? FailureReason => null;
         public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
         public bool IsBusinessIngressOpen(string firmId) => false;
+        public bool IsBusinessIngressOpen(string firmId, string? endClientRef) => false;
+        public bool IsBusinessIngressOpen(string firmId, IReadOnlyCollection<string>? endClientRefCandidates) => false;
         public ValueTask WaitUntilClassificationCompleteAsync(CancellationToken cancellationToken) =>
             ValueTask.CompletedTask;
         public ValueTask WaitUntilBusinessIngressOpenAsync(
             string firmId,
+            CancellationToken cancellationToken) =>
+            new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+        public ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            string? endClientRef,
+            CancellationToken cancellationToken) =>
+            new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
+        public ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            IReadOnlyCollection<string>? endClientRefCandidates,
             CancellationToken cancellationToken) =>
             new(Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken));
         public ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(

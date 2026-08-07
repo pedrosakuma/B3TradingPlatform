@@ -92,6 +92,49 @@ public sealed class OutboundMutationLedger
             counts[firmId] = counts.GetValueOrDefault(firmId) + 1;
     }
 
+    /// <summary>
+    /// Readiness-blocking counts scoped to <paramref name="firmId"/>, keyed
+    /// by end-client ref (#781 layer 2). Unmatched inbound evidence for the
+    /// firm cannot be attributed to a specific end-client, so it is bucketed
+    /// under <see cref="UnknownEndClientRef"/> — that bucket is intentionally
+    /// treated as blocking *every* end-client of the firm (we cannot rule any
+    /// of them out), unlike the cross-firm <see cref="UnknownFirmId"/> bucket
+    /// (#781 layer 3), which must never broadcast beyond its own
+    /// unattributed scope.
+    /// </summary>
+    public const string UnknownEndClientRef = "<unknown>";
+
+    public IReadOnlyDictionary<string, int> GetReadinessBlockingCountsByEndClient(string firmId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(firmId);
+        lock (_gate)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var mutation in _mutations.Values.Where(m =>
+                         IsReadinessBlocking(m) && string.Equals(m.FirmId, firmId, StringComparison.Ordinal)))
+            {
+                Increment(
+                    counts,
+                    string.IsNullOrWhiteSpace(mutation.EndClientRef) ? UnknownEndClientRef : mutation.EndClientRef);
+            }
+            foreach (var evidence in _inboundEvidence.Values.Where(e =>
+                         string.Equals(e.FirmId, firmId, StringComparison.Ordinal)
+                         && e.Disposition is not InboundVenueEvidenceDisposition.Matched
+                             and not InboundVenueEvidenceDisposition.SupersededSession
+                         && (e.MatchedMutationIds.Count == 0
+                             || !e.MatchedMutationIds.Any(_mutations.ContainsKey))))
+            {
+                // Inbound evidence carries no end-client attribution — it can
+                // only be scoped to the firm it arrived for.
+                Increment(counts, UnknownEndClientRef);
+            }
+            return counts;
+        }
+
+        static void Increment(Dictionary<string, int> counts, string endClientRef) =>
+            counts[endClientRef] = counts.GetValueOrDefault(endClientRef) + 1;
+    }
+
     public int InboundEvidenceCount
     {
         get { lock (_gate) return _inboundEvidence.Count; }

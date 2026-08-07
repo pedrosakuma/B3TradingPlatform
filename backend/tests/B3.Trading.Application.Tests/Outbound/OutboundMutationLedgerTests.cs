@@ -472,6 +472,75 @@ public sealed class OutboundMutationLedgerTests
     }
 
     [Fact]
+    public void RecoveryGate_BlocksOnlyTheAffectedEndClient_NotSiblingsOfTheSameFirm()
+    {
+        // #781 layer 2: an ambiguous mutation for one end-client of a firm
+        // must not close ingress for other, unaffected end-clients of the
+        // same firm.
+        var blocked = Fixture.Create();
+        blocked.Ledger.Apply(blocked.Approved with { EndClientRef = new string('a', 32) });
+        blocked.Ledger.Apply(blocked.Intent);
+        blocked.Ledger.Apply(blocked.Frame);
+        blocked.Ledger.MarkAmbiguous(
+            blocked.MutationId,
+            blocked.AttemptId,
+            OutboundAmbiguityReason.DeadEpochFramePrepared,
+            T0.AddMinutes(1));
+
+        var clean = Fixture.Create(clOrdId: 203);
+        blocked.Ledger.Apply(clean.Approved with { EndClientRef = new string('b', 32) });
+
+        var state = new OutboundRecoveryState(blocked.Ledger);
+        state.ConfigureRequiredFirms(["F1"]);
+        state.Complete();
+
+        Assert.Equal(OutboundRecoveryPhase.ReconciliationRequired, state.Phase);
+        Assert.False(state.IsBusinessIngressOpen("F1"));
+        Assert.False(state.IsBusinessIngressOpen("F1", new string('a', 32)));
+        Assert.True(state.IsBusinessIngressOpen("F1", new string('b', 32)));
+        // An end-client with no evidence at all is equally unaffected.
+        Assert.True(state.IsBusinessIngressOpen("F1", new string('c', 32)));
+    }
+
+    [Fact]
+    public void RecoveryGate_CandidateOverload_CatchesBlockerRecordedUnderAnOlderStableRefKey()
+    {
+        // A stable-reference key rotation changes what
+        // CreateStableEndClientRef returns for the same end-client going
+        // forward; a blocker recorded under the OLD key must still be
+        // found via the candidate-set overload (which callers populate
+        // from CreateStableEndClientRefCandidates across every
+        // currently-supported key), not silently bypassed because the
+        // single, now-active-key ref differs.
+        var oldKeyRef = new string('e', 32);
+        var newKeyRef = new string('f', 32);
+
+        var blocked = Fixture.Create();
+        blocked.Ledger.Apply(blocked.Approved with { EndClientRef = oldKeyRef });
+        blocked.Ledger.Apply(blocked.Intent);
+        blocked.Ledger.Apply(blocked.Frame);
+        blocked.Ledger.MarkAmbiguous(
+            blocked.MutationId,
+            blocked.AttemptId,
+            OutboundAmbiguityReason.DeadEpochFramePrepared,
+            T0.AddMinutes(1));
+
+        var state = new OutboundRecoveryState(blocked.Ledger);
+        state.ConfigureRequiredFirms(["F1"]);
+        state.Complete();
+
+        Assert.Equal(OutboundRecoveryPhase.ReconciliationRequired, state.Phase);
+        // Checking only the post-rotation ref would wrongly report open.
+        Assert.True(state.IsBusinessIngressOpen("F1", newKeyRef));
+        // The candidate-set overload, given every currently-supported key's
+        // ref, correctly still finds the pre-rotation blocker.
+        Assert.False(state.IsBusinessIngressOpen("F1", new[] { newKeyRef, oldKeyRef }));
+        // An end-client whose refs (old or new) never appear stays open.
+        Assert.True(state.IsBusinessIngressOpen(
+            "F1", new[] { new string('p', 32), new string('q', 32) }));
+    }
+
+    [Fact]
     public void RetryAfterProvenUnsent_RequiresFreshAttemptAndClOrdId_AndIsFinite()
     {
         var fixture = Fixture.Create();

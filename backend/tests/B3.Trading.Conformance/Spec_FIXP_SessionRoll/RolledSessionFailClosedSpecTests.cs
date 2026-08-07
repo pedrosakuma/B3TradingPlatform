@@ -100,8 +100,11 @@ public sealed class RolledSessionFailClosedSpecTests
                         mutation.State,
                         "ambiguous",
                         StringComparison.OrdinalIgnoreCase));
+                // #780: an ambiguous mutation for this firm no longer 503s
+                // /ready pod-wide — it's enforced as a per-firm
+                // order-submission block below instead.
                 Assert.Equal(
-                    HttpStatusCode.ServiceUnavailable,
+                    HttpStatusCode.OK,
                     (await http.GetAsync("/ready")).StatusCode);
                 using var blocked = await SubmitOrderAsync(
                     http,

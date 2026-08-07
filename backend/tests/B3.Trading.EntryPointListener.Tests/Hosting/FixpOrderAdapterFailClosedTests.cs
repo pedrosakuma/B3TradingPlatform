@@ -51,6 +51,72 @@ public class FixpOrderAdapterFailClosedTests
     }
 
     [Fact]
+    public async Task RecoveryGate_ScopesRejectionToTheBotsOwnEndClient_NotWholeFirm()
+    {
+        // #781 layer 2: a firm-wide gate check would reject every bot in
+        // the firm the moment ANY end-client of that firm has an
+        // unresolved mutation. The adapter must resolve the bot's own
+        // synthetic "bot:<credShortId>" end-client ref and gate on that.
+        var credentialId = Guid.NewGuid();
+        const ulong externalClOrdId = 77;
+        var protector = new FakeCommandProtector();
+        var gate = new PerEndClientRecoveryGate(
+            openFirms: ["FIRM-A"],
+            blockedEndClientRefs:
+            [
+                protector.CreateStableEndClientRef("FIRM-A", "bot:blocked-cred"),
+            ]);
+        var adapter = new FixpOrderAdapter(
+            new SymbolDirectory(new SymbolDirectoryOptions()),
+            submit: null!,
+            cancel: null!,
+            new InMemoryUserBotOrderMappingRegistry(),
+            NullLogger.Instance,
+            gate,
+            protector);
+
+        var unaffectedScope = new FixpConnectionScope(
+            "conn-unaffected",
+            new BotSessionPrincipal("alice", credentialId, "unaffected-cred", "bot", "FIRM-A"),
+            new BotSessionState(credentialId, 10, 2, 0));
+        await using var unaffectedStream = new MemoryStream();
+        var unaffectedOutcome = await adapter.HandleNewOrderSingleAsync(
+            unaffectedStream,
+            new DecodedNewOrderSingle { MsgSeqNum = 1, ClOrdId = externalClOrdId },
+            unaffectedScope,
+            CancellationToken.None);
+
+        // No "Drained" reject was written for the unaffected bot: the
+        // gate let it through the pre-check. The frame that IS written
+        // reflects decode/shape validation (unrelated to the readiness
+        // gate under test, since side/type/tif are left unset here).
+        var reader = new SofhFrameReader();
+        reader.Append(unaffectedStream.ToArray());
+        Assert.True(reader.TryReadFrame(out var unaffectedFrame));
+        Assert.NotEqual(
+            1005u,
+            BinaryPrimitives.ReadUInt32LittleEndian(unaffectedFrame.Payload[32..]));
+
+        var blockedScope = new FixpConnectionScope(
+            "conn-blocked",
+            new BotSessionPrincipal("bob", Guid.NewGuid(), "blocked-cred", "bot", "FIRM-A"),
+            new BotSessionState(Guid.NewGuid(), 10, 2, 0));
+        await using var blockedStream = new MemoryStream();
+        var blockedOutcome = await adapter.HandleNewOrderSingleAsync(
+            blockedStream,
+            new DecodedNewOrderSingle { MsgSeqNum = 1, ClOrdId = externalClOrdId },
+            blockedScope,
+            CancellationToken.None);
+
+        Assert.True(blockedOutcome.ShouldKeepSession);
+        var blockedReader = new SofhFrameReader();
+        blockedReader.Append(blockedStream.ToArray());
+        Assert.True(blockedReader.TryReadFrame(out var blockedFrame));
+        Assert.Equal((ushort)BusinessMessageRejectData.MESSAGE_ID, blockedFrame.TemplateId);
+        Assert.Equal(1005u, BinaryPrimitives.ReadUInt32LittleEndian(blockedFrame.Payload[32..]));
+    }
+
+    [Fact]
     public async Task NonDefaultCredentialFirm_FlowsIntoSubmittedOrder()
     {
         var credentialId = Guid.NewGuid();
@@ -623,6 +689,100 @@ public class FixpOrderAdapterFailClosedTests
         public void BeginDrain(string reason) => IsDraining = true;
     }
 
+    private sealed class FakeCommandProtector : IOutboundCommandProtector
+    {
+        private static readonly OutboundStableReferenceKey Key = new("test-key", 1);
+
+        public EncryptedOutboundCommandEnvelope Encrypt(
+            OutboundMutationId mutationId,
+            string firmId,
+            OutboundCanonicalCommand command,
+            IReadOnlyList<OutboundSensitiveFieldRef> sensitiveFieldRefs,
+            SensitiveOutboundCommand sensitiveCommand) =>
+            throw new NotSupportedException();
+
+        public SensitiveOutboundCommand Decrypt(
+            OutboundMutationId mutationId,
+            string firmId,
+            OutboundCanonicalCommand command,
+            IReadOnlyList<OutboundSensitiveFieldRef> sensitiveFieldRefs,
+            EncryptedOutboundCommandEnvelope envelope) =>
+            throw new NotSupportedException();
+
+        public string CreateStableEndClientRef(string firmId, string endClientId) =>
+            CreateStableReference(Key, $"{firmId}\n{endClientId}");
+
+        public IReadOnlyCollection<string> CreateStableEndClientRefCandidates(
+            string firmId, string endClientId) =>
+            [CreateStableEndClientRef(firmId, endClientId)];
+
+        public OutboundStableReferenceKey ActiveStableReferenceKey => Key;
+
+        public string CreateStableReference(
+            OutboundStableReferenceKey keyIdentity, string canonicalValue) =>
+            $"{keyIdentity.KeyId}:{keyIdentity.KeyVersion}:{canonicalValue}";
+    }
+
+    /// <summary>
+    /// Test-only gate that mirrors <c>OutboundRecoveryState</c>'s
+    /// per-end-client semantics closely enough to prove the adapter
+    /// resolves and forwards the bot's own end-client ref: a firm is
+    /// open unless one of its explicitly listed end-client refs is
+    /// blocked.
+    /// </summary>
+    private sealed class PerEndClientRecoveryGate : IOutboundRecoveryGate
+    {
+        private readonly HashSet<string> _openFirms;
+        private readonly HashSet<string> _blockedEndClientRefs;
+
+        public PerEndClientRecoveryGate(
+            IEnumerable<string> openFirms,
+            IEnumerable<string> blockedEndClientRefs)
+        {
+            _openFirms = new HashSet<string>(openFirms, StringComparer.Ordinal);
+            _blockedEndClientRefs = new HashSet<string>(
+                blockedEndClientRefs, StringComparer.Ordinal);
+        }
+
+        public OutboundRecoveryPhase Phase => OutboundRecoveryPhase.Complete;
+        public bool IsClassificationComplete => true;
+        public bool IsReady => true;
+        public string? FailureReason => null;
+        public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
+
+        public bool IsBusinessIngressOpen(string firmId) => _openFirms.Contains(firmId);
+
+        public bool IsBusinessIngressOpen(string firmId, string? endClientRef) =>
+            IsBusinessIngressOpen(firmId) &&
+            (endClientRef is null || !_blockedEndClientRefs.Contains(endClientRef));
+
+        public bool IsBusinessIngressOpen(
+            string firmId, IReadOnlyCollection<string>? endClientRefCandidates) =>
+            IsBusinessIngressOpen(firmId) &&
+            (endClientRefCandidates is null
+                || endClientRefCandidates.Count == 0
+                || !endClientRefCandidates.Any(_blockedEndClientRefs.Contains));
+
+        public ValueTask WaitUntilClassificationCompleteAsync(
+            CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+        public ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+        public ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId, string? endClientRef, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            IReadOnlyCollection<string>? endClientRefCandidates,
+            CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(
+            CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
     private sealed class ClosedRecoveryGate : IOutboundRecoveryGate
     {
         public OutboundRecoveryPhase Phase => OutboundRecoveryPhase.RestoringPersistence;
@@ -631,11 +791,24 @@ public class FixpOrderAdapterFailClosedTests
         public string? FailureReason => null;
         public IReadOnlyList<FirmOutboundRecoveryStatus> Snapshot() => [];
         public bool IsBusinessIngressOpen(string firmId) => false;
+        public bool IsBusinessIngressOpen(string firmId, string? endClientRef) => false;
+        public bool IsBusinessIngressOpen(
+            string firmId, IReadOnlyCollection<string>? endClientRefCandidates) => false;
         public async ValueTask WaitUntilClassificationCompleteAsync(
             CancellationToken cancellationToken) =>
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         public async ValueTask WaitUntilBusinessIngressOpenAsync(
             string firmId,
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        public async ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            string? endClientRef,
+            CancellationToken cancellationToken) =>
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        public async ValueTask WaitUntilBusinessIngressOpenAsync(
+            string firmId,
+            IReadOnlyCollection<string>? endClientRefCandidates,
             CancellationToken cancellationToken) =>
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         public async ValueTask WaitUntilAllRequiredBusinessIngressOpenAsync(

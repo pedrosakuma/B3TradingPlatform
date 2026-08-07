@@ -20,9 +20,15 @@ namespace B3.Trading.Host.Lifecycle;
 /// <list type="bullet">
 ///   <item><c>/live</c> — process is up. Always 200 unless the runtime
 ///   has died. Used by liveness probes to decide whether to restart.</item>
-///   <item><c>/ready</c> — order ingress is safe: active-host fence held,
-///   outbound recovery resolved, not draining, identity and WAL healthy, and
-///   every required exchange session established.</item>
+///   <item><c>/ready</c> — the pod itself is fit to receive traffic: active-host
+///   fence held, cold-start recovery has finished classifying (not necessarily
+///   resolving) outbound state, not hard-draining (shutdown/fault — see
+///   <see cref="DrainState.BlocksPodRouting"/>), identity and WAL healthy, and
+///   every required exchange session established. Deliberately does *not*
+///   require outbound-mutation reconciliation to be fully resolved (#780) —
+///   that's a per-firm/per-end-client order-submission concern enforced at
+///   the mutation endpoints (<see cref="IOutboundRecoveryGate.IsBusinessIngressOpen"/>),
+///   not a reason to pull the whole pod out of Service rotation.</item>
 ///   <item><c>/health</c> — rich JSON for humans + dashboards. Includes
 ///   uptime, drain state, persistence config snapshot.</item>
 /// </list>
@@ -52,10 +58,10 @@ public static class HealthEndpoints
             CancellationToken ct) =>
         {
             var sessions = ctx.RequestServices.GetService<IFirmSessionStatusProvider>();
-            if (drain.IsDraining
+            if (drain.BlocksPodRouting
                 || !wal.IsHealthy
                 || !fence.IsHeld
-                || !recovery.IsReady
+                || !recovery.IsClassificationComplete
                 || !IsExchangeReady(exchange, sessions))
                 return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             var identity = await directory.CheckHealthAsync(ct);

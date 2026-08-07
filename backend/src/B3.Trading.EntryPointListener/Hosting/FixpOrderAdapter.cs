@@ -67,6 +67,7 @@ internal sealed class FixpOrderAdapter
     private readonly IUserBotOrderMappingRegistry _botMappings;
     private readonly ILogger _logger;
     private readonly IOutboundRecoveryGate _recovery;
+    private readonly IOutboundCommandProtector? _commandProtector;
 
     public FixpOrderAdapter(
         SymbolDirectory symbols,
@@ -74,7 +75,8 @@ internal sealed class FixpOrderAdapter
         OrderCancelService cancel,
         IUserBotOrderMappingRegistry botMappings,
         ILogger logger,
-        IOutboundRecoveryGate? recovery = null)
+        IOutboundRecoveryGate? recovery = null,
+        IOutboundCommandProtector? commandProtector = null)
     {
         _symbols = symbols;
         _submit = submit;
@@ -82,7 +84,21 @@ internal sealed class FixpOrderAdapter
         _botMappings = botMappings;
         _logger = logger;
         _recovery = recovery ?? ImmediateOutboundRecoveryGate.Instance;
+        _commandProtector = commandProtector;
     }
+
+    /// <summary>
+    /// #781 layer 2: resolves the same stable per-end-client reference
+    /// used by the REST/algo endpoints, so a FIXP bot connection is only
+    /// gated by its own bot end-client's blockers, not by every other
+    /// end-client of the firm (see <see cref="OwnerFor"/> for the
+    /// synthetic "bot:&lt;credShortId&gt;" end-client id).
+    /// </summary>
+    private bool IsBusinessIngressOpenFor(FixpConnectionScope scope) =>
+        _recovery.IsBusinessIngressOpen(
+            scope.Principal.FirmId,
+            _commandProtector?.CreateStableEndClientRefCandidates(
+                scope.Principal.FirmId, OwnerFor(scope).Value));
 
     /// <summary>
     /// Decode an inbound <c>NewOrderSingle</c> (id=102) and dispatch it
@@ -101,7 +117,7 @@ internal sealed class FixpOrderAdapter
         // and any caller that has not yet adopted the zero-copy decode.
         // Hot in-Established traffic now flows through the
         // `in DecodedNewOrderSingle` overload below (RFC §5.6 / P10).
-        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        if (!IsBusinessIngressOpenFor(scope))
         {
             await WriteBusinessMessageRejectAsync(
                 stream,
@@ -134,7 +150,7 @@ internal sealed class FixpOrderAdapter
         FixpConnectionScope scope,
         CancellationToken ct)
     {
-        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        if (!IsBusinessIngressOpenFor(scope))
         {
             await WriteBusinessMessageRejectAsync(
                 stream,
@@ -320,7 +336,7 @@ internal sealed class FixpOrderAdapter
         CancellationToken ct)
     {
         // Legacy entry point retained for the malformed-length fall-through.
-        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        if (!IsBusinessIngressOpenFor(scope))
         {
             return WriteBusinessMessageRejectAsync(
                 stream,
@@ -350,7 +366,7 @@ internal sealed class FixpOrderAdapter
         FixpConnectionScope scope,
         CancellationToken ct)
     {
-        if (!_recovery.IsBusinessIngressOpen(scope.Principal.FirmId))
+        if (!IsBusinessIngressOpenFor(scope))
         {
             await WriteBusinessMessageRejectAsync(
                 stream,

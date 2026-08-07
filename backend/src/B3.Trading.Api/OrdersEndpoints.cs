@@ -41,12 +41,14 @@ public static class OrdersEndpoints
             SymbolDirectory symbols,
             SubAccountsRegistry subAccounts,
             IOutboundRecoveryGate recovery,
+            IOutboundCommandProtector protector,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("B3.Trading.Api.OrdersEndpoints");
             var firm = ResolveFirm(ctx);
-            if (!recovery.IsBusinessIngressOpen(firm))
+            var owner = ResolveOwner(ctx, registry);
+            if (!recovery.IsBusinessIngressOpen(firm, protector.CreateStableEndClientRefCandidates(firm, owner.Value)))
                 return RecoveryUnavailable();
             if (!Enum.TryParse<OrderSide>(req.Side, ignoreCase: true, out var side))
                 return Results.BadRequest(new { error = $"invalid side '{req.Side}'" });
@@ -104,7 +106,6 @@ public static class OrdersEndpoints
                 }
             }
 
-            var owner = ResolveOwner(ctx, registry);
             var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
             if (idempotencyValues.Count > 1)
                 return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
@@ -300,17 +301,18 @@ public static class OrdersEndpoints
             OutboundMutationLedger outboundLedger,
             WorkingOrderBook book,
             IOutboundRecoveryGate recovery,
+            IOutboundCommandProtector protector,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("B3.Trading.Api.OrdersEndpoints");
             var firm = ResolveFirm(ctx);
-            if (!recovery.IsBusinessIngressOpen(firm))
+            var owner = ResolveOwner(ctx, registry);
+            if (!recovery.IsBusinessIngressOpen(firm, protector.CreateStableEndClientRefCandidates(firm, owner.Value)))
                 return RecoveryUnavailable();
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
-            var owner = ResolveOwner(ctx, registry);
             var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
             if (idempotencyValues.Count > 1)
                 return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
@@ -422,17 +424,18 @@ public static class OrdersEndpoints
             OutboundMutationLedger outboundLedger,
             WorkingOrderBook book,
             IOutboundRecoveryGate recovery,
+            IOutboundCommandProtector protector,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("B3.Trading.Api.OrdersEndpoints");
             var firm = ResolveFirm(ctx);
-            if (!recovery.IsBusinessIngressOpen(firm))
+            var owner = ResolveOwner(ctx, registry);
+            if (!recovery.IsBusinessIngressOpen(firm, protector.CreateStableEndClientRefCandidates(firm, owner.Value)))
                 return RecoveryUnavailable();
             if (!ulong.TryParse(clOrdId, out var clOrdIdU))
                 return Results.NotFound();
 
-            var owner = ResolveOwner(ctx, registry);
             var idempotencyValues = ctx.Request.Headers["Idempotency-Key"];
             if (idempotencyValues.Count > 1)
                 return Results.BadRequest(new { error = "multiple Idempotency-Key values are not allowed" });
