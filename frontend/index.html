@@ -780,6 +780,81 @@
         <button type="submit" class="btn btn-danger btn-sm">Apply</button>
       </form>
     </section>
+
+    <!-- #785. Outbound mutation reconciliation. Mirrors docs/RUNBOOK.md §0.1
+         so an operator no longer needs raw curl + a manually-extracted JWT
+         to resolve a stuck outbound mutation. -->
+    <section class="panel admin-panel">
+      <h3>Outbound mutation reconciliation</h3>
+      <form id="outbound-mutations-filter-form" class="admin-inline-form form-surface">
+        <select id="outbound-mutations-state" aria-label="Mutation state filter">
+          <option value="">any state</option>
+          <option value="ambiguous">Ambiguous</option>
+          <option value="recorded_pending_approval">Pending approval</option>
+          <option value="venue_acknowledged">Venue acknowledged</option>
+          <option value="operator_resolved">Operator resolved</option>
+        </select>
+        <label>
+          <input id="outbound-mutations-requires-reconciliation" type="checkbox" checked />
+          requires reconciliation only
+        </label>
+        <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
+      </form>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Mutation</th><th>Kind</th><th>State</th><th>ClOrdID</th>
+              <th>Recorded (UTC)</th><th>Ambiguity</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="outbound-mutations-body"></tbody>
+        </table>
+      </div>
+      <div id="outbound-mutation-detail" class="outbound-mutation-detail" hidden>
+        <h4>Mutation <code id="outbound-detail-id"></code></h4>
+        <pre id="outbound-detail-summary" class="admin-eod-output"></pre>
+
+        <h5>Register authoritative evidence</h5>
+        <form id="outbound-evidence-form" class="admin-inline-form form-surface">
+          <select id="outbound-evidence-source-type" aria-label="Evidence source type">
+            <option value="venue_mass_action">venue_mass_action</option>
+            <option value="official_extract">official_extract</option>
+          </select>
+          <input id="outbound-evidence-reference" required maxlength="256" placeholder="evidence reference" aria-label="Evidence reference" />
+          <input id="outbound-evidence-coverage-start" required type="datetime-local" aria-label="Evidence coverage start (UTC)" />
+          <input id="outbound-evidence-coverage-end" required type="datetime-local" aria-label="Evidence coverage end (UTC)" />
+          <input id="outbound-evidence-attestation" required maxlength="256" placeholder="attestation reference" aria-label="Attestation reference" />
+          <button type="submit" class="btn btn-secondary btn-sm">Register evidence</button>
+        </form>
+
+        <h5>Propose resolution</h5>
+        <form id="outbound-resolve-form" class="admin-inline-form form-surface">
+          <select id="outbound-resolve-decision" aria-label="Resolution decision">
+            <option value="venue_acknowledged">venue_acknowledged</option>
+            <option value="venue_absent">venue_absent (requires 2nd admin approval)</option>
+            <option value="leave_ambiguous">leave_ambiguous</option>
+          </select>
+          <select id="outbound-resolve-evidence-type" aria-label="Resolution evidence type">
+            <option value="terminal_er">terminal_er</option>
+            <option value="contracted_not_applied">contracted_not_applied</option>
+            <option value="venue_mass_action">venue_mass_action</option>
+            <option value="official_extract">official_extract</option>
+            <option value="manual_annotation">manual_annotation</option>
+          </select>
+          <input id="outbound-resolve-evidence-reference" required maxlength="256" placeholder="evidence reference" aria-label="Resolution evidence reference" />
+          <input id="outbound-resolve-reason" required maxlength="256" placeholder="reason" aria-label="Resolution reason" />
+          <button type="submit" class="btn btn-danger btn-sm">Propose resolution</button>
+        </form>
+
+        <!-- A second, genuinely separate admin action — never a same-user
+             double-click. Hidden/disabled client-side (as a UX hint only;
+             the backend independently rejects self-approval) whenever the
+             pending proposal's makerRef equals the current session user. -->
+        <div id="outbound-pending-proposals"></div>
+      </div>
+      <p id="outbound-mutations-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+    </section>
   </section>
 
   <!-- MARKET DATA SETTINGS now live inline inside the Settings tab

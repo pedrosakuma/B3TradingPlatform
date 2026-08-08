@@ -16,7 +16,10 @@ import { defaultBackend, login, signup, submitOrder, cancelOrder, modifyOrder, g
          listSubAccounts, createSubAccount, deactivateSubAccount,
          getSessionPhase, setSessionPhase, clearSessionPhase,
          getAdminRiskLimits, reloadAdminRisk, getReferencePrices,
-         mutateCash, setOrderStale } from "./protocol.js";
+         mutateCash, setOrderStale,
+         listOutboundMutations, getOutboundMutation,
+         registerOutboundMutationEvidence, resolveOutboundMutation,
+         approveOutboundMutationResolution } from "./protocol.js";
 import { readPublicConfig, validateEntraConfig } from "./authConfig.js";
 import { createEntraAuth, isInteractionRequiredError } from "./auth.js";
 import {
@@ -191,6 +194,11 @@ async function init() {
     onAddHalt:         handleAddHalt,
     onRunEod:          handleRunEod,
     onRefresh:         refreshAdminData,
+    onLoadOutboundMutations:      handleLoadOutboundMutations,
+    onLoadOutboundMutationDetail: handleLoadOutboundMutationDetail,
+    onRegisterOutboundEvidence:   handleRegisterOutboundEvidence,
+    onResolveOutboundMutation:    handleResolveOutboundMutation,
+    onApproveOutboundMutation:    handleApproveOutboundMutation,
   });
   operationsUi.setOperationsHandlers({
     onRefreshSubAccounts: refreshSubAccounts,
@@ -881,6 +889,15 @@ function startSession(next) {
     role: next.role,
     firm: next.firm,
   });
+  // #785. Client-side self-approval hint for outbound-mutation resolution
+  // proposals (server independently enforces the real rejection). The
+  // server derives `makerRef` from the JWT `sub` claim (see
+  // AdminOutboundMutationEndpoints.ResolveOperator), which is NOT always
+  // the same as `session.username` — the local-login path overwrites
+  // `next.username` with the raw, possibly differently-cased, login
+  // form input (see finishLoginWithToken). Compare against the JWT
+  // subject directly so the hint can't silently mismatch the server.
+  adminUi.setAdminHandlers({ currentUsername: claimsFromToken(next.token).sub ?? next.username });
   state.clearAll();
   clearInstrumentRules();
   ui.clearTicket();
@@ -1913,7 +1930,17 @@ async function handleModifyAlgo(algoId, payload) {
 }
 
 async function refreshAdminData() {
-  await Promise.all([pollFirmsOnce(), refreshSubAccounts(), refreshAdminOperations()]);
+  await Promise.all([
+    pollFirmsOnce(),
+    refreshSubAccounts(),
+    refreshAdminOperations(),
+    refreshOutboundMutations(),
+  ]);
+}
+
+async function refreshOutboundMutations() {
+  if (!session || session.role !== "admin") return;
+  await handleLoadOutboundMutations({ requiresReconciliation: true });
 }
 
 async function refreshSubAccounts() {
@@ -2418,6 +2445,93 @@ async function handleRunEod() {
     if (err.status === 401) { logout(); return; }
     if (err.status === 409) { adminUi.setAdminFeedback("persistence disabled — EOD unavailable", "error"); return; }
     adminUi.setAdminFeedback(err.message || "EOD failed", "error");
+  }
+}
+
+// #785. Outbound mutation reconciliation admin handlers. Kept separate
+// from withAdminCall because these calls target one specific mutation
+// rather than the shared firms/kill/halt poll, and the 202-pending vs
+// 200-resolved distinction needs its own feedback message.
+async function handleLoadOutboundMutations({ state: mutationState, requiresReconciliation } = {}) {
+  if (!session || session.role !== "admin") return;
+  const captured = session;
+  try {
+    const resp = await listOutboundMutations(captured.backend, captured.token, {
+      firmId: captured.firm,
+      state: mutationState,
+      requiresReconciliation,
+    });
+    if (session !== captured) return;
+    state.setOutboundMutations({ ...resp, fetchedAt: Date.now() });
+  } catch (err) {
+    if (session !== captured) return;
+    if (err.status === 401) { logout(); return; }
+    adminUi.setOutboundMutationsFeedback(err.message || "failed to load mutations", "error");
+  }
+}
+
+async function handleLoadOutboundMutationDetail(mutationId) {
+  if (!session || !mutationId) return;
+  const captured = session;
+  try {
+    const detail = await getOutboundMutation(captured.backend, captured.token, mutationId);
+    if (session !== captured) return;
+    state.setOutboundMutationDetail({ mutationId, detail, fetchedAt: Date.now() });
+  } catch (err) {
+    if (session !== captured) return;
+    if (err.status === 401) { logout(); return; }
+    adminUi.setOutboundMutationsFeedback(err.message || "failed to load mutation detail", "error");
+  }
+}
+
+async function handleRegisterOutboundEvidence(mutationId, payload) {
+  if (!session || !mutationId) return;
+  try {
+    await registerOutboundMutationEvidence(session.backend, session.token, mutationId, payload);
+    adminUi.setOutboundMutationsFeedback("Evidence registered.", "ok");
+    await handleLoadOutboundMutationDetail(mutationId);
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    adminUi.setOutboundMutationsFeedback(err.message || "failed to register evidence", "error");
+  }
+}
+
+async function handleResolveOutboundMutation(mutationId, payload) {
+  if (!session || !mutationId) return;
+  try {
+    const result = await resolveOutboundMutation(session.backend, session.token, mutationId, payload);
+    adminUi.setOutboundMutationsFeedback(
+      result?.status === "pending_approval"
+        ? `Proposal registered — awaiting a different admin's approval.`
+        : "Mutation resolved.",
+      "ok",
+    );
+    await Promise.all([
+      handleLoadOutboundMutationDetail(mutationId),
+      handleLoadOutboundMutations({ requiresReconciliation: true }),
+    ]);
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    if (err.status === 422) { adminUi.setOutboundMutationsFeedback(err.message || "invalid evidence for this decision", "error"); return; }
+    if (err.status === 409) { adminUi.setOutboundMutationsFeedback(err.message || "resolution conflict", "error"); return; }
+    if (err.status === 503) { adminUi.setOutboundMutationsFeedback("reconciliation unavailable — retry shortly", "error"); return; }
+    adminUi.setOutboundMutationsFeedback(err.message || "failed to resolve mutation", "error");
+  }
+}
+
+async function handleApproveOutboundMutation(mutationId, proposalId) {
+  if (!session || !mutationId || !proposalId) return;
+  try {
+    await approveOutboundMutationResolution(session.backend, session.token, mutationId, proposalId);
+    adminUi.setOutboundMutationsFeedback("Resolution approved — capacity released.", "ok");
+    await Promise.all([
+      handleLoadOutboundMutationDetail(mutationId),
+      handleLoadOutboundMutations({ requiresReconciliation: true }),
+    ]);
+  } catch (err) {
+    if (err.status === 401) { logout(); return; }
+    if (err.status === 409) { adminUi.setOutboundMutationsFeedback(err.message || "approval conflict (self-approval or already approved?)", "error"); return; }
+    adminUi.setOutboundMutationsFeedback(err.message || "failed to approve resolution", "error");
   }
 }
 

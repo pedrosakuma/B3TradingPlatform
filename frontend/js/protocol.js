@@ -304,6 +304,71 @@ async function toggleHalt(backend, token, symbol, halt) {
 export const haltSymbol   = (b, t, sym) => toggleHalt(b, t, sym, true);
 export const resumeSymbol = (b, t, sym) => toggleHalt(b, t, sym, false);
 
+// ── #785. Outbound mutation reconciliation (admin) ─────────────────
+// Mirrors AdminOutboundMutationEndpoints.cs. See docs/RUNBOOK.md §0.1
+// for the evidence/decision vocabulary. `resolveOutboundMutation` can
+// come back either 200 (resolved/annotated immediately) or 202
+// (pending_approval — capacity-releasing `venue_absent` decisions
+// require a *different* admin to call `approveOutboundMutationResolution`;
+// the backend rejects self-approval, the UI only mirrors that as a hint).
+export async function listOutboundMutations(
+  backend,
+  token,
+  { firmId, state: mutationState, requiresReconciliation } = {},
+) {
+  const url = new URL(`${backend}/api/admin/outbound-mutations/`);
+  if (firmId) url.searchParams.set("firmId", firmId);
+  if (mutationState) url.searchParams.set("state", mutationState);
+  if (requiresReconciliation !== undefined) {
+    url.searchParams.set("requiresReconciliation", String(requiresReconciliation));
+  }
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  return jsonOrThrow(resp);
+}
+
+export async function getOutboundMutation(backend, token, mutationId) {
+  const resp = await fetch(
+    `${backend}/api/admin/outbound-mutations/${encodeURIComponent(mutationId)}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  return jsonOrThrow(resp);
+}
+
+export async function registerOutboundMutationEvidence(backend, token, mutationId, payload) {
+  const resp = await fetch(
+    `${backend}/api/admin/outbound-mutations/${encodeURIComponent(mutationId)}/evidence`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    },
+  );
+  return jsonOrThrow(resp);
+}
+
+export async function resolveOutboundMutation(backend, token, mutationId, payload) {
+  const resp = await fetch(
+    `${backend}/api/admin/outbound-mutations/${encodeURIComponent(mutationId)}/resolve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    },
+  );
+  return jsonOrThrow(resp);
+}
+
+export async function approveOutboundMutationResolution(backend, token, mutationId, proposalId) {
+  const resp = await fetch(
+    `${backend}/api/admin/outbound-mutations/${encodeURIComponent(mutationId)}/resolve/${encodeURIComponent(proposalId)}/approve`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+  return jsonOrThrow(resp);
+}
+
 export async function listSubAccounts(backend, token, { includeDeactivated = false } = {}) {
   const url = new URL(`${backend}/api/sub-accounts/`);
   if (includeDeactivated) url.searchParams.set("includeDeactivated", "true");

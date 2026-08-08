@@ -1,0 +1,119 @@
+{
+  "list": {
+    "firmId": "FIRM01",
+    "mutations": [
+      {
+        "mutationId": "11111111-1111-1111-1111-111111111111",
+        "firmId": "FIRM01",
+        "kind": "new_order",
+        "state": "ambiguous",
+        "origin": "trader",
+        "primaryClOrdId": "1001",
+        "originalClOrdId": null,
+        "recordedAtUtc": "2026-07-25T14:05:00Z",
+        "stateChangedAtUtc": "2026-07-25T14:05:00Z",
+        "requiresReconciliation": true,
+        "ambiguityReason": "not_applied_seq_gap",
+        "encryptedFieldReferences": { "endClient": "alice", "fields": [] },
+        "command": null,
+        "pendingApproval": false
+      },
+      {
+        "mutationId": "22222222-2222-2222-2222-222222222222",
+        "firmId": "FIRM01",
+        "kind": "cancel",
+        "state": "ambiguous",
+        "origin": "trader",
+        "primaryClOrdId": "1002",
+        "originalClOrdId": "1000",
+        "recordedAtUtc": "2026-07-25T14:22:00Z",
+        "stateChangedAtUtc": "2026-07-25T14:22:00Z",
+        "requiresReconciliation": true,
+        "ambiguityReason": "not_applied_seq_gap",
+        "encryptedFieldReferences": { "endClient": "bob", "fields": [] },
+        "command": null,
+        "pendingApproval": true
+      }
+    ]
+  },
+  "detailSelf": {
+    "mutation": { "mutationId": "22222222-2222-2222-2222-222222222222" },
+    "attempts": [],
+    "inboundEvidence": [],
+    "proposals": [
+      {
+        "proposalId": "33333333-3333-3333-3333-333333333333",
+        "decision": "venue_absent",
+        "evidenceType": "manual_annotation",
+        "evidenceReference": "ticket-42",
+        "evidenceDigest": null,
+        "reasonCode": null,
+        "makerRef": "admin-alice",
+        "proposedAtUtc": "2026-07-26T10:00:00Z",
+        "checkerRef": null,
+        "approvedAtUtc": null
+      }
+    ],
+    "authoritativeEvidence": [],
+    "operatorEvidence": [],
+    "legacyEvidence": [],
+    "resolution": null
+  },
+  "detailOther": {
+    "mutation": { "mutationId": "22222222-2222-2222-2222-222222222222" },
+    "attempts": [],
+    "inboundEvidence": [],
+    "proposals": [
+      {
+        "proposalId": "33333333-3333-3333-3333-333333333333",
+        "decision": "venue_absent",
+        "evidenceType": "manual_annotation",
+        "evidenceReference": "ticket-42",
+        "evidenceDigest": null,
+        "reasonCode": null,
+        "makerRef": "admin-bob",
+        "proposedAtUtc": "2026-07-26T10:00:00Z",
+        "checkerRef": null,
+        "approvedAtUtc": null
+      }
+    ],
+    "authoritativeEvidence": [],
+    "operatorEvidence": [],
+    "legacyEvidence": [],
+    "resolution": null
+  },
+  "evidence": {
+    "evidenceReference": "extract-001",
+    "evidenceDigest": "sha256:abc",
+    "firmId": "FIRM01",
+    "sourceType": "official_extract",
+    "coverageStartUtc": "2026-07-25T00:00:00Z",
+    "coverageEndUtc": "2026-07-26T00:00:00Z",
+    "coveredMutationIds": [],
+    "attestationReference": "att-1",
+    "attestedBy": "admin-alice",
+    "attestedAtUtc": "2026-07-26T11:00:00Z",
+    "registeredAtUtc": "2026-07-26T11:00:00Z"
+  },
+  "resolveOk": {
+    "mutationId": "11111111-1111-1111-1111-111111111111",
+    "status": "resolved",
+    "proposalId": null,
+    "capacityReleased": false,
+    "requiresReconciliation": false
+  },
+  "resolvePending": {
+    "mutationId": "22222222-2222-2222-2222-222222222222",
+    "status": "pending_approval",
+    "proposalId": "33333333-3333-3333-3333-333333333333",
+    "capacityReleased": false,
+    "requiresReconciliation": true
+  },
+  "approveOk": {
+    "mutationId": "22222222-2222-2222-2222-222222222222",
+    "status": "resolved",
+    "proposalId": "33333333-3333-3333-3333-333333333333",
+    "capacityReleased": true,
+    "requiresReconciliation": false
+  }
+}
