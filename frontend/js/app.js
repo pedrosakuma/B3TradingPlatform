@@ -198,6 +198,7 @@ async function init() {
     onLoadOutboundMutationDetail: handleLoadOutboundMutationDetail,
     onRegisterOutboundEvidence:   handleRegisterOutboundEvidence,
     onResolveOutboundMutation:    handleResolveOutboundMutation,
+    onResolveVenueConfirmedBatch: handleResolveVenueConfirmedBatch,
     onApproveOutboundMutation:    handleApproveOutboundMutation,
   });
   operationsUi.setOperationsHandlers({
@@ -2517,6 +2518,61 @@ async function handleResolveOutboundMutation(mutationId, payload) {
     if (err.status === 503) { adminUi.setOutboundMutationsFeedback("reconciliation unavailable — retry shortly", "error"); return; }
     adminUi.setOutboundMutationsFeedback(err.message || "failed to resolve mutation", "error");
   }
+}
+
+async function handleResolveVenueConfirmedBatch(mutationIds) {
+  if (!session || !Array.isArray(mutationIds) || mutationIds.length === 0) return;
+  const captured = session;
+  let resolved = 0;
+  const unresolved = [];
+
+  for (const mutationId of mutationIds) {
+    if (session !== captured) return;
+    try {
+      const detail = await getOutboundMutation(
+        captured.backend,
+        captured.token,
+        mutationId,
+      );
+      const evidence = adminUi.findTerminalExecutionReportEvidence(detail);
+      const evidenceReference = evidence?.evidenceId ?? evidence?.EvidenceId;
+      if (!evidenceReference) {
+        unresolved.push(mutationId);
+        continue;
+      }
+      await resolveOutboundMutation(
+        captured.backend,
+        captured.token,
+        mutationId,
+        {
+          decision: "venue_acknowledged",
+          evidenceType: "terminal_er",
+          evidenceReference,
+          reason: "terminal_er_verified",
+        },
+      );
+      resolved += 1;
+    } catch (err) {
+      if (err.status === 401) {
+        logout();
+        return;
+      }
+      unresolved.push(mutationId);
+    }
+  }
+
+  await handleLoadOutboundMutations({ requiresReconciliation: true });
+  if (unresolved.length === 0) {
+    adminUi.setOutboundMutationsFeedback(
+      `${resolved} venue-confirmed mutation${resolved === 1 ? "" : "s"} resolved.`,
+      "ok",
+    );
+    return;
+  }
+  adminUi.setOutboundMutationsFeedback(
+    `${resolved} resolved; ${unresolved.length} still require advanced review.`,
+    "error",
+  );
 }
 
 async function handleApproveOutboundMutation(mutationId, proposalId) {

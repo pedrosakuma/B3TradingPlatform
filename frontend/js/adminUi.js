@@ -19,6 +19,7 @@ let onLoadOutboundMutations = () => {};
 let onLoadOutboundMutationDetail = () => {};
 let onRegisterOutboundEvidence = () => {};
 let onResolveOutboundMutation = () => {};
+let onResolveVenueConfirmedBatch = () => {};
 let onApproveOutboundMutation = () => {};
 let currentUsername = null;
 
@@ -34,6 +35,7 @@ export function setAdminHandlers(handlers) {
   onLoadOutboundMutationDetail  = handlers.onLoadOutboundMutationDetail  ?? onLoadOutboundMutationDetail;
   onRegisterOutboundEvidence    = handlers.onRegisterOutboundEvidence    ?? onRegisterOutboundEvidence;
   onResolveOutboundMutation     = handlers.onResolveOutboundMutation     ?? onResolveOutboundMutation;
+  onResolveVenueConfirmedBatch  = handlers.onResolveVenueConfirmedBatch  ?? onResolveVenueConfirmedBatch;
   onApproveOutboundMutation     = handlers.onApproveOutboundMutation     ?? onApproveOutboundMutation;
   // Used only as a client-side UX hint (hide/disable Approve for the
   // proposer's own session) — the server independently rejects
@@ -163,6 +165,24 @@ function bindOutboundMutationsUi() {
     if (expandedMutationId) onLoadOutboundMutationDetail(expandedMutationId);
     renderOutboundMutations();
     renderOutboundMutationDetail();
+  });
+
+  $("outbound-resolve-confirmed-batch").addEventListener("click", async () => {
+    const candidates = venueConfirmedCandidates();
+    if (candidates.length === 0) return;
+    if (!window.confirm(
+      `Resolve ${candidates.length} venue-confirmed mutation${candidates.length === 1 ? "" : "s"} using the terminal Execution Reports already recorded by the platform?`,
+    )) return;
+    const button = $("outbound-resolve-confirmed-batch");
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = "Resolving…";
+    try {
+      await onResolveVenueConfirmedBatch(candidates.map(mutation => mutation.mutationId));
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
   });
 
   $("outbound-evidence-form").addEventListener("submit", async (e) => {
@@ -349,6 +369,7 @@ function renderOutboundMutations() {
     return;
   }
   const list = om.mutations ?? [];
+  renderGuidedResolution();
   if (list.length === 0) {
     body.innerHTML = `<tr><td colspan="7" class="muted">no matching mutations</td></tr>`;
     return;
@@ -371,6 +392,54 @@ function renderOutboundMutations() {
       </button></td>
     </tr>`;
   }).join("");
+}
+
+function venueConfirmedCandidates() {
+  const list = getState().outboundMutations?.mutations ?? [];
+  return list.filter(mutation =>
+    mutation.requiresReconciliation === true
+    && mutation.state === "venue_acknowledged"
+    && mutation.pendingApproval !== true
+  );
+}
+
+function renderGuidedResolution() {
+  const panel = $("outbound-guided-resolution");
+  if (!panel) return;
+  const candidates = venueConfirmedCandidates();
+  panel.hidden = candidates.length === 0;
+  if (candidates.length === 0) return;
+  setText(
+    "outbound-guided-resolution-title",
+    `${candidates.length} venue-confirmed mutation${candidates.length === 1 ? "" : "s"} can be resolved safely.`,
+  );
+  const button = $("outbound-resolve-confirmed-batch");
+  if (button && !button.disabled) {
+    button.textContent = `Resolve ${candidates.length} confirmed mutation${candidates.length === 1 ? "" : "s"}`;
+  }
+}
+
+const TERMINAL_EXECUTION_REPORT_KINDS = new Set([
+  "rejected",
+  "canceled",
+  "fill",
+  "replaced",
+  "expired",
+]);
+
+export function findTerminalExecutionReportEvidence(detail) {
+  return (detail?.inboundEvidence ?? []).find(evidence => {
+    const evidenceId = evidence.evidenceId ?? evidence.EvidenceId;
+    const disposition = String(evidence.disposition ?? "").toLowerCase();
+    const messageKind = String(evidence.messageKind ?? "").toLowerCase();
+    const authoritativeDisposition = disposition === "matched"
+      || (disposition === "conflicting"
+        && evidence.authoritativeTerminalContradiction === true);
+    return evidence.kind === "execution_report"
+      && authoritativeDisposition
+      && TERMINAL_EXECUTION_REPORT_KINDS.has(messageKind)
+      && /^[0-9a-f]{64}$/i.test(evidenceId ?? "");
+  }) ?? null;
 }
 
 function renderOutboundMutationDetail() {

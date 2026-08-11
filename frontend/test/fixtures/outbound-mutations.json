@@ -19,6 +19,22 @@
         "pendingApproval": false
       },
       {
+        "mutationId": "44444444-4444-4444-4444-444444444444",
+        "firmId": "FIRM01",
+        "kind": "replace",
+        "state": "venue_acknowledged",
+        "origin": "trader",
+        "primaryClOrdId": "1003",
+        "originalClOrdId": "1001",
+        "recordedAtUtc": "2026-07-25T14:15:00Z",
+        "stateChangedAtUtc": "2026-07-26T17:01:05Z",
+        "requiresReconciliation": true,
+        "ambiguityReason": "conflicting_venue_evidence",
+        "encryptedFieldReferences": { "endClient": "alice", "fields": [] },
+        "command": null,
+        "pendingApproval": false
+      },
+      {
         "mutationId": "22222222-2222-2222-2222-222222222222",
         "firmId": "FIRM01",
         "kind": "cancel",
@@ -77,6 +93,31 @@
         "approvedAtUtc": null
       }
     ],
+    "authoritativeEvidence": [],
+    "operatorEvidence": [],
+    "legacyEvidence": [],
+    "resolution": null
+  },
+  "detailVenueConfirmed": {
+    "mutation": { "mutationId": "44444444-4444-4444-4444-444444444444" },
+    "attempts": [],
+    "inboundEvidence": [
+      {
+        "evidenceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "execution_report",
+        "disposition": "matched",
+        "authoritativeTerminalContradiction": false,
+        "messageKind": "Replaced"
+      },
+      {
+        "evidenceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "not_applied",
+        "disposition": "conflicting",
+        "authoritativeTerminalContradiction": false,
+        "messageKind": "NotApplied"
+      }
+    ],
+    "proposals": [],
     "authoritativeEvidence": [],
     "operatorEvidence": [],
     "legacyEvidence": [],

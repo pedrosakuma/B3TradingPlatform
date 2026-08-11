@@ -592,6 +592,29 @@ tr.row-stale > td.row-stale-actions { opacity: 1; }
   border-radius: 4px; font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace;
   white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
 }
+.outbound-guided-resolution {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid rgba(45, 166, 111, .55);
+  border-radius: var(--radius-md);
+  background: rgba(45, 166, 111, .10);
+}
+.outbound-guided-resolution[hidden] { display: none; }
+.outbound-guided-resolution p { margin: .25rem 0 0; color: var(--muted); }
+.outbound-advanced-reconciliation {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.outbound-advanced-reconciliation > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 600;
+}
 .killed-tag {
   font-size: .65rem; margin-right: var(--space-3);
 }
