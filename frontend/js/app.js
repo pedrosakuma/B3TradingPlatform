@@ -2534,6 +2534,19 @@ async function handleResolveVenueConfirmedBatch(mutationIds) {
         captured.token,
         mutationId,
       );
+      // Re-check the freshly-fetched state rather than trusting the list
+      // snapshot the batch was built from — a mutation can flip out of
+      // venue_acknowledged (e.g. a late contradictory ER reopens it as
+      // ambiguous) between the list render and this call, and the guided
+      // "one click" path must only ever touch mutations that are still
+      // exactly the safe, common case it was designed for.
+      const detailMutation = detail?.mutation;
+      if (detailMutation?.state !== "venue_acknowledged"
+        || detailMutation?.requiresReconciliation !== true
+        || detailMutation?.pendingApproval === true) {
+        unresolved.push(mutationId);
+        continue;
+      }
       const evidence = adminUi.findTerminalExecutionReportEvidence(detail);
       const evidenceReference = evidence?.evidenceId ?? evidence?.EvidenceId;
       if (!evidenceReference) {

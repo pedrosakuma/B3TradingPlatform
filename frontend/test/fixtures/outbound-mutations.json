@@ -99,7 +99,12 @@
     "resolution": null
   },
   "detailVenueConfirmed": {
-    "mutation": { "mutationId": "44444444-4444-4444-4444-444444444444" },
+    "mutation": {
+      "mutationId": "44444444-4444-4444-4444-444444444444",
+      "state": "venue_acknowledged",
+      "requiresReconciliation": true,
+      "pendingApproval": false
+    },
     "attempts": [],
     "inboundEvidence": [
       {
