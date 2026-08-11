@@ -109,6 +109,9 @@ installDomStub({
     "outbound-mutations-requires-reconciliation": { tag: "input" },
     "outbound-mutations-body": { tag: "tbody" },
     "outbound-mutations-feedback": { tag: "p", hidden: true },
+    "outbound-guided-resolution": { tag: "div", hidden: true },
+    "outbound-guided-resolution-title": { tag: "strong" },
+    "outbound-resolve-confirmed-batch": { tag: "button" },
     "outbound-mutation-detail": { tag: "div", hidden: true },
     "outbound-detail-id": { tag: "code" },
     "outbound-detail-summary": { tag: "pre" },
@@ -143,6 +146,42 @@ test("renders the requires-reconciliation mutation list with a pending-approval 
   assert.match(body.innerHTML, /11111111-1111-1111-1111-111111111111/);
   assert.match(body.innerHTML, /22222222-2222-2222-2222-222222222222/);
   assert.match(body.innerHTML, /pending approval/i);
+});
+
+test("offers one guided action for venue-confirmed mutations", () => {
+  const panel = document.getElementById("outbound-guided-resolution");
+  const button = document.getElementById("outbound-resolve-confirmed-batch");
+  assert.equal(panel.hidden, false);
+  assert.match(button.textContent, /Resolve 1 confirmed mutation/);
+});
+
+test("guided action dispatches all venue-confirmed mutation ids once", async () => {
+  let mutationIds = null;
+  adminUi.setAdminHandlers({
+    onResolveVenueConfirmedBatch: async (ids) => { mutationIds = ids; },
+  });
+  const originalConfirm = globalThis.window.confirm;
+  globalThis.window.confirm = () => true;
+  try {
+    document.getElementById("outbound-resolve-confirmed-batch")
+      .dispatchEvent({ type: "click" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+  } finally {
+    globalThis.window.confirm = originalConfirm;
+  }
+  assert.deepEqual(mutationIds, [
+    "44444444-4444-4444-4444-444444444444",
+  ]);
+});
+
+test("selects an eligible terminal Execution Report automatically", () => {
+  const evidence = adminUi.findTerminalExecutionReportEvidence(
+    fixture.detailVenueConfirmed,
+  );
+  assert.equal(
+    evidence.evidenceId,
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  );
 });
 
 test("expanding a row requests detail and reveals the detail panel", () => {

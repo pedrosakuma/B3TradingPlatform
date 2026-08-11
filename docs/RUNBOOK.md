@@ -131,6 +131,13 @@ not emit this log line, so log volume tracks failures, not request volume.
 
 ### Investigation and evidence
 
+For the common case where the list already reports `state=venue_acknowledged`,
+the Admin UI offers **Resolve confirmed mutations**. It loads each mutation's
+detail, selects an eligible correlated terminal ER, and submits
+`venue_acknowledged` / `terminal_er` / `terminal_er_verified` in one confirmed
+operator action. Mutations without eligible evidence remain unresolved and
+must use the advanced flow below.
+
 1. List unresolved rows with
    `GET /api/admin/outbound-mutations/?requiresReconciliation=true`, then fetch the
    mutation timeline by its opaque mutation UUID. Never paste customer values
