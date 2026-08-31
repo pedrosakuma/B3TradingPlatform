@@ -72,14 +72,18 @@ test.describe("trader workspace smoke", () => {
     });
 
     // Fill the ticket: PETR4, Buy, Limit, qty 100 (lot multiple),
-    // price 25.00 (tick multiple). With no MD price observed the
+    // price 32.00 (tick multiple). With no MD price observed the
     // fat-finger guard is skipped (validation.js:fatFingerCheck
-    // returns null when lastPrice is unknown).
+    // returns null when lastPrice is unknown). 32.00 sits inside the
+    // 10% price-collar band around the compose-seeded PETR4 reference
+    // price of 32.50 (docker-compose.yml
+    // Trading__Risk__ReferencePrices__PETR4) so the order isn't
+    // rejected before the live market-data feed has printed a trade.
     await page.fill("#ticket-symbol", SYMBOL);
     await page.selectOption("#ticket-side", "Buy");
     await page.selectOption("#ticket-type", "Limit");
     await page.fill("#ticket-qty", "100");
-    await page.fill("#ticket-price", "25.00");
+    await page.fill("#ticket-price", "32.00");
     // Issue #105: Submit must be visible in the ticket panel viewport
     // without scrolling. Playwright's click() auto-scrolls into view,
     // so the click itself wouldn't catch a clipped button — assert
