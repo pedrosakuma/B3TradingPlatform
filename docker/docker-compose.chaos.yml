@@ -1,0 +1,24 @@
+# Chaos-drill-only overlay. See scripts/chaos/run-chaos-drill.sh and
+# .github/workflows/chaos-drill.yml.
+#
+# #790. The drill's assert_post_recovery_trade() crosses a Buy and a Sell at
+# the same price from the SAME end-client (alice) so it can assert a fill
+# without needing a second authenticated user. With the default-on risk
+# gates that self-cross is rejected: the second leg triggers
+# self_trade_prevention (crossing alice's own working order) and, depending
+# on ordering, AllowShortSell would also gate the Sell leg opening a short.
+# Opt alice out of both, scoped to this overlay only — every other
+# end-client keeps the gates armed. This mirrors the same scoped opt-out
+# docker-compose.real-conformance.yml grants for the analogous
+# ReferencePriceLiveSpec self-cross.
+#
+# Deliberately does NOT touch matching-platform's bridge/timers (unlike
+# docker-compose.real-conformance.yml) — the chaos drill needs the base
+# stack's production-like FIXP keepalive/idle timers so its
+# network-partition scenario exercises a genuine Establish-reuse reattach
+# instead of a peer-forced session roll.
+services:
+  trading-host:
+    environment:
+      Trading__Risk__PerEndClient__alice__AllowShortSell: "true"
+      Trading__Risk__PerEndClient__alice__AllowSelfTrade: "true"

@@ -90,6 +90,7 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               up -d --build --wait trading-host
 
       - name: Run chaos drill
@@ -114,16 +115,19 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               logs --no-color trading-host > logs/trading-host.log || true
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               logs --no-color matching-platform > logs/matching-platform.log || true
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               logs --no-color marketdata > logs/marketdata.log || true
 
       - name: Upload container logs (on failure)
@@ -142,4 +146,5 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               down -v || true
