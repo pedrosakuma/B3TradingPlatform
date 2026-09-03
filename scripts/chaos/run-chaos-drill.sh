@@ -15,6 +15,7 @@ set -euo pipefail
 
 readonly TRADING_CONTAINER="${TRADING_CONTAINER:-b3-trading-host}"
 readonly MARKETDATA_CONTAINER="${MARKETDATA_CONTAINER:-b3-marketdata}"
+readonly MATCHING_CONTAINER="${MATCHING_CONTAINER:-b3-matching-platform}"
 readonly DOCKER_NETWORK="${DOCKER_NETWORK:-b3-net}"
 readonly TRADING_BASE_URL="${TRADING_BASE_URL:-http://localhost:5000}"
 readonly TRADING_USER="${TRADING_SEED_USER:-alice}"
@@ -193,7 +194,41 @@ for key in (os.environ["BUY"], os.environ["SELL"]):
         sleep 1
     done
     log "FAIL: post-recovery orders did not both reach Filled (buy=${buy}, sell=${sell})"
+    dump_post_recovery_trade_diagnostics "$token" "$buy" "$sell"
     return 1
+}
+
+# Issue #790. The bare failure message ("did not both reach Filled") gives
+# no signal on WHERE the order got stuck (never dispatched? Rejected?
+# resting Working, never crossed? PendingNew forever?). Every occurrence so
+# far has needed a fresh CI run just to re-observe the same opaque failure.
+# Dump the full order payloads (status/rejectReason/cumulativeQuantity) plus
+# the exchange gateway's own /sessions view so the NEXT failure is
+# root-causable from the uploaded artifacts alone, without re-running the
+# drill. Best-effort only — never let a diagnostics hiccup mask the real
+# assertion failure above.
+dump_post_recovery_trade_diagnostics() {
+    local token="$1" buy="$2" sell="$3"
+    log "diagnostics: fetching final order state and exchange session view for buy=${buy} sell=${sell}..."
+    local orders
+    if orders="$(curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "${TRADING_BASE_URL}/api/orders" 2>/dev/null)"; then
+        BUY="$buy" SELL="$sell" python3 -c '
+import json,os,sys
+orders=json.load(sys.stdin)
+by_id={str(o.get("clOrdId")):o for o in orders}
+for label, key in (("buy", os.environ["BUY"]), ("sell", os.environ["SELL"])):
+    order=by_id.get(key)
+    print(f"[chaos] diagnostics: {label} clOrdId={key} order={json.dumps(order)}", file=sys.stderr)
+' <<<"$orders" 2>&1 >/dev/null || log "diagnostics: failed to parse /api/orders response"
+    else
+        log "diagnostics: GET /api/orders failed"
+    fi
+    if docker exec "$MATCHING_CONTAINER" sh -c 'command -v wget >/dev/null 2>&1' 2>/dev/null; then
+        docker exec "$MATCHING_CONTAINER" sh -c 'wget -qO- http://localhost:8080/sessions 2>/dev/null' \
+            | sed 's/^/[chaos] diagnostics: matching \/sessions: /' >&2 || true
+    else
+        log "diagnostics: ${MATCHING_CONTAINER} has no wget; skipping /sessions dump"
+    fi
 }
 
 assert_recovered_and_trading() {
