@@ -11,13 +11,15 @@ public class SuspendedTimeoutBoundarySpecTests
     // default 15_000ms post-#792) of inbound silence during a transport
     // outage. WithinWindowDisconnect must stay comfortably under that
     // threshold (session reattaches, no roll); PastWindowDisconnect must
-    // comfortably exceed it (session rolls/renegotiates). These values were
-    // 1000ms/5000ms pre-#792 when KeepAliveIntervalMs defaulted to 1000ms
-    // (~3s threshold) -- they did not actually exercise the venue's separate
-    // SuspendedTimeoutMs (5 min) mechanism the test names reference; they
+    // comfortably exceed it (session rolls/renegotiates). PastWindowDisconnect
+    // was 5000ms pre-#792 when KeepAliveIntervalMs defaulted to 1000ms
+    // (~3s threshold) -- it did not actually exercise the venue's separate
+    // SuspendedTimeoutMs (5 min) mechanism the test name references; it
     // exercised the (far tighter) keepalive-lapse boundary instead. Bumped to
-    // stay correct under the new default.
-    private static readonly TimeSpan WithinWindowDisconnect = TimeSpan.FromMilliseconds(5000);
+    // stay correct under the new default. WithinWindowDisconnect is left
+    // unchanged at 1000ms -- it was already comfortably under both the old
+    // and new thresholds.
+    private static readonly TimeSpan WithinWindowDisconnect = TimeSpan.FromMilliseconds(1000);
     private static readonly TimeSpan PastWindowDisconnect = TimeSpan.FromMilliseconds(50_000);
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
