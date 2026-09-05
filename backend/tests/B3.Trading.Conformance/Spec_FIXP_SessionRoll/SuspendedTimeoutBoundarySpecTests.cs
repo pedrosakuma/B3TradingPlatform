@@ -65,9 +65,17 @@ public class SuspendedTimeoutBoundarySpecTests
                     SessionRollSpecSupport.OrderTimeout,
                     "probe order to reach Working before transport interruption");
 
-                var disconnectStartedUtc = DateTimeOffset.UtcNow;
                 await using (var detached = await docker.DisconnectMatchingAsync())
                 {
+                    // Start the idle-window clock only once the venue's
+                    // network leg is actually severed -- DisconnectMatchingAsync
+                    // spawns several sequential docker subprocesses before the
+                    // partition takes effect, so timing from before that await
+                    // would understate the real elapsed idle time the venue
+                    // observes and erode the WithinWindowDisconnect/
+                    // PastWindowDisconnect margins against the venue's ~3x
+                    // KeepAliveIntervalMs idle-terminate threshold.
+                    var disconnectStartedUtc = DateTimeOffset.UtcNow;
                     await Task.Delay(TimeSpan.FromMilliseconds(250));
                     await SessionRollSpecSupport.StimulateGatewayWriteAsync(
                         http, userAuth, probeClOrdId);
@@ -140,9 +148,14 @@ public class SuspendedTimeoutBoundarySpecTests
                     SessionRollSpecSupport.OrderTimeout,
                     "probe order to reach Working before transport interruption");
 
-                var disconnectStartedUtc = DateTimeOffset.UtcNow;
                 await using (var detached = await docker.DisconnectMatchingAsync())
                 {
+                    // See comment on the analogous block in
+                    // WithinSuspendedTimeout_Reattaches_OrderSurvivesNoStaleFlag:
+                    // start the idle-window clock only after the network is
+                    // actually severed, not before the docker subprocess calls
+                    // that sever it.
+                    var disconnectStartedUtc = DateTimeOffset.UtcNow;
                     await Task.Delay(TimeSpan.FromMilliseconds(250));
                     await SessionRollSpecSupport.StimulateGatewayWriteAsync(
                         http, userAuth, probeClOrdId);
