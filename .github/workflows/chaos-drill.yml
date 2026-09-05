@@ -11,6 +11,21 @@ name: Chaos drill
 #
 # Pairs with: docs/operations/runbook-failover-recovery.md §6 and
 #             scripts/chaos/run-chaos-drill.sh.
+#
+# #790. Deliberately does NOT stack docker-compose.real-conformance.yml on
+# top of the real stack: that overlay swaps matching-platform's FIXP timers
+# to the fast conformance profile (heartbeatIntervalMs=idleTimeoutMs=500ms,
+# so the venue reaps a severed session in ~1.5s) for the SessionRoll
+# conformance spec, which deliberately WANTS a fast forced roll. Chaos
+# drill's network-partition scenario holds the partition for
+# PARTITION_HOLD_S=10s (a realistic blip) expecting FIXP's Establish-reuse
+# reattach — NOT a peer-forced session roll — to recover it; under the fast
+# conformance timers the venue always evicts the session (~1.5s < 10s)
+# before trading-host ever attempts to reconnect, guaranteeing a
+# Renegotiated roll (and the resulting Ambiguous outbound mutations) on
+# every single run. The base stack's own bridge config
+# (docker/real/exchange-simulator.bridge.json, heartbeat/idle=30s) easily
+# outlasts a 10s partition and is what this scenario is meant to exercise.
 
 on:
   workflow_dispatch:
@@ -75,7 +90,7 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              -f docker/docker-compose.real-conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               up -d --build --wait trading-host
 
       - name: Run chaos drill
@@ -100,19 +115,19 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              -f docker/docker-compose.real-conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               logs --no-color trading-host > logs/trading-host.log || true
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              -f docker/docker-compose.real-conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               logs --no-color matching-platform > logs/matching-platform.log || true
           docker compose \
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              -f docker/docker-compose.real-conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               logs --no-color marketdata > logs/marketdata.log || true
 
       - name: Upload container logs (on failure)
@@ -131,5 +146,5 @@ jobs:
               -f docker/docker-compose.yml \
               -f docker/docker-compose.real.yml \
               -f docker/docker-compose.conformance.yml \
-              -f docker/docker-compose.real-conformance.yml \
+              -f docker/docker-compose.chaos.yml \
               down -v || true

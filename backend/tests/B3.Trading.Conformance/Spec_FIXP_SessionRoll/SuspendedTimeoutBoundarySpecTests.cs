@@ -6,8 +6,21 @@ namespace B3.Trading.Conformance.Spec_FIXP_SessionRoll;
 [Trait("Category", "Conformance")]
 public class SuspendedTimeoutBoundarySpecTests
 {
+    // The venue terminates a FIXP session as idle after ~3x the client-
+    // negotiated KeepAliveIntervalMs (see ExchangeOptions.KeepAliveIntervalMs,
+    // default 15_000ms post-#792) of inbound silence during a transport
+    // outage. WithinWindowDisconnect must stay comfortably under that
+    // threshold (session reattaches, no roll); PastWindowDisconnect must
+    // comfortably exceed it (session rolls/renegotiates). PastWindowDisconnect
+    // was 5000ms pre-#792 when KeepAliveIntervalMs defaulted to 1000ms
+    // (~3s threshold) -- it did not actually exercise the venue's separate
+    // SuspendedTimeoutMs (5 min) mechanism the test name references; it
+    // exercised the (far tighter) keepalive-lapse boundary instead. Bumped to
+    // stay correct under the new default. WithinWindowDisconnect is left
+    // unchanged at 1000ms -- it was already comfortably under both the old
+    // and new thresholds.
     private static readonly TimeSpan WithinWindowDisconnect = TimeSpan.FromMilliseconds(1000);
-    private static readonly TimeSpan PastWindowDisconnect = TimeSpan.FromMilliseconds(5000);
+    private static readonly TimeSpan PastWindowDisconnect = TimeSpan.FromMilliseconds(50_000);
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
     public async Task WithinSuspendedTimeout_Reattaches_OrderSurvivesNoStaleFlag()
@@ -52,9 +65,17 @@ public class SuspendedTimeoutBoundarySpecTests
                     SessionRollSpecSupport.OrderTimeout,
                     "probe order to reach Working before transport interruption");
 
-                var disconnectStartedUtc = DateTimeOffset.UtcNow;
                 await using (var detached = await docker.DisconnectMatchingAsync())
                 {
+                    // Start the idle-window clock only once the venue's
+                    // network leg is actually severed -- DisconnectMatchingAsync
+                    // spawns several sequential docker subprocesses before the
+                    // partition takes effect, so timing from before that await
+                    // would understate the real elapsed idle time the venue
+                    // observes and erode the WithinWindowDisconnect/
+                    // PastWindowDisconnect margins against the venue's ~3x
+                    // KeepAliveIntervalMs idle-terminate threshold.
+                    var disconnectStartedUtc = DateTimeOffset.UtcNow;
                     await Task.Delay(TimeSpan.FromMilliseconds(250));
                     await SessionRollSpecSupport.StimulateGatewayWriteAsync(
                         http, userAuth, probeClOrdId);
@@ -127,9 +148,14 @@ public class SuspendedTimeoutBoundarySpecTests
                     SessionRollSpecSupport.OrderTimeout,
                     "probe order to reach Working before transport interruption");
 
-                var disconnectStartedUtc = DateTimeOffset.UtcNow;
                 await using (var detached = await docker.DisconnectMatchingAsync())
                 {
+                    // See comment on the analogous block in
+                    // WithinSuspendedTimeout_Reattaches_OrderSurvivesNoStaleFlag:
+                    // start the idle-window clock only after the network is
+                    // actually severed, not before the docker subprocess calls
+                    // that sever it.
+                    var disconnectStartedUtc = DateTimeOffset.UtcNow;
                     await Task.Delay(TimeSpan.FromMilliseconds(250));
                     await SessionRollSpecSupport.StimulateGatewayWriteAsync(
                         http, userAuth, probeClOrdId);

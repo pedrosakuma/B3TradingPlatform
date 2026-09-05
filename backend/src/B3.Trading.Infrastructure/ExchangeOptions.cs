@@ -99,8 +99,17 @@ public sealed class FirmConfig
     /// <summary>FIX <c>EnteringTrader</c> (max 5 chars). Per-firm default; not threaded per-order in v1.</summary>
     public string EnteringTrader { get; set; } = string.Empty;
 
-    /// <summary>FIXP keep-alive interval requested by the client (ms).</summary>
-    public uint KeepAliveIntervalMs { get; set; } = 1000u;
+    /// <summary>
+    /// FIXP keep-alive interval requested by the client (ms). The venue
+    /// honors this client-negotiated value (not its own bridge default)
+    /// and terminates the session as idle after ~3x this interval of
+    /// silence (see B3MatchingPlatform's FixpSession.Watchdog). The FIXP
+    /// spec floor of 1000ms yields a ~3s terminate threshold — far
+    /// shorter than a realistic reconnect/network-blip window — which
+    /// forces a spurious session roll (Renegotiate) on any brief
+    /// disconnection instead of a clean Reattach. #790.
+    /// </summary>
+    public uint KeepAliveIntervalMs { get; set; } = 15_000u;
 
     /// <summary>Initial reconnect backoff after a failed FIXP attempt.</summary>
     public TimeSpan InitialReconnectDelay { get; set; } = TimeSpan.FromSeconds(1);
