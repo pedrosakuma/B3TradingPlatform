@@ -92,7 +92,13 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                     uint? persistedVerId = null;
                     try
                     {
-                        var snap = stateStore.LoadAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+                        // #773: LoadAsync only reads the (possibly stale) compacted
+                        // snapshot.json and ignores any deltas.jsonl entries appended
+                        // since the last compaction. ReplayAsync applies the snapshot
+                        // plus any pending deltas, so a restart between a settled
+                        // order burst and the next compaction resumes with the venue-
+                        // acknowledged sequence progress instead of a stale SessionVerId.
+                        var snap = stateStore.ReplayAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
                         if (snap is not null) persistedVerId = snap.SessionVerId;
                     }
                     catch (Exception ex)
