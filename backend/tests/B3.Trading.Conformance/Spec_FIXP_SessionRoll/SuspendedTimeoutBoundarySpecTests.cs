@@ -6,8 +6,19 @@ namespace B3.Trading.Conformance.Spec_FIXP_SessionRoll;
 [Trait("Category", "Conformance")]
 public class SuspendedTimeoutBoundarySpecTests
 {
-    private static readonly TimeSpan WithinWindowDisconnect = TimeSpan.FromMilliseconds(1000);
-    private static readonly TimeSpan PastWindowDisconnect = TimeSpan.FromMilliseconds(5000);
+    // The venue terminates a FIXP session as idle after ~3x the client-
+    // negotiated KeepAliveIntervalMs (see ExchangeOptions.KeepAliveIntervalMs,
+    // default 15_000ms post-#792) of inbound silence during a transport
+    // outage. WithinWindowDisconnect must stay comfortably under that
+    // threshold (session reattaches, no roll); PastWindowDisconnect must
+    // comfortably exceed it (session rolls/renegotiates). These values were
+    // 1000ms/5000ms pre-#792 when KeepAliveIntervalMs defaulted to 1000ms
+    // (~3s threshold) -- they did not actually exercise the venue's separate
+    // SuspendedTimeoutMs (5 min) mechanism the test names reference; they
+    // exercised the (far tighter) keepalive-lapse boundary instead. Bumped to
+    // stay correct under the new default.
+    private static readonly TimeSpan WithinWindowDisconnect = TimeSpan.FromMilliseconds(5000);
+    private static readonly TimeSpan PastWindowDisconnect = TimeSpan.FromMilliseconds(50_000);
 
     [ConformanceFact(RequiresAdmin = true, RequiresSandboxMatching = true, RequiresDockerControl = true)]
     public async Task WithinSuspendedTimeout_Reattaches_OrderSurvivesNoStaleFlag()
