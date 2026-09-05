@@ -99,7 +99,13 @@ public static class TradingExchangeGatewayServiceCollectionExtensions
                         // order burst and the next compaction resumes with the venue-
                         // acknowledged sequence progress instead of a stale SessionVerId.
                         var snap = stateStore.ReplayAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
-                        if (snap is not null) persistedVerId = snap.SessionVerId;
+                        // Guard against ReplayAsync synthesizing a phantom
+                        // zero-value snapshot when deltas.jsonl exists but
+                        // snapshot.json doesn't (mirrors the SessionId check
+                        // in EntryPointClient.HydrateFromSnapshotAsync): such
+                        // a snapshot must NOT override firm.SessionVerId with
+                        // SessionVerId=0 below.
+                        if (snap is not null && snap.SessionId == firm.SessionId) persistedVerId = snap.SessionVerId;
                     }
                     catch (Exception ex)
                     {
